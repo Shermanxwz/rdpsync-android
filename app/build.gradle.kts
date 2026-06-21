@@ -5,6 +5,11 @@ plugins {
 }
 
 android {
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
     namespace = "com.rdp.sync"
     compileSdk = 35
 
