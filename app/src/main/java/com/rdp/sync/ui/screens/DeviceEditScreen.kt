@@ -8,7 +8,6 @@ import androidx.compose.material.icons.filled.Domain
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -18,6 +17,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.rdp.sync.data.Device
 
@@ -47,19 +48,13 @@ fun DeviceEditScreen(
                 },
                 actions = {
                     IconButton(onClick = {
-                        if (name.isNotBlank() && host.isNotBlank()) {
-                            onSave(
-                                Device(
-                                    id = device?.id ?: 0,
-                                    name = name,
-                                    host = host,
-                                    port = port,
-                                    username = username,
-                                    password = password,
-                                    domain = domain
-                                )
-                            )
-                        }
+                        val d = Device(
+                            id = device?.id ?: 0,
+                            name = name, host = host, port = port,
+                            username = username, password = password,
+                            domain = domain
+                        )
+                        onSave(d)
                     }) {
                         Icon(Icons.Default.Check, contentDescription = "保存")
                     }
@@ -72,21 +67,20 @@ fun DeviceEditScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
                 label = { Text("设备名称") },
-                leadingIcon = { Icon(Icons.Default.Shield, contentDescription = null) },
+                leadingIcon = { Icon(Icons.Default.Keyboard, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth()
             )
 
             OutlinedTextField(
                 value = host,
                 onValueChange = { host = it },
-                label = { Text("主机地址 (IP 或域名)") },
-                leadingIcon = { Icon(Icons.Default.Keyboard, contentDescription = null) },
+                label = { Text("IP地址") },
                 modifier = Modifier.fillMaxWidth()
             )
 
@@ -94,8 +88,8 @@ fun DeviceEditScreen(
                 value = port.toString(),
                 onValueChange = { port = it.toIntOrNull() ?: 3389 },
                 label = { Text("端口") },
-                modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth()
             )
 
             OutlinedTextField(
@@ -111,6 +105,7 @@ fun DeviceEditScreen(
                 onValueChange = { password = it },
                 label = { Text("密码") },
                 leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                 trailingIcon = {
                     IconButton(onClick = { showPassword = !showPassword }) {
                         Icon(
@@ -119,8 +114,7 @@ fun DeviceEditScreen(
                         )
                     }
                 },
-                modifier = Modifier.fillMaxWidth(),
-                visualTransformation = if (showPassword) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation()
+                modifier = Modifier.fillMaxWidth()
             )
 
             OutlinedTextField(

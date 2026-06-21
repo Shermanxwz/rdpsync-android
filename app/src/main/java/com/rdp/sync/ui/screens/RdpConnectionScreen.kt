@@ -1,6 +1,7 @@
 package com.rdp.sync.ui.screens
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.util.Log
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -11,23 +12,23 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.Power
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.VolumeOff
-import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -37,214 +38,194 @@ private const val TAG = "RdpConnectionScreen"
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RdpConnectionScreen(
+    device: Device,
     onBack: () -> Unit
 ) {
     var status by remember { mutableStateOf("正在连接...") }
-    var isConnecting by remember { mutableStateOf(true) }
-    var connected by remember { mutableStateOf(false) }
+    var isConnected by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }
+    var showKeyboard by remember { mutableStateOf(false) }
+    var pointerMode by remember { mutableStateOf(true) } // true=mouse, false=touch
+    var pointerPos by remember { mutableStateOf(Offset(0f, 0f)) }
 
     val scope = rememberCoroutineScope()
 
     // Connect on launch
-    LaunchedEffect(Unit) {
-        status = "正在连接远程桌面..."
-        isConnecting = true
-        connected = false
+    LaunchedEffect(device.id) {
+        status = "正在连接 ${device.host}:${device.port}..."
+        isConnected = false
 
-        // Simulate connection (replace with actual device connection)
-        delay(1500)
+        val connected = RdpConnector.connectDevice(
+            host = device.host,
+            port = device.port,
+            username = device.username,
+            password = device.password,
+            domain = device.domain
+        )
 
-        try {
-            // Try to connect to a real RDP device
-            val success = RdpConnector.connectDevice(
-                host = "192.168.1.100",
-                port = 3389,
-                username = "Administrator",
-                password = "password",
-                domain = ""
-            )
-            if (success) {
-                status = "已连接"
-                connected = true
-            } else {
-                status = "连接失败，请检查设备信息"
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Connection failed", e)
-            status = "连接失败: ${e.message}"
+        if (connected) {
+            status = "已连接"
+            isConnected = true
+        } else {
+            status = "连接失败"
         }
-
-        isConnecting = false
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("远程桌面连接") },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { /* Share */ }) {
-                        Icon(Icons.Default.Share, contentDescription = "分享")
-                    }
-                    IconButton(onClick = { /* Keyboard */ }) {
-                        Icon(Icons.Default.Keyboard, contentDescription = "键盘")
-                    }
-                    IconButton(onClick = { /* Volume */ }) {
-                        Icon(Icons.Default.VolumeOff, contentDescription = "音量")
-                    }
-                    IconButton(onClick = { /* Power */ }) {
-                        Icon(Icons.Default.Power, contentDescription = "关机")
-                    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Top bar
+        TopAppBar(
+            title = { Text("远程桌面 - ${device.name}") },
+            navigationIcon = {
+                IconButton(onClick = {
+                    RdpConnector.disconnect()
+                    onBack()
+                }) {
+                    Icon(Icons.Default.ArrowBack, contentDescription = "断开")
                 }
+            },
+            actions = {
+                // Status indicator
+                Text(status, style = MaterialTheme.typography.bodySmall)
+            },
+            colors = TopAppBarDefaults.topAppBarColors(
+                containerColor = if (isConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
             )
-        },
-        bottomBar = {
-            if (showControls && !isConnecting) {
-                Surface(tonalElevation = 8.dp) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(onClick = { /* Left click */ }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "左键")
-                        }
-                        IconButton(onClick = { /* Middle click */ }) {
-                            Icon(Icons.Default.Wifi, contentDescription = "中键")
-                        }
-                        IconButton(onClick = { /* Right click */ }) {
-                            Icon(Icons.Default.Stop, contentDescription = "右键")
-                        }
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        // RDP canvas area
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            contentAlignment = Alignment.Center
+        ) {
+            if (isConnected) {
+                RdpCanvas(
+                    modifier = Modifier.fillMaxSize(),
+                    pointerPos = pointerPos,
+                    onPointerMove = { x, y ->
+                        RdpConnector.sendPointerEvent(x, y, 0)
+                    },
+                    onPointerDown = { x, y ->
+                        RdpConnector.sendPointerEvent(x, y, 1)
+                    },
+                    onPointerUp = { x, y ->
+                        RdpConnector.sendPointerEvent(x, y, 0)
                     }
+                )
+            } else {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text(status, style = MaterialTheme.typography.bodyLarge)
                 }
             }
         }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .background(Color.Black)
-        ) {
-            when {
-                isConnecting -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator()
-                        Spacer(modifier = Modifier.height(16.dp))
-                        Text(status, color = Color.White)
-                    }
-                }
 
-                connected -> {
-                    // Remote desktop rendering area
-                    RdpSurface(modifier = Modifier.fillMaxSize())
-
-                    // Status overlay
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .padding(16.dp)
-                    ) {
-                        Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = Color.Black.copy(alpha = 0.6f)
-                        ) {
-                            Text(
-                                text = "已连接 | 1280x720",
-                                color = Color.White,
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                            )
-                        }
-                    }
-                }
-
-                else -> {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(32.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
-                    ) {
-                        Text(
-                            "连接失败",
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.error
+        // Bottom toolbar
+        if (showControls) {
+            Surface(tonalElevation = 8.dp) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { pointerMode = !pointerMode }) {
+                        Icon(
+                            if (pointerMode) Icons.Default.Mouse else Icons.Default.Keyboard,
+                            contentDescription = if (pointerMode) "键盘模式" else "鼠标模式"
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(modifier = Modifier.height(24.dp))
-                        Button(onClick = onBack) {
-                            Text("返回")
-                        }
+                    }
+                    IconButton(onClick = {
+                        // Send Ctrl+Alt+Del
+                        RdpConnector.sendKeyEvent(0x1D, 1) // Ctrl
+                        RdpConnector.sendKeyEvent(0x38, 1) // Alt
+                        RdpConnector.sendKeyEvent(0x53, 1) // Del
+                        RdpConnector.sendKeyEvent(0x53, 0) // Del
+                        RdpConnector.sendKeyEvent(0x38, 0) // Alt
+                        RdpConnector.sendKeyEvent(0x1D, 0) // Ctrl
+                    }) {
+                        Icon(Icons.Default.Share, contentDescription = "Ctrl+Alt+Del")
+                    }
+                    IconButton(onClick = {
+                        RdpConnector.disconnect()
+                        onBack()
+                    }) {
+                        Icon(Icons.Default.Stop, contentDescription = "断开")
                     }
                 }
-            }
-
-            // Toggle controls
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 16.dp)
-                    .clickable { showControls = !showControls }
-                    .size(32.dp)
-            ) {
-                Icon(
-                    if (showControls) Icons.Default.ArrowBack else Icons.Default.Keyboard,
-                    contentDescription = "切换控制栏",
-                    tint = Color.White.copy(alpha = 0.5f),
-                    modifier = Modifier.size(20.dp)
-                )
             }
         }
     }
 }
 
 @Composable
-fun RdpSurface(modifier: Modifier = Modifier) {
-    val bitmap = remember { Bitmap.createBitmap(1280, 720, Bitmap.Config.ARGB_8888) }
+fun RdpCanvas(
+    modifier: Modifier = Modifier,
+    pointerPos: Offset,
+    onPointerMove: (Int, Int) -> Unit,
+    onPointerDown: (Int, Int) -> Unit,
+    onPointerUp: (Int, Int) -> Unit
+) {
+    val context = LocalContext.current
+    var bitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    // Render loop
+    LaunchedEffect(Unit) {
+        while (true) {
+            val bytes = RdpConnector.getSurfaceBytes()
+            if (bytes > 0) {
+                // Convert bytes to bitmap (BGR_8888 format)
+                val width = RdpConnector.getWidth()
+                val height = RdpConnector.getHeight()
+                if (width > 0 && height > 0) {
+                    // TODO: Actually read the surface bytes from native
+                    bitmap = ImageBitmap(width, height)
+                }
+            }
+            delay(33) // ~30 FPS
+        }
+    }
 
     Canvas(
         modifier = modifier
             .pointerInput(Unit) {
-                detectTapGestures(
-                    onTap = { offset ->
-                        Log.d(TAG, "Tap at $offset")
+                detectDragGestures(
+                    onDragStart = { offset ->
+                        val x = offset.x.toInt()
+                        val y = offset.y.toInt()
+                        onPointerDown(x, y)
                     },
-                    onLongPress = { offset ->
-                        Log.d(TAG, "Long press at $offset")
+                    onDrag = { change, dragAmount ->
+                        val x = change.position.x.toInt()
+                        val y = change.position.y.toInt()
+                        onPointerMove(x, y)
+                    },
+                    onDragEnd = {
+                        val x = pointerPos.x.toInt()
+                        val y = pointerPos.y.toInt()
+                        onPointerUp(x, y)
                     }
                 )
             }
             .pointerInput(Unit) {
-                detectDragGestures(
-                    onDragEnd = {
-                        Log.d(TAG, "Drag ended")
+                detectTapGestures(
+                    onTap = { tapOffset ->
+                        val x = tapOffset.x.toInt()
+                        val y = tapOffset.y.toInt()
+                        onPointerDown(x, y)
+                        // Simple tap - release immediately
+                        onPointerUp(x, y)
                     }
-                ) { _, _ ->
-                    Log.d(TAG, "Drag")
-                }
+                )
             }
     ) {
-        // Draw the bitmap
-        val width = size.width.toInt()
-        val height = size.height.toInt()
-        translate(width / 2f, height / 2f) {
-            drawImage(bitmap.asImageBitmap(), Offset(-width / 2f, -height / 2f))
+        bitmap?.let {
+            drawImage(it, topLeft = Offset(0f, 0f))
         }
     }
 }

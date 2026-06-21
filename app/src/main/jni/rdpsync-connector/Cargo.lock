@@ -1087,44 +1087,19 @@ dependencies = [
 name = "ironrdp"
 version = "0.16.0"
 dependencies = [
- "ironrdp-cliprdr",
  "ironrdp-connector",
  "ironrdp-core",
  "ironrdp-displaycontrol",
  "ironrdp-dvc",
- "ironrdp-graphics",
- "ironrdp-input",
  "ironrdp-pdu",
  "ironrdp-rdpdr",
  "ironrdp-rdpsnd",
  "ironrdp-session",
- "ironrdp-svc",
 ]
 
 [[package]]
 name = "ironrdp-bulk"
 version = "0.1.1"
-
-[[package]]
-name = "ironrdp-cliprdr"
-version = "0.6.0"
-dependencies = [
- "bitflags 2.13.0",
- "ironrdp-core",
- "ironrdp-pdu",
- "ironrdp-svc",
- "tracing",
-]
-
-[[package]]
-name = "ironrdp-cliprdr-native"
-version = "0.6.0"
-dependencies = [
- "ironrdp-cliprdr",
- "ironrdp-core",
- "tracing",
- "windows",
-]
 
 [[package]]
 name = "ironrdp-connector"
@@ -1188,15 +1163,6 @@ dependencies = [
  "num-derive",
  "num-traits",
  "yuv",
-]
-
-[[package]]
-name = "ironrdp-input"
-version = "0.6.0"
-dependencies = [
- "bitvec",
- "ironrdp-pdu",
- "smallvec",
 ]
 
 [[package]]
@@ -1953,8 +1919,7 @@ name = "rdpsync-connector"
 version = "0.1.0"
 dependencies = [
  "ironrdp",
- "ironrdp-cliprdr-native",
- "ironrdp-core",
+ "ironrdp-pdu",
  "jni",
 ]
 

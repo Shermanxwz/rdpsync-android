@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use ironrdp::connector::ClientConnector;
+use ironrdp::connector::Sequence as _;
 use ironrdp::connector::Config;
 use ironrdp::connector::Credentials;
 use ironrdp::connector::DesktopSize;
@@ -8,6 +9,9 @@ use ironrdp::connector::BitmapConfig;
 use ironrdp::rdpdr::Rdpdr;
 use ironrdp::rdpdr::NoopRdpdrBackend;
 use ironrdp::rdpsnd::client::{NoopRdpsndBackend, Rdpsnd};
+use ironrdp::pdu::rdp::capability_sets::MajorPlatformType;
+use ironrdp::pdu::rdp::client_info::PerformanceFlags;
+use ironrdp::pdu::gcc;
 use jni::objects::JString;
 
 struct RdpSession {
@@ -59,6 +63,7 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_connect(
             .into_owned();
 
         let port = port as u16;
+
         let addr = format!("{}:{}", host_str, port);
         let client_addr = addr
             .parse::<std::net::SocketAddr>()
@@ -89,7 +94,7 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_connect(
             domain: Some(domain_str),
             client_build: 0,
             client_name: "rdpsync".to_string(),
-            keyboard_type: ironrdp::pdu::gcc::KeyboardType::IbmEnhanced,
+            keyboard_type: gcc::KeyboardType::IbmEnhanced,
             keyboard_subtype: 0,
             keyboard_functional_keys_count: 0,
             keyboard_layout: 0x00000409,
@@ -99,15 +104,15 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_connect(
             client_dir: "".to_string(),
             alternate_shell: "".to_string(),
             work_dir: "".to_string(),
-            platform: ironrdp::pdu::rdp::capability_sets::MajorPlatformType::WINDOWS,
+            platform: MajorPlatformType::WINDOWS,
             hardware_id: None,
             request_data: None,
             autologon: false,
             enable_audio_playback: true,
-            performance_flags: ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_WALLPAPER
-                | ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_FULLWINDOWDRAG
-                | ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_MENUANIMATIONS
-                | ironrdp::pdu::rdp::client_info::PerformanceFlags::DISABLE_THEMING,
+            performance_flags: PerformanceFlags::DISABLE_WALLPAPER
+                | PerformanceFlags::DISABLE_FULLWINDOWDRAG
+                | PerformanceFlags::DISABLE_MENUANIMATIONS
+                | PerformanceFlags::DISABLE_THEMING,
             license_cache: None,
             timezone_info: ironrdp::pdu::rdp::client_info::TimezoneInfo::default(),
             compression_type: None,
@@ -116,11 +121,8 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_connect(
             multitransport_flags: None,
         };
 
-        let _connector = ClientConnector::new(config, client_addr)
-            .with_static_channel(Rdpsnd::new(Box::new(NoopRdpsndBackend {})))
-            .with_static_channel(
-                Rdpdr::new(Box::new(NoopRdpdrBackend {}), "rdpsync".to_string()).with_smartcard(0),
-            );
+        let connector = ClientConnector::new(config, client_addr);
+        let _ = connector;
 
         let sess = RdpSession {
             width: 1280,
@@ -174,8 +176,8 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_get_height(
 pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_get_surface_bytes(
     _env: *mut jni::sys::JNIEnv,
     _this: jni::sys::jobject,
-    output_ptr: jni::sys::jlong,
-    output_size: jni::sys::jlong,
+    _output_ptr: jni::sys::jlong,
+    _output_size: jni::sys::jlong,
 ) -> jni::sys::jint {
     0
 }

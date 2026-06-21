@@ -1,72 +1,54 @@
 package com.rdp.sync.ui.navigation
 
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.rdp.sync.data.Device
+import androidx.navigation.navArgument
+import com.rdp.sync.viewmodel.DeviceViewModel
 import com.rdp.sync.ui.screens.DeviceDetailScreen
 import com.rdp.sync.ui.screens.DeviceEditScreen
 import com.rdp.sync.ui.screens.DeviceListScreen
 import com.rdp.sync.ui.screens.RdpConnectionScreen
 
-sealed class Screen(val route: String) {
-    object DeviceList : Screen("device_list")
-    object DeviceAdd : Screen("device_add")
-    object DeviceEdit : Screen("device_edit/{deviceId}") {
-        fun createRoute(deviceId: Long) = "device_edit/$deviceId"
-    }
-    object DeviceDetail : Screen("device_detail/{deviceId}") {
-        fun createRoute(deviceId: Long) = "device_detail/$deviceId"
-    }
-    object RdpConnection : Screen("rdp_connection")
-}
-
 @Composable
-fun AppNavigation(
-    modifier: Modifier = Modifier,
-    navController: NavHostController = rememberNavController(),
-    onDeviceClick: (Long) -> Unit = {},
-    onAddDevice: () -> Unit = {},
-    onEditDevice: (Long) -> Unit = {},
-    onRdpConnected: () -> Unit = {}
-) {
+fun AppNavigation() {
+    val navController = rememberNavController()
+    val viewModel: DeviceViewModel = viewModel()
+
     NavHost(
         navController = navController,
-        startDestination = Screen.DeviceList.route,
-        modifier = modifier
+        startDestination = "device_list"
     ) {
-        composable(Screen.DeviceList.route) {
+        composable("device_list") {
             DeviceListScreen(
-                onAddDevice = onAddDevice,
-                onDeviceClick = { deviceId ->
-                    navController.navigate(Screen.DeviceDetail.createRoute(deviceId))
+                devices = viewModel.uiState.value.devices,
+                onAddDevice = {
+                    navController.navigate("device_edit")
                 },
-                onSyncClick = {
-                    // Trigger sync
+                onDeviceClick = { deviceId ->
+                    navController.navigate("device_detail/$deviceId")
+                },
+                onSync = {
+                    viewModel.syncWebdav()
                 }
             )
         }
 
-        composable(Screen.DeviceAdd.route) {
+        composable("device_edit") {
             DeviceEditScreen(
                 device = null,
                 onSave = { device ->
-                    // Handled by parent
-                },
-                onCancel = {
-                    navController.popBackStack()
-                }
-            )
-        }
-
-        composable(Screen.DeviceEdit.route) { backStackEntry ->
-            val deviceId = backStackEntry.arguments?.getString("deviceId")?.toLongOrNull()
-            DeviceEditScreen(
-                device = deviceId?.let { /* fetch device */ null },
-                onSave = { device ->
+                    viewModel.addDevice(
+                        name = device.name,
+                        host = device.host,
+                        port = device.port,
+                        username = device.username,
+                        password = device.password,
+                        domain = device.domain
+                    )
                     navController.popBackStack()
                 },
                 onCancel = {
@@ -75,22 +57,66 @@ fun AppNavigation(
             )
         }
 
-        composable(Screen.DeviceDetail.route) { backStackEntry ->
-            val deviceId = backStackEntry.arguments?.getString("deviceId")?.toLongOrNull()
-            DeviceDetailScreen(
-                deviceId = deviceId ?: return@composable,
-                onBack = { navController.popBackStack() },
-                onEdit = { deviceId?.let { onEditDevice(it) } },
-                onConnect = {
-                    navController.navigate(Screen.RdpConnection.route)
-                }
-            )
+        composable(
+            route = "device_edit/{deviceId}",
+            arguments = listOf(navArgument("deviceId") { defaultValue = 0L })
+        ) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getLong("deviceId") ?: 0L
+            val device = viewModel.uiState.value.devices.find { it.id == deviceId }
+            if (device != null) {
+                DeviceEditScreen(
+                    device = device,
+                    onSave = { updatedDevice ->
+                        viewModel.updateDevice(updatedDevice)
+                        navController.popBackStack()
+                    },
+                    onCancel = {
+                        navController.popBackStack()
+                    }
+                )
+            } else {
+                navController.popBackStack()
+            }
         }
 
-        composable(Screen.RdpConnection.route) {
-            RdpConnectionScreen(
-                onBack = onRdpConnected
-            )
+        composable(
+            route = "device_detail/{deviceId}",
+            arguments = listOf(navArgument("deviceId") { defaultValue = 0L })
+        ) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getLong("deviceId") ?: 0L
+            val device = viewModel.uiState.value.devices.find { it.id == deviceId }
+            if (device != null) {
+                DeviceDetailScreen(
+                    device = device,
+                    onBack = { navController.popBackStack() },
+                    onEdit = {
+                        navController.navigate("device_edit/${device.id}")
+                    },
+                    onConnect = {
+                        navController.navigate("rdp_connection/${device.id}")
+                    },
+                    onDelete = {
+                        viewModel.deleteDevice(device)
+                        navController.popBackStack()
+                    }
+                )
+            } else {
+                navController.popBackStack()
+            }
+        }
+
+        composable(
+            route = "rdp_connection/{deviceId}",
+            arguments = listOf(navArgument("deviceId") { defaultValue = 0L })
+        ) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getLong("deviceId") ?: 0L
+            val device = viewModel.uiState.value.devices.find { it.id == deviceId }
+            if (device != null) {
+                RdpConnectionScreen(
+                    device = device,
+                    onBack = { navController.popBackStack() }
+                )
+            }
         }
     }
 }

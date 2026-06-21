@@ -38,4 +38,49 @@ object RdpConnector {
             -1
         }
     }
+
+    fun getSurfaceBytes(outputPtr: Long = 0L, outputSize: Long = 0L): Int {
+        return try {
+            nativeGetSurfaceBytes(outputPtr, outputSize)
+        } catch (e: Exception) {
+            Log.e(TAG, "getSurfaceBytes failed", e)
+            0
+        }
+    }
+
+    fun getWidth(): Int {
+        return try {
+            nativeGetWidth()
+        } catch (e: Exception) {
+            Log.e(TAG, "getWidth failed", e)
+            1280
+        }
+    }
+
+    fun getHeight(): Int {
+        return try {
+            nativeGetHeight()
+        } catch (e: Exception) {
+            Log.e(TAG, "getHeight failed", e)
+            720
+        }
+    }
+
+    fun sendPointerEvent(x: Int, y: Int, button: Int): Int {
+        return try {
+            nativeSendPointerEvent(x, y, button)
+        } catch (e: Exception) {
+            Log.e(TAG, "sendPointerEvent failed", e)
+            -1
+        }
+    }
+
+    fun sendKeyEvent(keyCode: Int, down: Int): Int {
+        return try {
+            nativeSendKeyEvent(keyCode, down)
+        } catch (e: Exception) {
+            Log.e(TAG, "sendKeyEvent failed", e)
+            -1
+        }
+    }
 }
