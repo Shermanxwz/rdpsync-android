@@ -2,32 +2,31 @@ package com.rdp.sync.ui.screens
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Hd
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Power
+import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.Wifi
 import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.rdp.sync.data.Device
-import com.rdp.sync.viewmodel.DeviceViewModel
 
-/**
- * 设备详情页面
- * 显示设备连接信息，提供连接/编辑/删除操作
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceDetailScreen(
     deviceId: Long,
     onBack: () -> Unit,
     onEdit: () -> Unit,
-    viewModel: DeviceViewModel = viewModel()
+    onConnect: () -> Unit
 ) {
-    val devices by viewModel.devices.collectAsState()
-    val device = devices.find { it.id == deviceId }
-    
     Scaffold(
         topBar = {
             TopAppBar(
@@ -41,78 +40,92 @@ fun DeviceDetailScreen(
                     IconButton(onClick = onEdit) {
                         Icon(Icons.Default.Edit, contentDescription = "编辑")
                     }
+                    IconButton(onClick = { /* Delete */ }) {
+                        Icon(Icons.Default.Delete, contentDescription = "删除")
+                    }
                 }
             )
         }
-    ) { padding ->
-        device?.let { dev ->
-            Column(
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            // Connect button
+            Button(
+                onClick = onConnect,
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding)
-                    .padding(16.dp),
-                horizontalAlignment = Alignment.Start
+                    .fillMaxWidth()
+                    .height(56.dp),
+                shape = MaterialTheme.shapes.large
             ) {
-                // Device info
-                DeviceInfoCard(dev)
-                Spacer(modifier = Modifier.height(16.dp))
-                ConnectButton(dev)
+                Icon(Icons.Default.Power, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("连接远程桌面", style = MaterialTheme.typography.titleMedium)
             }
-        } ?: run {
-            Text("Device not found", modifier = Modifier.padding(16.dp))
+
+            Spacer(modifier = Modifier.height(32.dp))
+
+            // Device info
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("设备信息", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    DetailRow(Icons.Default.Wifi, "主机", "192.168.1.100")
+                    DetailRow(Icons.Default.Keyboard, "端口", "3389")
+                    DetailRow(Icons.Default.Person, "用户名", "Administrator")
+                    DetailRow(Icons.Default.Lock, "域", "WORKGROUP")
+                    DetailRow(Icons.Default.Hd, "分辨率", "1280x720")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Sync info
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("同步状态", style = MaterialTheme.typography.titleMedium)
+                    Spacer(modifier = Modifier.height(16.dp))
+                    DetailRow(Icons.Default.Share, "同步方式", "WebDAV")
+                    DetailRow(Icons.Default.Share, "WebDAV URL", "https://115.com/rdpsync")
+                }
+            }
         }
     }
 }
 
 @Composable
-private fun DeviceInfoCard(device: Device) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            InfoRow("名称", device.name)
-            InfoRow("地址", "${device.host}:${device.port}")
-            InfoRow("用户名", device.username)
-            InfoRow("域", if (device.domain.isNotEmpty()) device.domain else "无")
-            InfoRow("颜色深度", "${device.colorDepth}-bit")
-            InfoRow("全屏", if (device.fullscreen) "是" else "否")
-            InfoRow("剪贴板", if (device.clipboard) "是" else "否")
-        }
-    }
-}
-
-@Composable
-private fun InfoRow(label: String, value: String) {
+fun DetailRow(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, value: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+        Icon(
+            icon,
+            contentDescription = null,
+            modifier = Modifier.size(20.dp),
+            tint = MaterialTheme.colorScheme.primary
         )
-        Text(
-            text = value,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-@Composable
-private fun ConnectButton(device: Device) {
-    Button(
-        onClick = { /* TODO: Connect to RDP */ },
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Icon(Icons.Default.PlayArrow, contentDescription = null)
-        Spacer(modifier = Modifier.width(8.dp))
-        Text("连接远程桌面")
+        Spacer(modifier = Modifier.width(12.dp))
+        Column {
+            Text(label, style = MaterialTheme.typography.bodySmall)
+            Text(
+                value,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }

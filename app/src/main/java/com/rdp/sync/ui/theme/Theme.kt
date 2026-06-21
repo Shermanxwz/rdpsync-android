@@ -12,29 +12,15 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = Color(0xFF1E88E5),
-    secondary = Color(0xFF00BCD4),
-    tertiary = Color(0xFF9C27B0),
-    background = Color(0xFF121212),
-    surface = Color(0xFF1E1E1E),
-    onPrimary = Color.White,
-    onSecondary = Color.Black,
-    onTertiary = Color.White,
-    onBackground = Color.White,
-    onSurface = Color.White,
+    primary = Color(0xFFBB86FC),
+    secondary = Color(0xFF03DAC6),
+    tertiary = Color(0xFF3700B3)
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = Color(0xFF1E88E5),
-    secondary = Color(0xFF00BCD4),
-    tertiary = Color(0xFF9C27B0),
-    background = Color(0xFFFFFFFF),
-    surface = Color(0xFFF5F5F5),
-    onPrimary = Color.White,
-    onSecondary = Color.Black,
-    onTertiary = Color.White,
-    onBackground = Color.Black,
-    onSurface = Color.Black,
+    primary = Color(0xFF6200EE),
+    secondary = Color(0xFF03DAC6),
+    tertiary = Color(0xFFBB86FC)
 )
 
 @Composable
@@ -51,7 +37,7 @@ fun RdpSyncTheme(
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
     }
-    
+
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,

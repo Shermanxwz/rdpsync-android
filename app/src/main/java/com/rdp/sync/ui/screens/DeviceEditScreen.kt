@@ -2,167 +2,134 @@ package com.rdp.sync.ui.screens
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Domain
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Shield
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.rdp.sync.data.Device
-import com.rdp.sync.viewmodel.DeviceViewModel
 
-/**
- * 设备编辑页面
- * 创建或编辑 RDP 设备连接配置
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceEditScreen(
-    deviceId: Long? = null,
-    onBack: () -> Unit,
-    viewModel: DeviceViewModel = viewModel()
+    device: Device?,
+    onSave: (Device) -> Unit,
+    onCancel: () -> Unit
 ) {
-    var name by remember { mutableStateOf("") }
-    var host by remember { mutableStateOf("") }
-    var port by remember { mutableIntStateOf(3389) }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var domain by remember { mutableStateOf("") }
-    var fullscreen by remember { mutableStateOf(false) }
-    var clipboard by remember { mutableStateOf(true) }
-    var sound by remember { mutableStateOf(true) }
-    
-    // TODO: Load existing device if editing
-    
+    var name by remember { mutableStateOf(device?.name ?: "") }
+    var host by remember { mutableStateOf(device?.host ?: "") }
+    var port by remember { mutableIntStateOf(device?.port ?: 3389) }
+    var username by remember { mutableStateOf(device?.username ?: "") }
+    var password by remember { mutableStateOf(device?.password ?: "") }
+    var domain by remember { mutableStateOf(device?.domain ?: "") }
+    var showPassword by remember { mutableStateOf(false) }
+
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (deviceId == null) "添加设备" else "编辑设备") },
+                title = { Text(if (device != null) "编辑设备" else "添加设备") },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onCancel) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                    }
+                },
+                actions = {
+                    IconButton(onClick = {
+                        if (name.isNotBlank() && host.isNotBlank()) {
+                            onSave(
+                                Device(
+                                    id = device?.id ?: 0,
+                                    name = name,
+                                    host = host,
+                                    port = port,
+                                    username = username,
+                                    password = password,
+                                    domain = domain
+                                )
+                            )
+                        }
+                    }) {
+                        Icon(Icons.Default.Check, contentDescription = "保存")
                     }
                 }
             )
         }
-    ) { padding ->
+    ) { paddingValues ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(padding)
+                .padding(paddingValues)
                 .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+            verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
                 label = { Text("设备名称") },
+                leadingIcon = { Icon(Icons.Default.Shield, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth()
             )
-            
+
             OutlinedTextField(
                 value = host,
                 onValueChange = { host = it },
-                label = { Text("IP 地址 / 域名") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                label = { Text("主机地址 (IP 或域名)") },
+                leadingIcon = { Icon(Icons.Default.Keyboard, contentDescription = null) },
+                modifier = Modifier.fillMaxWidth()
             )
-            
+
             OutlinedTextField(
                 value = port.toString(),
-                onValueChange = { 
-                    port = it.toIntOrNull() ?: 3389
-                },
+                onValueChange = { port = it.toIntOrNull() ?: 3389 },
                 label = { Text("端口") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
             )
-            
+
             OutlinedTextField(
                 value = username,
                 onValueChange = { username = it },
                 label = { Text("用户名") },
+                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth()
             )
-            
+
             OutlinedTextField(
                 value = password,
                 onValueChange = { password = it },
                 label = { Text("密码") },
+                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
+                trailingIcon = {
+                    IconButton(onClick = { showPassword = !showPassword }) {
+                        Icon(
+                            if (showPassword) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                            contentDescription = if (showPassword) "隐藏密码" else "显示密码"
+                        )
+                    }
+                },
                 modifier = Modifier.fillMaxWidth(),
-                visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+                visualTransformation = if (showPassword) androidx.compose.ui.text.input.VisualTransformation.None else androidx.compose.ui.text.input.PasswordVisualTransformation()
             )
-            
+
             OutlinedTextField(
                 value = domain,
                 onValueChange = { domain = it },
                 label = { Text("域 (可选)") },
+                leadingIcon = { Icon(Icons.Default.Domain, contentDescription = null) },
                 modifier = Modifier.fillMaxWidth()
             )
-            
-            Spacer(modifier = Modifier.height(16.dp))
-            
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("全屏模式")
-                Switch(
-                    checked = fullscreen,
-                    onCheckedChange = { fullscreen = it }
-                )
-            }
-            
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("剪贴板同步")
-                Switch(
-                    checked = clipboard,
-                    onCheckedChange = { clipboard = it }
-                )
-            }
-            
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("声音")
-                Switch(
-                    checked = sound,
-                    onCheckedChange = { sound = it }
-                )
-            }
-            
-            Spacer(modifier = Modifier.weight(1f))
-            
-            Button(
-                onClick = {
-                    val device = Device(
-                        id = deviceId ?: 0,
-                        name = name,
-                        host = host,
-                        port = port,
-                        username = username,
-                        password = password,
-                        domain = domain,
-                        fullscreen = fullscreen,
-                        clipboard = clipboard,
-                        sound = sound
-                    )
-                    if (deviceId == null) {
-                        viewModel.addDevice(device)
-                    } else {
-                        viewModel.updateDevice(device)
-                    }
-                    onBack()
-                },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("保存")
-            }
         }
     }
 }

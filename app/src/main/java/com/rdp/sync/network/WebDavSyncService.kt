@@ -1,88 +1,73 @@
 package com.rdp.sync.network
 
-import okhttp3.Call
-import okhttp3.EventListener
+import android.util.Log
+import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
+import okio.ByteString
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.IOException
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.Proxy
 
-/**
- * WebDAV 同步服务
- * 通过 WebDAV 协议同步设备列表（JSON 格式）
- */
-class WebDavSyncService(
-    private val webDavUrl: String,
-    private val username: String,
-    private val password: String
-) {
-    
-    companion object {
-        const val SYNC_FILE = "rdpsync_devices.json"
-        private val JSON_MEDIA_TYPE = "application/json".toMediaType()
-    }
-    
+object WebDavSyncService {
+    private const val TAG = "WebDavSyncService"
+    private const val MEDIA_TYPE = "application/json"
+
     private val client = OkHttpClient.Builder()
-        .eventListener(object : EventListener() {})
+        .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
         .build()
-    
-    private fun basicAuthCredentials(): String {
-        return android.util.Base64.encodeToString(
-            "${username}:${password}".toByteArray(), 
-            android.util.Base64.NO_WRAP
-        )
-    }
-    
-    @Throws(IOException::class)
-    fun pullDevices(): String {
+
+    fun syncToCloud(devices: JSONArray, baseUrl: String, username: String, password: String): Result<String> {
+        val body = RequestBody.create(MEDIA_TYPE.toMediaType(), devices.toString())
+
         val request = Request.Builder()
-            .url("$webDavUrl/$SYNC_FILE")
-            .get()
-            .header("Authorization", "Basic ${basicAuthCredentials()}")
+            .url("$baseUrl/rdpsync_devices.json")
+            .put(body)
+            .header("Authorization", basicAuth(username, password))
             .build()
-            
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("WebDAV PULL failed: ${response.code}")
-            }
-            return response.body?.string() ?: "[]"
-        }
-    }
-    
-    @Throws(IOException::class)
-    fun pushDevices(devicesJson: String) {
-        val requestBody = devicesJson.toRequestBody(JSON_MEDIA_TYPE)
-        val request = Request.Builder()
-            .url("$webDavUrl/$SYNC_FILE")
-            .put(requestBody)
-            .header("Authorization", "Basic ${basicAuthCredentials()}")
-            .build()
-            
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("WebDAV PUSH failed: ${response.code}")
-            }
-        }
-    }
-    
-    fun isAvailable(): Boolean {
+
         return try {
-            val request = Request.Builder()
-                .url(webDavUrl)
-                .method("PROPFIND", null)
-                .header("Authorization", "Basic ${basicAuthCredentials()}")
-                .build()
-                
-            client.newCall(request).execute().use { response ->
-                response.code == 207
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                Result.success("Synced ${devices.length()} devices")
+            } else {
+                Result.failure(IOException("HTTP ${response.code}"))
             }
         } catch (e: Exception) {
-            false
+            Log.e(TAG, "Sync to cloud failed", e)
+            Result.failure(e)
         }
+    }
+
+    fun syncFromCloud(baseUrl: String, username: String, password: String): Result<List<JSONObject>> {
+        val request = Request.Builder()
+            .url("$baseUrl/rdpsync_devices.json")
+            .get()
+            .header("Authorization", basicAuth(username, password))
+            .build()
+
+        return try {
+            val response = client.newCall(request).execute()
+            if (response.isSuccessful) {
+                val jsonStr = response.body?.string() ?: "[]"
+                val array = JSONArray(jsonStr)
+                val devices = mutableListOf<JSONObject>()
+                for (i in 0 until array.length()) {
+                    devices.add(array.getJSONObject(i))
+                }
+                Result.success(devices)
+            } else {
+                Result.failure(IOException("HTTP ${response.code}"))
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Sync from cloud failed", e)
+            Result.failure(e)
+        }
+    }
+
+    private fun basicAuth(username: String, password: String): String {
+        val credentials = "$username:$password"
+        val bytes = credentials.toByteArray(Charsets.UTF_8)
+        return "Basic " + java.util.Base64.getEncoder().encodeToString(bytes)
     }
 }

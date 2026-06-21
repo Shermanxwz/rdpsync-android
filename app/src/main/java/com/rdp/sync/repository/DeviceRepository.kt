@@ -1,33 +1,33 @@
 package com.rdp.sync.repository
 
 import com.rdp.sync.data.Device
-import com.rdp.sync.database.DeviceDao
+import com.rdp.sync.database.RdpSyncDatabase
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.withContext
 
-/**
- * 设备数据仓库
- * 管理设备数据的本地存储和网络同步
- */
-class DeviceRepository(
-    private val deviceDao: DeviceDao
-) {
-    fun getAllDevices(): Flow<List<Device>> {
-        return deviceDao.getAllDevices()
+class DeviceRepository(private val database: RdpSyncDatabase) {
+    private val dao = database.deviceDao()
+
+    fun getAllDevices(): Flow<List<Device>> = flow {
+        emit(dao.getAllDevices())
     }
-    
-    suspend fun insertDevice(device: Device) {
-        deviceDao.insert(device)
-    }
-    
-    suspend fun updateDevice(device: Device) {
-        deviceDao.update(device)
-    }
-    
-    suspend fun deleteDevice(device: Device) {
-        deviceDao.delete(device)
-    }
-    
-    suspend fun getDeviceById(id: String): Device? {
-        return deviceDao.getDeviceById(id)
+
+    suspend fun getDeviceById(id: Long): Device? = dao.getDeviceById(id)
+
+    suspend fun insertDevice(device: Device): Long =
+        withContext(Dispatchers.IO) { dao.insertDevice(device) }
+
+    suspend fun updateDevice(device: Device) =
+        withContext(Dispatchers.IO) { dao.updateDevice(device) }
+
+    suspend fun deleteDevice(device: Device) =
+        withContext(Dispatchers.IO) { dao.deleteDevice(device) }
+
+    companion object {
+        fun create(database: RdpSyncDatabase): DeviceRepository {
+            return DeviceRepository(database)
+        }
     }
 }

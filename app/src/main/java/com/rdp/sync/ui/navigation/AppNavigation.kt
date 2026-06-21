@@ -1,79 +1,95 @@
 package com.rdp.sync.ui.navigation
 
 import androidx.compose.runtime.Composable
-import androidx.navigation.NavType
+import androidx.compose.ui.Modifier
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import androidx.navigation.navArgument
+import com.rdp.sync.data.Device
 import com.rdp.sync.ui.screens.DeviceDetailScreen
 import com.rdp.sync.ui.screens.DeviceEditScreen
 import com.rdp.sync.ui.screens.DeviceListScreen
+import com.rdp.sync.ui.screens.RdpConnectionScreen
 
-/**
- * 导航路由
- */
-object NavRoutes {
-    const val DEVICE_LIST = "device_list"
-    const val DEVICE_DETAIL = "device_detail/{deviceId}"
-    const val DEVICE_EDIT = "device_edit/{deviceId?}"
-    const val SETTINGS = "settings"
-    
-    fun deviceDetail(deviceId: Long) = "device_detail/$deviceId"
-    fun deviceEdit(deviceId: Long? = null) = "device_edit/${deviceId?.toString() ?: ""}"
+sealed class Screen(val route: String) {
+    object DeviceList : Screen("device_list")
+    object DeviceAdd : Screen("device_add")
+    object DeviceEdit : Screen("device_edit/{deviceId}") {
+        fun createRoute(deviceId: Long) = "device_edit/$deviceId"
+    }
+    object DeviceDetail : Screen("device_detail/{deviceId}") {
+        fun createRoute(deviceId: Long) = "device_detail/$deviceId"
+    }
+    object RdpConnection : Screen("rdp_connection")
 }
 
-/**
- * 应用导航
- */
 @Composable
-fun AppNavigation() {
-    val navController = rememberNavController()
-    
+fun AppNavigation(
+    modifier: Modifier = Modifier,
+    navController: NavHostController = rememberNavController(),
+    onDeviceClick: (Long) -> Unit = {},
+    onAddDevice: () -> Unit = {},
+    onEditDevice: (Long) -> Unit = {},
+    onRdpConnected: () -> Unit = {}
+) {
     NavHost(
         navController = navController,
-        startDestination = NavRoutes.DEVICE_LIST
+        startDestination = Screen.DeviceList.route,
+        modifier = modifier
     ) {
-        // 设备列表页面
-        composable(NavRoutes.DEVICE_LIST) {
+        composable(Screen.DeviceList.route) {
             DeviceListScreen(
+                onAddDevice = onAddDevice,
                 onDeviceClick = { deviceId ->
-                    navController.navigate(NavRoutes.deviceDetail(deviceId))
+                    navController.navigate(Screen.DeviceDetail.createRoute(deviceId))
                 },
-                onAddDevice = {
-                    navController.navigate(NavRoutes.deviceEdit())
-                },
-                onEditDevice = { deviceId ->
-                    navController.navigate(NavRoutes.deviceEdit(deviceId))
+                onSyncClick = {
+                    // Trigger sync
                 }
             )
         }
-        
-        // 设备详情页面
-        composable(
-            route = NavRoutes.DEVICE_DETAIL,
-            arguments = listOf(navArgument("deviceId") { type = NavType.LongType })
-        ) { backStackEntry ->
-            val deviceId = backStackEntry.arguments?.getLong("deviceId") ?: return@composable
-            DeviceDetailScreen(
-                deviceId = deviceId,
-                onBack = { navController.popBackStack() },
-                onEdit = { 
-                    navController.popBackStack()
-                    navController.navigate(NavRoutes.deviceEdit(deviceId))
-                }
-            )
-        }
-        
-        // 设备编辑页面
-        composable(
-            route = NavRoutes.DEVICE_EDIT,
-            arguments = listOf(navArgument("deviceId") { type = NavType.LongType; defaultValue = -1L })
-        ) { backStackEntry ->
-            val deviceId = backStackEntry.arguments?.getLong("deviceId")
+
+        composable(Screen.DeviceAdd.route) {
             DeviceEditScreen(
-                deviceId = if (deviceId == -1L) null else deviceId,
-                onBack = { navController.popBackStack() }
+                device = null,
+                onSave = { device ->
+                    // Handled by parent
+                },
+                onCancel = {
+                    navController.popBackStack()
+                }
+            )
+        }
+
+        composable(Screen.DeviceEdit.route) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getString("deviceId")?.toLongOrNull()
+            DeviceEditScreen(
+                device = deviceId?.let { /* fetch device */ null },
+                onSave = { device ->
+                    navController.popBackStack()
+                },
+                onCancel = {
+                    navController.popBackStack()
+                }
+            )
+        }
+
+        composable(Screen.DeviceDetail.route) { backStackEntry ->
+            val deviceId = backStackEntry.arguments?.getString("deviceId")?.toLongOrNull()
+            DeviceDetailScreen(
+                deviceId = deviceId ?: return@composable,
+                onBack = { navController.popBackStack() },
+                onEdit = { deviceId?.let { onEditDevice(it) } },
+                onConnect = {
+                    navController.navigate(Screen.RdpConnection.route)
+                }
+            )
+        }
+
+        composable(Screen.RdpConnection.route) {
+            RdpConnectionScreen(
+                onBack = onRdpConnected
             )
         }
     }

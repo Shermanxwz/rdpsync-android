@@ -1,89 +1,52 @@
 package com.rdp.sync.viewmodel
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.rdp.sync.data.Device
-import com.rdp.sync.database.DeviceDao
-import com.rdp.sync.di.AppModule
-import kotlinx.coroutines.flow.MutableStateFlow
+import com.rdp.sync.repository.DeviceRepository
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
 
-class DeviceViewModel(
-    private val deviceDao: DeviceDao
-) : ViewModel() {
-    
-    private val _devices = MutableStateFlow<List<Device>>(emptyList())
-    val devices: StateFlow<List<Device>> = _devices.asStateFlow()
-    private val webDavSyncService = AppModule.webDavSyncService
-    private val gson = Gson()
-    
-    init {
-        loadDevices()
-    }
-    
-    private fun loadDevices() {
+data class UiState(
+    val devices: List<Device> = emptyList(),
+    val isLoading: Boolean = false,
+    val error: String? = null,
+    val isSyncing: Boolean = false
+)
+
+class DeviceViewModel(application: Application) : AndroidViewModel(application) {
+    private val repository = DeviceRepository.create(
+        com.rdp.sync.database.RdpSyncDatabase.getDatabase(application.applicationContext)
+    )
+
+    val uiState: StateFlow<UiState> = repository.getAllDevices()
+        .map { devices -> UiState(devices = devices) }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = UiState()
+        )
+
+    fun addDevice(name: String, host: String, port: Int, username: String, password: String, domain: String = "", width: Int = 1280, height: Int = 720) {
         viewModelScope.launch {
-            try {
-                val remoteJson = webDavSyncService.pullDevices()
-                val remoteDevices = parseDevicesFromJson(remoteJson)
-                deviceDao.insertAll(remoteDevices)
-                _devices.value = remoteDevices
-            } catch (e: Exception) {
-                println("[ViewModel] WebDAV pull failed: ${e.message}, using local DB")
-                try {
-                    deviceDao.getAllDevices().collect { localDevices ->
-                        _devices.value = localDevices
-                    }
-                } catch (ex: Exception) {
-                    println("[ViewModel] Local DB error: ${ex.message}")
-                    _devices.value = emptyList()
-                }
-            }
+            val device = Device(name = name, host = host, port = port, username = username, password = password, domain = domain, width = width, height = height)
+            repository.insertDevice(device)
         }
     }
-    
-    fun addDevice(device: Device) {
-        viewModelScope.launch {
-            deviceDao.insert(device)
-            syncToDeviceList()
-        }
-    }
-    
+
     fun updateDevice(device: Device) {
         viewModelScope.launch {
-            deviceDao.update(device)
-            syncToDeviceList()
+            repository.updateDevice(device)
         }
     }
-    
+
     fun deleteDevice(device: Device) {
         viewModelScope.launch {
-            deviceDao.delete(device)
-            syncToDeviceList()
-        }
-    }
-    
-    private fun syncToDeviceList() {
-        viewModelScope.launch {
-            try {
-                val json = gson.toJson(_devices.value)
-                webDavSyncService.pushDevices(json)
-            } catch (e: Exception) {
-                println("[ViewModel] Sync failed: ${e.message}")
-            }
-        }
-    }
-    
-    private fun parseDevicesFromJson(json: String): List<Device> {
-        return try {
-            val listType = object : TypeToken<List<Device>>() {}.type
-            gson.fromJson<List<Device>>(json, listType) ?: emptyList()
-        } catch (e: Exception) {
-            emptyList()
+            repository.deleteDevice(device)
         }
     }
 }

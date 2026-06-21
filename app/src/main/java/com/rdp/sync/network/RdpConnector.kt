@@ -2,40 +2,40 @@ package com.rdp.sync.network
 
 import android.util.Log
 
-/**
- * RDP 连接器 - 使用 IronRDP JNI
- * 在安卓 App 内直接渲染远程桌面
- */
 object RdpConnector {
     init {
-        // 加载 IronRDP 原生库
-        try {
-            System.loadLibrary("ironrdp")
-            Log.d("RdpConnector", "IronRDP library loaded")
-        } catch (e: UnsatisfiedLinkError) {
-            Log.e("RdpConnector", "Failed to load IronRDP: ${e.message}")
+        System.loadLibrary("rdpsync")
+    }
+
+    // Native JNI methods — renamed to avoid conflicts
+    external fun nativeConnect(host: String, port: Int, username: String, password: String, domain: String): Int
+    external fun nativeDisconnect(): Int
+    external fun nativeGetSurfaceBytes(outputPtr: Long, outputSize: Long): Int
+    external fun nativeSendPointerEvent(x: Int, y: Int, button: Int): Int
+    external fun nativeSendKeyEvent(keyCode: Int, down: Int): Int
+    external fun nativeSendClipboardText(text: String): Int
+    external fun nativeGetWidth(): Int
+    external fun nativeGetHeight(): Int
+
+    private const val TAG = "RdpConnector"
+
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String): Boolean {
+        return try {
+            val result = nativeConnect(host, port, username, password, domain)
+            Log.d(TAG, "Connect result: $result")
+            result == 1
+        } catch (e: Exception) {
+            Log.e(TAG, "Connect failed", e)
+            false
         }
     }
 
-    // JNI 接口（待实现 native 方法）
-    external fun connect(
-        host: String,
-        port: Int,
-        username: String,
-        password: String,
-        domain: String
-    ): Int
-
-    external fun disconnect()
-
-    external fun getWidth(): Int
-    external fun getHeight(): Int
-
-    external fun getSurfaceBytes(): ByteArray
-
-    external fun sendKeyEvent(keyCode: Int, down: Boolean)
-
-    external fun sendPointerEvent(x: Int, y: Int, button: Int)
-
-    external fun sendClipboardText(text: String)
+    fun disconnect(): Int {
+        return try {
+            nativeDisconnect()
+        } catch (e: Exception) {
+            Log.e(TAG, "Disconnect failed", e)
+            -1
+        }
+    }
 }

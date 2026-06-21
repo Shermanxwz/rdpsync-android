@@ -1,0 +1,14 @@
+[package]
+name = "rdpsync-connector"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rdpsync"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+jni = "0.21"
+ironrdp = { path = "/root/projects/ironrdp/crates/ironrdp", features = ["session", "connector", "dvc", "svc", "rdpdr", "rdpsnd", "graphics", "input", "cliprdr", "displaycontrol"] }
+ironrdp-core = { path = "/root/projects/ironrdp/crates/ironrdp-core", features = ["alloc"] }
+ironrdp-cliprdr-native = { path = "/root/projects/ironrdp/crates/ironrdp-cliprdr-native" }
