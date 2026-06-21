@@ -1,18 +1,16 @@
 package com.rdp.sync.repository
 
 import com.rdp.sync.data.Device
-import com.rdp.sync.database.RdpSyncDatabase
+import com.rdp.sync.database.DeviceDatabase
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
-class DeviceRepository(private val database: RdpSyncDatabase) {
+class DeviceRepository(private val database: DeviceDatabase) {
     private val dao = database.deviceDao()
 
-    fun getAllDevices(): Flow<List<Device>> = flow {
-        emit(dao.getAllDevices())
-    }
+    fun getAllDevices(): Flow<List<Device>> = dao.getAllDevices()
 
     suspend fun getDeviceById(id: Long): Device? = dao.getDeviceById(id)
 
@@ -24,10 +22,4 @@ class DeviceRepository(private val database: RdpSyncDatabase) {
 
     suspend fun deleteDevice(device: Device) =
         withContext(Dispatchers.IO) { dao.deleteDevice(device) }
-
-    companion object {
-        fun create(database: RdpSyncDatabase): DeviceRepository {
-            return DeviceRepository(database)
-        }
-    }
 }

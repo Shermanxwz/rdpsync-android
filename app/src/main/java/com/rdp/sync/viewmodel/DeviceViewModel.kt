@@ -32,8 +32,9 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
             try {
-                val devices = dao.getAllDevices()
-                _uiState.update { UiState(devices = devices) }
+                dao.getAllDevices().collect { devices ->
+                    _uiState.update { UiState(devices = devices) }
+                }
             } catch (e: Exception) {
                 _uiState.update { it.copy(error = e.message, isLoading = false) }
             }
@@ -44,21 +45,18 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val device = Device(name = name, host = host, port = port, username = username, password = password, domain = domain, width = width, height = height)
             dao.insertDevice(device)
-            loadDevices()
         }
     }
 
     fun updateDevice(device: Device) {
         viewModelScope.launch {
             dao.updateDevice(device)
-            loadDevices()
         }
     }
 
     fun deleteDevice(device: Device) {
         viewModelScope.launch {
             dao.deleteDevice(device)
-            loadDevices()
         }
     }
 
