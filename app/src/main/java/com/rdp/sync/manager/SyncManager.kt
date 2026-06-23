@@ -4,6 +4,14 @@ import android.util.Log
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.WebDavSyncService
 import org.json.JSONArray
+import org.json.JSONObject
+
+enum class SyncDirection { UPLOAD, DOWNLOAD, MERGE }
+
+data class DeviceSyncResult(
+    val message: String,
+    val devicesToStore: List<Device>? = null
+)
 
 object SyncManager {
     private const val TAG = "SyncManager"
@@ -13,16 +21,16 @@ object SyncManager {
     private var webDavPassword: String? = null
 
     fun configureWebDav(baseUrl: String, username: String, password: String) {
-        webDavBaseUrl = baseUrl
-        webDavUsername = username
-        webDavPassword = password
-        Log.d(TAG, "WebDav configured: $baseUrl")
+        webDavBaseUrl = baseUrl.trim().trimEnd('/').ifBlank { null }
+        webDavUsername = username.trim().ifBlank { null }
+        webDavPassword = password.ifBlank { null }
+        Log.d(TAG, "WebDAV configured: ${webDavBaseUrl.orEmpty()}")
     }
 
     fun devicesToJsonArray(devices: List<Device>): JSONArray {
         val array = JSONArray()
-        for (device in devices) {
-            val obj = org.json.JSONObject()
+        devices.sortedWith(compareBy<Device> { it.name.lowercase() }.thenBy { it.host }.thenBy { it.port }).forEach { device ->
+            val obj = JSONObject()
             obj.put("id", device.id)
             obj.put("name", device.name)
             obj.put("host", device.host)
@@ -32,45 +40,85 @@ object SyncManager {
             obj.put("domain", device.domain)
             obj.put("width", device.width)
             obj.put("height", device.height)
+            obj.put("updatedAt", System.currentTimeMillis())
             array.put(obj)
         }
         return array
     }
 
-    fun syncDevices(devices: List<Device>): Result<String> {
-        val baseUrl = webDavBaseUrl ?: return Result.failure(IllegalStateException("WebDav not configured"))
-        val username = webDavUsername ?: return Result.failure(IllegalStateException("WebDav username not set"))
-        val password = webDavPassword ?: return Result.failure(IllegalStateException("WebDav password not set"))
-
-        Log.d(TAG, "Syncing ${devices.size} devices to WebDav")
-        return WebDavSyncService.syncToCloud(devicesToJsonArray(devices), baseUrl, username, password)
+    fun uploadDevices(devices: List<Device>): Result<DeviceSyncResult> {
+        val config = requireConfig().getOrElse { return Result.failure(it) }
+        Log.d(TAG, "Uploading ${devices.size} devices to WebDAV")
+        return WebDavSyncService.syncToCloud(devicesToJsonArray(devices), config.baseUrl, config.username, config.password)
+            .map { DeviceSyncResult("已上传 ${devices.size} 台设备到 WebDAV") }
     }
 
-    fun syncFromCloud(): Result<List<Device>> {
-        val baseUrl = webDavBaseUrl ?: return Result.failure(IllegalStateException("WebDav not configured"))
-        val username = webDavUsername ?: return Result.failure(IllegalStateException("WebDav username not set"))
-        val password = webDavPassword ?: return Result.failure(IllegalStateException("WebDav password not set"))
-
-        Log.d(TAG, "Syncing from WebDav")
-        return WebDavSyncService.syncFromCloud(baseUrl, username, password)
+    fun downloadDevices(): Result<DeviceSyncResult> {
+        val config = requireConfig().getOrElse { return Result.failure(it) }
+        Log.d(TAG, "Downloading devices from WebDAV")
+        return WebDavSyncService.syncFromCloud(config.baseUrl, config.username, config.password)
             .map { jsonObjects ->
-                val devices = mutableListOf<Device>()
-                for (obj in jsonObjects) {
-                    devices.add(
-                        Device(
-                            id = obj.optLong("id", 0),
-                            name = obj.optString("name", ""),
-                            host = obj.optString("host", ""),
-                            port = obj.optInt("port", 3389),
-                            username = obj.optString("username", ""),
-                            password = obj.optString("password", ""),
-                            domain = obj.optString("domain", ""),
-                            width = obj.optInt("width", 1280),
-                            height = obj.optInt("height", 720)
-                        )
-                    )
-                }
-                devices
+                val devices = jsonObjects.mapNotNull { it.toDeviceOrNull() }
+                DeviceSyncResult("已从 WebDAV 下载 ${devices.size} 台设备", devices)
             }
     }
+
+    fun mergeDevices(localDevices: List<Device>): Result<DeviceSyncResult> {
+        val config = requireConfig().getOrElse { return Result.failure(it) }
+        Log.d(TAG, "Merging ${localDevices.size} local devices with WebDAV")
+        return WebDavSyncService.syncFromCloud(config.baseUrl, config.username, config.password)
+            .recoverCatching { emptyList() }
+            .mapCatching { jsonObjects ->
+                val remoteDevices = jsonObjects.mapNotNull { it.toDeviceOrNull() }
+                val merged = mergeByStableKey(localDevices, remoteDevices)
+                WebDavSyncService.syncToCloud(devicesToJsonArray(merged), config.baseUrl, config.username, config.password).getOrThrow()
+                DeviceSyncResult("同步完成：本地 ${localDevices.size} 台，云端 ${remoteDevices.size} 台，合并后 ${merged.size} 台", merged)
+            }
+    }
+
+    private fun mergeByStableKey(local: List<Device>, remote: List<Device>): List<Device> {
+        val merged = linkedMapOf<String, Device>()
+        (remote + local).forEach { device ->
+            val key = "${device.host.trim().lowercase()}:${device.port}:${device.username.trim().lowercase()}:${device.domain.trim().lowercase()}"
+            val current = merged[key]
+            merged[key] = when {
+                current == null -> device.copy(id = 0)
+                current.name.isBlank() && device.name.isNotBlank() -> device.copy(id = 0)
+                else -> current.copy(
+                    id = 0,
+                    name = current.name.ifBlank { device.name },
+                    password = current.password.ifBlank { device.password },
+                    width = maxOf(current.width, device.width),
+                    height = maxOf(current.height, device.height)
+                )
+            }
+        }
+        return merged.values.sortedWith(compareBy<Device> { it.name.lowercase() }.thenBy { it.host })
+    }
+
+    private fun JSONObject.toDeviceOrNull(): Device? {
+        val host = optString("host", "").trim()
+        val username = optString("username", "").trim()
+        if (host.isBlank() || username.isBlank()) return null
+        return Device(
+            id = 0,
+            name = optString("name", host).ifBlank { host },
+            host = host,
+            port = optInt("port", 3389).coerceIn(1, 65535),
+            username = username,
+            password = optString("password", ""),
+            domain = optString("domain", ""),
+            width = optInt("width", 1280).coerceAtLeast(320),
+            height = optInt("height", 720).coerceAtLeast(240)
+        )
+    }
+
+    private fun requireConfig(): Result<WebDavConfig> {
+        val baseUrl = webDavBaseUrl ?: return Result.failure(IllegalStateException("请先在设置里填写 WebDAV 地址"))
+        val username = webDavUsername ?: return Result.failure(IllegalStateException("请先填写 WebDAV 用户名"))
+        val password = webDavPassword ?: return Result.failure(IllegalStateException("请先填写 WebDAV 密码"))
+        return Result.success(WebDavConfig(baseUrl, username, password))
+    }
+
+    private data class WebDavConfig(val baseUrl: String, val username: String, val password: String)
 }

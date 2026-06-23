@@ -31,4 +31,10 @@ interface DeviceDao {
     
     @Query("DELETE FROM devices")
     suspend fun deleteAllDevices(): Int
+
+    @Transaction
+    suspend fun replaceAll(devices: List<Device>) {
+        deleteAllDevices()
+        insertDevices(devices)
+    }
 }

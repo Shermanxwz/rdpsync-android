@@ -1,5 +1,6 @@
 package com.rdp.sync.network
 
+import android.graphics.Bitmap
 import android.util.Log
 
 object RdpConnector {
@@ -7,10 +8,9 @@ object RdpConnector {
         System.loadLibrary("rdpsync")
     }
 
-    // Native JNI methods — renamed to avoid conflicts
-    external fun nativeConnect(host: String, port: Int, username: String, password: String, domain: String): Int
+    external fun nativeConnect(host: String, port: Int, username: String, password: String, domain: String, width: Int, height: Int): Int
     external fun nativeDisconnect(): Int
-    external fun nativeGetSurfaceBytes(outputPtr: Long, outputSize: Long): Int
+    external fun nativeGetFrameArgb(width: Int, height: Int): IntArray?
     external fun nativeSendPointerEvent(x: Int, y: Int, button: Int): Int
     external fun nativeSendKeyEvent(keyCode: Int, down: Int): Int
     external fun nativeSendClipboardText(text: String): Int
@@ -19,68 +19,54 @@ object RdpConnector {
 
     private const val TAG = "RdpConnector"
 
-    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String): Boolean {
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, width: Int = 1280, height: Int = 720): Boolean {
         return try {
-            val result = nativeConnect(host, port, username, password, domain)
+            val result = nativeConnect(host, port, username, password, domain, width, height)
             Log.d(TAG, "Connect result: $result")
             result == 1
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Connect failed", e)
             false
         }
     }
 
-    fun disconnect(): Int {
+    fun disconnect(): Int = safeNative("disconnect", -1) { nativeDisconnect() }
+
+    fun getWidth(): Int = safeNative("getWidth", 1280) { nativeGetWidth().coerceAtLeast(320) }
+
+    fun getHeight(): Int = safeNative("getHeight", 720) { nativeGetHeight().coerceAtLeast(240) }
+
+    fun getFrameBitmap(): Bitmap? {
         return try {
-            nativeDisconnect()
-        } catch (e: Exception) {
-            Log.e(TAG, "Disconnect failed", e)
-            -1
+            val width = getWidth()
+            val height = getHeight()
+            val pixels = nativeGetFrameArgb(width, height) ?: return null
+            if (pixels.size < width * height) return null
+            Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+        } catch (e: Throwable) {
+            Log.e(TAG, "getFrameBitmap failed", e)
+            null
         }
     }
 
-    fun getSurfaceBytes(outputPtr: Long = 0L, outputSize: Long = 0L): Int {
-        return try {
-            nativeGetSurfaceBytes(outputPtr, outputSize)
-        } catch (e: Exception) {
-            Log.e(TAG, "getSurfaceBytes failed", e)
-            0
-        }
+    fun sendPointerEvent(x: Int, y: Int, button: Int): Int = safeNative("sendPointerEvent", -1) {
+        nativeSendPointerEvent(x, y, button)
     }
 
-    fun getWidth(): Int {
-        return try {
-            nativeGetWidth()
-        } catch (e: Exception) {
-            Log.e(TAG, "getWidth failed", e)
-            1280
-        }
+    fun sendKeyEvent(keyCode: Int, down: Int): Int = safeNative("sendKeyEvent", -1) {
+        nativeSendKeyEvent(keyCode, down)
     }
 
-    fun getHeight(): Int {
-        return try {
-            nativeGetHeight()
-        } catch (e: Exception) {
-            Log.e(TAG, "getHeight failed", e)
-            720
-        }
+    fun sendClipboardText(text: String): Int = safeNative("sendClipboardText", -1) {
+        nativeSendClipboardText(text)
     }
 
-    fun sendPointerEvent(x: Int, y: Int, button: Int): Int {
+    private inline fun <T> safeNative(name: String, fallback: T, block: () -> T): T {
         return try {
-            nativeSendPointerEvent(x, y, button)
-        } catch (e: Exception) {
-            Log.e(TAG, "sendPointerEvent failed", e)
-            -1
-        }
-    }
-
-    fun sendKeyEvent(keyCode: Int, down: Int): Int {
-        return try {
-            nativeSendKeyEvent(keyCode, down)
-        } catch (e: Exception) {
-            Log.e(TAG, "sendKeyEvent failed", e)
-            -1
+            block()
+        } catch (e: Throwable) {
+            Log.e(TAG, "$name failed", e)
+            fallback
         }
     }
 }
