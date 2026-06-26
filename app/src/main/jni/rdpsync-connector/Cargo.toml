@@ -9,5 +9,7 @@ crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
 jni = "0.21"
-ironrdp = { path = "/root/projects/ironrdp/crates/ironrdp", features = ["rdpsnd", "rdpdr", "connector", "displaycontrol", "dvc", "session"] }
+ironrdp = { path = "/root/projects/ironrdp/crates/ironrdp", features = ["rdpsnd", "rdpdr", "connector", "displaycontrol", "dvc", "session", "input", "graphics", "svc", "cliprdr", "echo"] }
+ironrdp-client = { path = "/root/projects/ironrdp/crates/ironrdp-client", default-features = true }
 ironrdp-pdu = { path = "/root/projects/ironrdp/crates/ironrdp-pdu" }
+tokio = { version = "1", features = ["rt", "sync", "time"] }

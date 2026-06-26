@@ -10,6 +10,8 @@ object RdpConnector {
 
     external fun nativeConnect(host: String, port: Int, username: String, password: String, domain: String, width: Int, height: Int): Int
     external fun nativeDisconnect(): Int
+    external fun nativeIsConnected(): Boolean
+    external fun nativeGetStatus(): String
     external fun nativeGetFrameArgb(width: Int, height: Int): IntArray?
     external fun nativeSendPointerEvent(x: Int, y: Int, button: Int): Int
     external fun nativeSendKeyEvent(keyCode: Int, down: Int): Int
@@ -32,6 +34,10 @@ object RdpConnector {
 
     fun disconnect(): Int = safeNative("disconnect", -1) { nativeDisconnect() }
 
+    fun isConnected(): Boolean = safeNative("isConnected", false) { nativeIsConnected() }
+
+    fun getStatus(): String = safeNative("getStatus", "未连接") { nativeGetStatus() }
+
     fun getWidth(): Int = safeNative("getWidth", 1280) { nativeGetWidth().coerceAtLeast(320) }
 
     fun getHeight(): Int = safeNative("getHeight", 720) { nativeGetHeight().coerceAtLeast(240) }
@@ -41,7 +47,7 @@ object RdpConnector {
             val width = getWidth()
             val height = getHeight()
             val pixels = nativeGetFrameArgb(width, height) ?: return null
-            if (pixels.size < width * height) return null
+            if (pixels.size != width * height) return null
             Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
         } catch (e: Throwable) {
             Log.e(TAG, "getFrameBitmap failed", e)

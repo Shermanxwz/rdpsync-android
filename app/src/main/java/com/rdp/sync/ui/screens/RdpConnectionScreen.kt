@@ -51,6 +51,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -77,7 +78,7 @@ fun RdpConnectionScreen(
 
     LaunchedEffect(device.id) {
         status = "正在连接 ${device.host}:${device.port}..."
-        isConnected = RdpConnector.connectDevice(
+        val started = RdpConnector.connectDevice(
             host = device.host,
             port = device.port,
             username = device.username,
@@ -86,7 +87,16 @@ fun RdpConnectionScreen(
             width = device.width,
             height = device.height
         )
-        status = if (isConnected) "已连接 · ${device.width}×${device.height}" else "连接失败"
+        if (!started) {
+            status = "连接启动失败"
+            isConnected = false
+            return@LaunchedEffect
+        }
+        while (true) {
+            status = RdpConnector.getStatus()
+            isConnected = RdpConnector.isConnected()
+            delay(500)
+        }
     }
 
     DisposableEffect(Unit) {
@@ -202,10 +212,17 @@ fun RdpCanvas(
     }
 
     fun toRemote(offset: Offset): Offset {
-        val width = RdpConnector.getWidth().toFloat()
-        val height = RdpConnector.getHeight().toFloat()
-        val x = ((offset.x - pan.x) / scale).coerceIn(0f, width - 1)
-        val y = ((offset.y - pan.y) / scale).coerceIn(0f, height - 1)
+        val remoteWidth = RdpConnector.getWidth().toFloat().coerceAtLeast(1f)
+        val remoteHeight = RdpConnector.getHeight().toFloat().coerceAtLeast(1f)
+        val viewWidth = canvasSize.width.toFloat().coerceAtLeast(1f)
+        val viewHeight = canvasSize.height.toFloat().coerceAtLeast(1f)
+        val fitScale = minOf(viewWidth / remoteWidth, viewHeight / remoteHeight)
+        val drawWidth = remoteWidth * fitScale * scale
+        val drawHeight = remoteHeight * fitScale * scale
+        val left = (viewWidth - drawWidth) / 2f + pan.x
+        val top = (viewHeight - drawHeight) / 2f + pan.y
+        val x = ((offset.x - left) / (fitScale * scale)).coerceIn(0f, remoteWidth - 1f)
+        val y = ((offset.y - top) / (fitScale * scale)).coerceIn(0f, remoteHeight - 1f)
         return Offset(x, y)
     }
 
@@ -260,7 +277,14 @@ fun RdpCanvas(
             Image(
                 bitmap = frame,
                 contentDescription = "RDP frame",
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer(
+                        scaleX = scale,
+                        scaleY = scale,
+                        translationX = pan.x,
+                        translationY = pan.y
+                    ),
                 contentScale = ContentScale.Fit
             )
         } else {
