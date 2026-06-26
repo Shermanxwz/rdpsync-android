@@ -7,6 +7,7 @@ import com.rdp.sync.data.Device
 import com.rdp.sync.database.DeviceDatabase
 import com.rdp.sync.manager.SyncDirection
 import com.rdp.sync.manager.SyncManager
+import com.rdp.sync.network.WebDavSyncService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -119,6 +120,20 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 onFailure = { e ->
                     _uiState.update { it.copy(isSyncing = false, error = "同步失败: ${e.message}") }
                 }
+            )
+        }
+    }
+
+    fun testWebDavSettings(baseUrl: String, username: String, password: String) {
+        viewModelScope.launch {
+            val cleanUrl = baseUrl.trim().trimEnd('/')
+            _uiState.update { it.copy(isSyncing = true, error = null, message = null) }
+            val result = withContext(Dispatchers.IO) {
+                WebDavSyncService.testConnection(cleanUrl, username.trim(), password)
+            }
+            result.fold(
+                onSuccess = { message -> _uiState.update { it.copy(isSyncing = false, message = message) } },
+                onFailure = { e -> _uiState.update { it.copy(isSyncing = false, error = "WebDAV 测试失败: ${e.message}") } }
             )
         }
     }

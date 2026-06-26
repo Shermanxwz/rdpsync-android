@@ -67,7 +67,6 @@ object SyncManager {
         val config = requireConfig().getOrElse { return Result.failure(it) }
         Log.d(TAG, "Merging ${localDevices.size} local devices with WebDAV")
         return WebDavSyncService.syncFromCloud(config.baseUrl, config.username, config.password)
-            .recoverCatching { emptyList() }
             .mapCatching { jsonObjects ->
                 val remoteDevices = jsonObjects.mapNotNull { it.toDeviceOrNull() }
                 val merged = mergeByStableKey(localDevices, remoteDevices)
@@ -111,6 +110,12 @@ object SyncManager {
             width = optInt("width", 1280).coerceAtLeast(320),
             height = optInt("height", 720).coerceAtLeast(240)
         )
+    }
+
+    fun testWebDav(): Result<DeviceSyncResult> {
+        val config = requireConfig().getOrElse { return Result.failure(it) }
+        return WebDavSyncService.testConnection(config.baseUrl, config.username, config.password)
+            .map { DeviceSyncResult(it) }
     }
 
     private fun requireConfig(): Result<WebDavConfig> {

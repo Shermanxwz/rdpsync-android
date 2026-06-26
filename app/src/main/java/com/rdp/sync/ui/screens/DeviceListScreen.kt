@@ -14,7 +14,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowForwardIos
+import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.CloudUpload
@@ -63,6 +63,7 @@ fun DeviceListScreen(
     onDeviceClick: (Long) -> Unit,
     onSync: (SyncDirection) -> Unit,
     onSaveWebDavSettings: (String, String, String) -> Unit,
+    onTestWebDavSettings: (String, String, String) -> Unit,
     onMessageShown: () -> Unit
 ) {
     var showSettings by remember { mutableStateOf(false) }
@@ -160,6 +161,9 @@ fun DeviceListScreen(
                 onSaveWebDavSettings(url, username, password)
                 showSettings = false
                 scope.launch { snackbarHostState.showSnackbar("WebDAV 设置已保存") }
+            },
+            onTest = { url, username, password ->
+                onTestWebDavSettings(url, username, password)
             }
         )
     }
@@ -171,7 +175,8 @@ private fun WebDavSettingsDialog(
     initialUsername: String,
     initialPassword: String,
     onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit
+    onSave: (String, String, String) -> Unit,
+    onTest: (String, String, String) -> Unit
 ) {
     var url by remember { mutableStateOf(initialUrl) }
     var username by remember { mutableStateOf(initialUsername) }
@@ -219,7 +224,15 @@ private fun WebDavSettingsDialog(
                 onClick = { onSave(url, username, password) }
             ) { Text("保存") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    enabled = url.isNotBlank() && username.isNotBlank(),
+                    onClick = { onTest(url, username, password) }
+                ) { Text("测试连接") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        }
     )
 }
 
@@ -243,7 +256,7 @@ fun DeviceCard(device: Device, onClick: () -> Unit) {
                 Text("${device.host}:${device.port}", style = MaterialTheme.typography.bodyMedium)
                 Text("用户: ${device.username}", style = MaterialTheme.typography.bodySmall)
             }
-            Icon(Icons.Default.ArrowForwardIos, contentDescription = "连接", modifier = Modifier.size(20.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = "连接", modifier = Modifier.size(20.dp))
         }
     }
 }

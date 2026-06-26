@@ -75,6 +75,7 @@ fn build_config(
     domain: String,
     width: u16,
     height: u16,
+    enable_credssp: bool,
 ) -> Result<Config, String> {
     let codecs = client_codecs_capabilities(&[]).map_err(|e| e.to_string())?;
     let bitmap = connector::BitmapConfig {
@@ -87,7 +88,7 @@ fn build_config(
         credentials: Credentials::UsernamePassword { username, password },
         domain: (!domain.trim().is_empty()).then_some(domain),
         enable_tls: true,
-        enable_credssp: true,
+        enable_credssp,
         keyboard_type: gcc::KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
         keyboard_layout: 0,
@@ -104,7 +105,7 @@ fn build_config(
         hardware_id: None,
         license_cache: None,
         enable_server_pointer: false,
-        autologon: false,
+        autologon: !enable_credssp,
         enable_audio_playback: false,
         request_data: None,
         pointer_software_rendering: true,
@@ -134,7 +135,7 @@ fn build_config(
 
 fn spawn_client(session: Arc<AndroidRdpSession>, config: Config) {
     thread::spawn(move || {
-        set_status(&session, "正在建立 RDP 会话", false, false);
+        set_status(&session, "正在建立 RDP 会话（兼容模式：TLS + 图形登录）", false, false);
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
@@ -262,7 +263,7 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_nativeConnect(
         }
     }
 
-    match build_config(host_str, port, username_str, password_str, domain_str, width, height) {
+    match build_config(host_str, port, username_str, password_str, domain_str, width, height, false) {
         Ok(config) => spawn_client(session.clone(), config),
         Err(e) => {
             set_error(&session, e);

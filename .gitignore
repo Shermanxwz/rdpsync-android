@@ -1,0 +1,19 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+
+# Local machine config
+local.properties
+
+# Kotlin/IDE
+.kotlin/
+.idea/
+*.iml
+
+# Native build outputs
+app/src/main/jni/rdpsync-connector/target/
+
+# OS files
+.DS_Store
+Thumbs.db

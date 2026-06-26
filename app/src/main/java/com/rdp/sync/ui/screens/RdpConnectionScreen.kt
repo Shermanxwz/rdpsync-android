@@ -18,7 +18,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mouse
@@ -55,6 +55,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -75,8 +77,12 @@ fun RdpConnectionScreen(
     var showPasteDialog by remember { mutableStateOf(false) }
     var scale by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    val requestedWidth = with(density) { configuration.screenWidthDp.dp.roundToPx() }.coerceIn(320, 3840)
+    val requestedHeight = with(density) { configuration.screenHeightDp.dp.roundToPx() }.coerceIn(240, 2160)
 
-    LaunchedEffect(device.id) {
+    LaunchedEffect(device.id, requestedWidth, requestedHeight) {
         status = "正在连接 ${device.host}:${device.port}..."
         val started = RdpConnector.connectDevice(
             host = device.host,
@@ -84,8 +90,8 @@ fun RdpConnectionScreen(
             username = device.username,
             password = device.password,
             domain = device.domain,
-            width = device.width,
-            height = device.height
+            width = requestedWidth,
+            height = requestedHeight
         )
         if (!started) {
             status = "连接启动失败"
@@ -110,7 +116,7 @@ fun RdpConnectionScreen(
                 IconButton(onClick = {
                     RdpConnector.disconnect()
                     onBack()
-                }) { Icon(Icons.Default.ArrowBack, contentDescription = "返回") }
+                }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
             },
             actions = { Text(status, style = MaterialTheme.typography.bodySmall) },
             colors = TopAppBarDefaults.topAppBarColors(

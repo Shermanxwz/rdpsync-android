@@ -43,6 +43,16 @@ android {
     buildFeatures {
         compose = true
     }
+    lint {
+        // Compose lint detectors crash with this AGP/Compose combo on JDK 21.
+        disable += listOf(
+            "ModifierParameter",
+            "ModifierFactoryExtensionFunction",
+            "ModifierFactoryReturnType",
+            "ModifierFactoryUnreferencedReceiver",
+            "ComposableNaming"
+        )
+    }
 }
 
 dependencies {

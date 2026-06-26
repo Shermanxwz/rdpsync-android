@@ -2,7 +2,7 @@ package com.rdp.sync.ui.screens
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Domain
 import androidx.compose.material.icons.filled.Keyboard
@@ -43,7 +43,7 @@ fun DeviceEditScreen(
                 title = { Text(if (device != null) "编辑设备" else "添加设备") },
                 navigationIcon = {
                     IconButton(onClick = onCancel) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "返回")
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
