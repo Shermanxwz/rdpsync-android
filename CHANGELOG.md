@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed CredSSP/NLA failures against strict Windows RDP servers by disabling TLS graphical-login fallback when CredSSP is enabled.
-- Verified against real RDP endpoint `161.118.228.26:22389` with IronRDP probe: first frame received (`IMAGE 1280x720: connected`).
+- Verified against real RDP endpoint with IronRDP probe: first frame received (`IMAGE 1280x720: connected`).
 - Cleaned temporary probe files from the Android native crate.
 
 ### Verified

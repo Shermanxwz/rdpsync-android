@@ -1,10 +1,11 @@
 # RdpSync 1.0.3
 
-本版本针对真实 RDP 机器 `161.118.228.26:22389` 完成 CredSSP/NLA 实测修复。
+本版本针对真实 RDP 机器完成 CredSSP/NLA 实测修复。
 
 ## 真实调试结论
 
-- TCP `161.118.228.26:22389` 连通。
+- TCP 端口连通。
+- 服务端强制 NLA/CredSSP。
 - FreeRDP `/sec:tls` 被服务端拒绝，服务端返回 `HYBRID_REQUIRED_BY_SERVER`。
 - FreeRDP `/sec:nla` 能进入认证/激活阶段，说明该服务器强制 NLA/CredSSP。
 - IronRDP probe 使用修复后的配置已连上并拿到首帧：`IMAGE 1280x720: connected`。
