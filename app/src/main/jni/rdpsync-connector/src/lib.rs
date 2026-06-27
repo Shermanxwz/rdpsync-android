@@ -54,9 +54,25 @@ fn set_status(session: &AndroidRdpSession, status: impl Into<String>, connected:
     session.state_cv.notify_all();
 }
 
+fn humanize_rdp_error(error: impl Into<String>) -> String {
+    let raw = error.into();
+    let lower = raw.to_lowercase();
+    if lower.contains("server requires enhanced rdp security with credssp") {
+        format!("服务器强制要求 NLA/CredSSP 认证，已启用 CredSSP 后请重试；如果仍失败，请检查用户名/密码/域是否正确。原始错误: {raw}")
+    } else if lower.contains("credssp") {
+        format!("CredSSP/NLA 认证失败：请检查 Windows 用户名、密码、域；如果用户名是 域\\用户，请把域填到“域”输入框，用户名只填用户本身。原始错误: {raw}")
+    } else if lower.contains("tcp connect") {
+        format!("TCP 连接失败：请检查主机/IP、端口 3389、手机网络/VPN、Windows 防火墙和远程桌面是否已开启。原始错误: {raw}")
+    } else if lower.contains("negotiation failure") {
+        format!("RDP 协议协商失败：服务端安全策略和客户端认证模式不匹配。原始错误: {raw}")
+    } else {
+        format!("连接失败: {raw}")
+    }
+}
+
 fn set_error(session: &AndroidRdpSession, error: impl Into<String>) {
     let mut state = session.state.lock().unwrap();
-    state.last_error = error.into();
+    state.last_error = humanize_rdp_error(error);
     state.connected = false;
     state.terminated = true;
     state.status = "连接失败".to_owned();
@@ -99,7 +115,7 @@ fn build_config(
         desktop_scale_factor: 0,
         bitmap: Some(bitmap),
         client_build: 100,
-        client_name: "rdpsync-android".to_owned(),
+        client_name: "RDPSYNC".to_owned(),
         client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
         platform: MajorPlatformType::ANDROID,
         hardware_id: None,
@@ -135,7 +151,7 @@ fn build_config(
 
 fn spawn_client(session: Arc<AndroidRdpSession>, config: Config) {
     thread::spawn(move || {
-        set_status(&session, "正在建立 RDP 会话（兼容模式：TLS + 图形登录）", false, false);
+        set_status(&session, "正在建立 RDP 会话（NLA/CredSSP）", false, false);
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
@@ -241,9 +257,15 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_nativeConnect(
     height: jni::sys::jint,
 ) -> jni::sys::jint {
     let host_str = unsafe { jstring_to_string(env, host) };
-    let username_str = unsafe { jstring_to_string(env, username) };
+    let mut username_str = unsafe { jstring_to_string(env, username) };
     let password_str = unsafe { jstring_to_string(env, password) };
-    let domain_str = unsafe { jstring_to_string(env, domain) };
+    let mut domain_str = unsafe { jstring_to_string(env, domain) };
+    if domain_str.trim().is_empty() {
+        if let Some((domain_part, user_part)) = username_str.split_once('\\') {
+            domain_str = domain_part.trim().to_owned();
+            username_str = user_part.trim().to_owned();
+        }
+    }
     let port = (port as u16).max(1);
     let width = (width as u16).clamp(320, 3840);
     let height = (height as u16).clamp(240, 2160);
@@ -263,7 +285,7 @@ pub extern "C" fn Java_com_rdp_sync_network_RdpConnector_nativeConnect(
         }
     }
 
-    match build_config(host_str, port, username_str, password_str, domain_str, width, height, false) {
+    match build_config(host_str, port, username_str, password_str, domain_str, width, height, true) {
         Ok(config) => spawn_client(session.clone(), config),
         Err(e) => {
             set_error(&session, e);

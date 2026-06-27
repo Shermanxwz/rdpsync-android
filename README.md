@@ -19,7 +19,7 @@ RdpSync 的目标是把“远程 Windows 桌面连接”和“多设备配置同
 
 当前调试 APK 已放在仓库：
 
-- `releases/rdpsync-real-rdp-1.0.0.apk`
+- `releases/rdpsync-real-rdp-1.0.2.apk`
 
 当前 APK：
 
@@ -65,13 +65,13 @@ RdpSync 的目标是把“远程 Windows 桌面连接”和“多设备配置同
 
 ## RDP 兼容性说明
 
-当前版本默认使用 TLS + 图形登录兼容模式，避开部分 Windows/服务端上 CredSSP/NLA 报错问题。它适合：
+当前版本默认使用 Windows 标准的 NLA/CredSSP 认证，适合大多数默认开启远程桌面的 Windows 10/11/Server。它会：
 
-- Windows 远程桌面关闭“仅允许运行使用网络级别身份验证的远程桌面的计算机连接”。
-- xrdp/部分轻量 RDP 服务端。
-- 局域网或自有可信网络环境。
+- 使用 CredSSP/NLA 进入 Windows 远程桌面。
+- 自动把 `域\\用户` 拆成域和用户名，减少填错导致的 CredSSP 失败。
+- 对 TCP 连接失败、CredSSP 认证失败、RDP 协商失败给出更明确的中文提示。
 
-如果远程 Windows 强制 NLA/CredSSP，后续版本会加入“认证模式：自动 / NLA / 兼容”的显式开关。
+如果提示 TCP 连接失败，请先确认手机到目标机器网络可达、端口 3389 开放、Windows 防火墙允许远程桌面。
 
 ## 技术栈
 
