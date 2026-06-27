@@ -103,7 +103,7 @@ fn build_config(
     let connector = connector::Config {
         credentials: Credentials::UsernamePassword { username, password },
         domain: (!domain.trim().is_empty()).then_some(domain),
-        enable_tls: true,
+        enable_tls: !enable_credssp,
         enable_credssp,
         keyboard_type: gcc::KeyboardType::IbmEnhanced,
         keyboard_subtype: 0,
