@@ -1,0 +1,35 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+app/build/
+
+# Local machine config
+local.properties
+
+# Kotlin/IDE
+.kotlin/
+.idea/
+*.iml
+
+# Native build outputs
+app/src/main/jni/rdpsync-connector/target/
+app/src/main/jniLibs/**/*.so
+app/src/main/jniLibs/x86_64/
+app/src/main/jniLibs/arm64-v8a/
+
+# Release artifacts belong in GitHub Releases/CI artifacts, not source history
+releases/*.apk
+*.apk
+*.aab
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Compiled test binary
+freerdp_test2
+
+# Test binaries and build artifacts
+freerdp_test
+freerdp_test2
+freerdp_test3

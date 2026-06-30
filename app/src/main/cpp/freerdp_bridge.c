@@ -1,0 +1,496 @@
+/**
+ * RdpSync FreeRDP Bridge - proper FreeRDP lifecycle
+ * Based on official android_freerdp.c pattern:
+ *   client_ctx_new -> sets PreConnect/PostConnect/PostDisconnect/AuthenticateEx
+ *   PreConnect -> subscribe events
+ *   freerdp_connect() -> internally calls PreConnect, then PostConnect
+ *   PostConnect -> gdi_init, register pointer, set BeginPaint/EndPaint/DesktopResize
+ *   Thread -> freerdp_check_fds loop
+ *   PostDisconnect -> gdi_free
+ */
+#include <jni.h>
+#include <android/log.h>
+#include <android/bitmap.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <dlfcn.h>
+#include <freerdp/freerdp.h>
+#include <freerdp/settings.h>
+#include <freerdp/constants.h>
+#include <freerdp/input.h>
+#include <freerdp/update.h>
+#include <freerdp/gdi/gdi.h>
+#include <freerdp/version.h>
+#include <freerdp/graphics.h>
+#include <winpr/wlog.h>
+#include <openssl/evp.h>
+
+#define TAG "FreeRDP"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+
+// ====== Frame buffer state ======
+typedef struct {
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    volatile int connected;
+    volatile int terminating;
+    volatile int thread_done;
+    char status[1024];
+    char last_error[4096];
+    char diag[4096];
+    int fb_width, fb_height, fb_size;
+    int32_t* fb_pixels;
+    volatile int64_t frame_id;
+    freerdp* instance;
+    pthread_t thread;
+} RdpSession;
+
+static RdpSession* g_session = NULL;
+static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
+static char g_startup_error[1024] = "";
+
+static void s_status(RdpSession* s, const char* fmt, ...) {
+    char b[1024]; va_list ap; va_start(ap,fmt); vsnprintf(b,sizeof(b),fmt,ap); va_end(ap);
+    pthread_mutex_lock(&s->mutex);
+    strncpy(s->status,b,sizeof(s->status)-1); s->status[sizeof(s->status)-1]=0;
+    pthread_cond_broadcast(&s->cond);
+    pthread_mutex_unlock(&s->mutex);
+}
+static void s_error(RdpSession* s, const char* fmt, ...) {
+    char b[4096]; va_list ap; va_start(ap,fmt); vsnprintf(b,sizeof(b),fmt,ap); va_end(ap);
+    pthread_mutex_lock(&s->mutex);
+    s->connected=0; strncpy(s->last_error,b,sizeof(s->last_error)-1);
+    s->last_error[sizeof(s->last_error)-1]=0;
+    strncpy(s->status,"连接失败",sizeof(s->status)-1); s->status[sizeof(s->status)-1]=0;
+    pthread_cond_broadcast(&s->cond);
+    pthread_mutex_unlock(&s->mutex);
+}
+static void s_diag(RdpSession* s, const char* line) {
+    pthread_mutex_lock(&s->mutex);
+    size_t cur=strlen(s->diag), need=strlen(line)+2;
+    if (cur+need<sizeof(s->diag)) { memcpy(s->diag+cur,line,need-1); s->diag[cur+need-2]='\n'; s->diag[cur+need-1]=0; }
+    pthread_mutex_unlock(&s->mutex);
+}
+
+// ====== Frame buffer management ======
+static RdpSession* s_from_ctx(rdpContext* ctx) {
+    if(!ctx||!ctx->instance) return NULL;
+    RdpSession* s; pthread_mutex_lock(&g_lock); s=g_session; pthread_mutex_unlock(&g_lock);
+    if(!s||s->instance!=ctx->instance) return NULL;
+    return s;
+}
+
+static BOOL begin_paint(rdpContext* ctx) {
+    (void)ctx; return TRUE;
+}
+
+static BOOL end_paint(rdpContext* ctx) {
+    // Copy GDI primary buffer to RdpSession frame buffer
+    RdpSession* s = s_from_ctx(ctx);
+    if(!s) return TRUE;
+    rdpGdi* gdi = ctx->gdi;
+    if(!gdi||!gdi->primary_buffer) return TRUE;
+    int w=(int)freerdp_settings_get_uint32(ctx->settings,FreeRDP_DesktopWidth);
+    int h=(int)freerdp_settings_get_uint32(ctx->settings,FreeRDP_DesktopHeight);
+    int sz=w*h; if(sz<=0) return TRUE;
+    pthread_mutex_lock(&s->mutex);
+    if(sz!=s->fb_size){free(s->fb_pixels);s->fb_pixels=(int32_t*)calloc((size_t)sz,sizeof(int32_t));s->fb_size=sz;}
+    if(s->fb_pixels&&gdi->primary_buffer){
+        s->fb_width=w;s->fb_height=h;
+        BYTE* src=(BYTE*)gdi->primary_buffer;
+        int32_t* dst=s->fb_pixels;
+        for(int i=0;i<sz;i++) dst[i]=(int32_t)(0xFF000000U|((UINT32)src[i*4+0]<<16)|((UINT32)src[i*4+1]<<8)|(UINT32)src[i*4+2]);
+        s->frame_id++;
+    }
+    pthread_mutex_unlock(&s->mutex);
+    if(!s->connected){pthread_mutex_lock(&s->mutex);s->connected=1;strncpy(s->status,"已连接",sizeof(s->status)-1);pthread_cond_broadcast(&s->cond);pthread_mutex_unlock(&s->mutex);LOGI("First frame rendered");}
+    return TRUE;
+}
+
+static BOOL desktop_resize(rdpContext* ctx) {
+    LOGI("desktop_resize");
+    if(ctx->gdi) { 
+        UINT32 w=freerdp_settings_get_uint32(ctx->settings,FreeRDP_DesktopWidth);
+        UINT32 h=freerdp_settings_get_uint32(ctx->settings,FreeRDP_DesktopHeight);
+        return gdi_resize(ctx->gdi,w,h);
+    }
+    return TRUE;
+}
+
+// ====== Pointer handling ======
+typedef struct { rdpPointer pointer; size_t size; void* data; } AppPointer;
+
+static BOOL ptr_New(rdpContext* context, rdpPointer* pointer) {
+    AppPointer* p = (AppPointer*)pointer;
+    if(!p||!context->gdi) return FALSE;
+    p->size = 4ULL * pointer->width * pointer->height;
+    p->data = winpr_aligned_malloc(p->size, 16);
+    if(!p->data) return FALSE;
+    if(!freerdp_image_copy_from_pointer_data(p->data,PIXEL_FORMAT_BGRA32,0,0,0,
+        pointer->width,pointer->height,pointer->xorMaskData,pointer->lengthXorMask,
+        pointer->andMaskData,pointer->lengthAndMask,pointer->xorBpp,&context->gdi->palette))
+    { winpr_aligned_free(p->data); p->data=NULL; return FALSE; }
+    return TRUE;
+}
+static void ptr_Free(rdpContext* context, rdpPointer* pointer) {
+    AppPointer* p = (AppPointer*)pointer;
+    if(p&&p->data){winpr_aligned_free(p->data);p->data=NULL;}
+}
+static BOOL ptr_Set(rdpContext* context, rdpPointer* pointer) { (void)context;(void)pointer; return TRUE; }
+static BOOL ptr_SetNull(rdpContext* context) { (void)context; return TRUE; }
+static BOOL ptr_SetDefault(rdpContext* context) { (void)context; return TRUE; }
+static BOOL ptr_SetPosition(rdpContext* context, UINT32 x, UINT32 y) { (void)context;(void)x;(void)y; return TRUE; }
+
+static BOOL register_pointer(rdpGraphics* graphics) {
+    rdpPointer pointer = {0};
+    pointer.size = sizeof(AppPointer);
+    pointer.New = ptr_New;
+    pointer.Free = ptr_Free;
+    pointer.Set = ptr_Set;
+    pointer.SetNull = ptr_SetNull;
+    pointer.SetDefault = ptr_SetDefault;
+    pointer.SetPosition = ptr_SetPosition;
+    graphics_register_pointer(graphics, &pointer);
+    return TRUE;
+}
+
+// ====== PreConnect callback ======
+static BOOL pre_connect(freerdp* instance) {
+    LOGI("pre_connect");
+    return TRUE;
+}
+
+// ====== PostConnect callback (gdi_init happens HERE) ======
+static BOOL post_connect(freerdp* instance) {
+    LOGI("post_connect");
+    rdpUpdate* update = instance->context->update;
+    rdpSettings* settings = instance->context->settings;
+    
+    // Initialize GDI - this must be done inside PostConnect
+    if(!gdi_init(instance, PIXEL_FORMAT_RGBX32)) {
+        LOGE("gdi_init failed");
+        return FALSE;
+    }
+    LOGI("gdi_init OK");
+    
+    // Register pointer handlers
+    if(!register_pointer(instance->context->graphics)) {
+        LOGE("register_pointer failed");
+        return FALSE;
+    }
+    LOGI("pointer registered");
+    
+    // Set update callbacks
+    update->BeginPaint = begin_paint;
+    update->EndPaint = end_paint;
+    update->DesktopResize = desktop_resize;
+    
+    LOGI("post_connect done");
+    return TRUE;
+}
+
+// ====== PostDisconnect callback ======
+static void post_disconnect(freerdp* instance) {
+    LOGI("post_disconnect");
+    gdi_free(instance);
+}
+
+// ====== Authentication callbacks ======
+static BOOL authenticate_ex(freerdp* instance, char** username, char** password, char** domain, rdp_auth_reason reason) {
+    LOGI("authenticate_ex: reason=%d", reason);
+    // Credentials already set in settings, just return TRUE to proceed
+    return TRUE;
+}
+
+static DWORD verify_certificate_ex(freerdp* instance, const char* host, UINT16 port,
+    const char* common_name, const char* subject, const char* issuer,
+    const char* fingerprint, DWORD flags) {
+    LOGI("verify_certificate_ex: ignoring (cert:ignore mode)");
+    return 1; // Accept certificate
+}
+
+static DWORD verify_changed_certificate_ex(freerdp* instance, const char* host, UINT16 port,
+    const char* common_name, const char* subject, const char* issuer,
+    const char* new_fingerprint, const char* old_subject, const char* old_issuer,
+    const char* old_fingerprint, DWORD flags) {
+    LOGI("verify_changed_certificate_ex: accepting changed cert");
+    return 1;
+}
+
+// ====== client_ctx_new / client_ctx_free ======
+static BOOL client_ctx_new(freerdp* instance, rdpContext* context) {
+    LOGI("client_ctx_new called");
+    // Set ALL lifecycle callbacks (matching official bridge pattern)
+    instance->PreConnect = pre_connect;
+    instance->PostConnect = post_connect;
+    instance->PostDisconnect = post_disconnect;
+    instance->AuthenticateEx = authenticate_ex;
+    instance->VerifyCertificateEx = verify_certificate_ex;
+    instance->VerifyChangedCertificateEx = verify_changed_certificate_ex;
+    return TRUE;
+}
+
+static void client_ctx_free(freerdp* instance, rdpContext* context) {
+    LOGI("client_ctx_free called");
+}
+
+// ====== Instance creation ======
+static freerdp* create_instance(void) {
+    setenv("HOME", "/data/data/com.rdp.sync/files", 1);
+    freerdp* inst = freerdp_new();
+    if (!inst) { LOGE("freerdp_new failed"); return NULL; }
+    inst->ContextSize = sizeof(rdpContext);
+    inst->ContextNew = client_ctx_new;
+    inst->ContextFree = client_ctx_free;
+    if (!freerdp_context_new(inst)) {
+        LOGE("freerdp_context_new failed");
+        freerdp_free(inst);
+        return NULL;
+    }
+    LOGI("Instance created OK");
+    return inst;
+}
+
+// ====== Connection thread (event loop) ======
+static void* thread_fn(void* arg) {
+    RdpSession* s=(RdpSession*)arg; freerdp* inst=s->instance;
+    LOGI("Thread started");
+    
+    s_status(s,"正在连接..."); s_diag(s,"stage=connecting");
+    
+    // freerdp_connect internally calls PreConnect -> NEGO -> TLS -> NLA -> PostConnect
+    if(!freerdp_connect(inst)){
+        UINT32 e=freerdp_get_last_error(inst->context);
+        const char* es=freerdp_get_last_error_string(e);
+        LOGE("freerdp_connect failed: 0x%08x %s",e,es?es:"?");
+        s_error(s,"FreeRDP 连接失败 [0x%08x]: %s",e,es?es:"?"); s_diag(s,"connect=FAILED");
+        goto cleanup;
+    }
+    
+    LOGI("freerdp_connect OK");
+    s_status(s,"已连接"); s_diag(s,"connected=OK");
+    
+    // Event loop (same as android_freerdp_run)
+    while(!s->terminating){
+        if(!freerdp_check_fds(inst)){
+            UINT32 e=freerdp_get_last_error(inst->context);
+            const char* es=freerdp_get_last_error_string(e);
+            LOGE("freerdp_check_fds failed: 0x%08x",e);
+            s_error(s,"连接中断"); break;
+        }
+        if(freerdp_shall_disconnect_context(inst->context)) break;
+        // Small sleep to avoid busy-waiting (no eventfd in our simple setup)
+        struct timespec ts = {0, 1000000}; // 1ms: reduce input/frame pacing latency
+        nanosleep(&ts, NULL);
+    }
+    
+    // Disconnect (gdi_free is called by post_disconnect callback during disconnect)
+    freerdp_disconnect(inst);
+    
+cleanup:
+    s->instance=NULL;s->terminating=0;
+    pthread_mutex_lock(&s->mutex);s->thread_done=1;pthread_cond_broadcast(&s->cond);pthread_mutex_unlock(&s->mutex);
+    LOGI("Thread exited"); return NULL;
+}
+
+static void session_destroy(RdpSession* s) {
+    if(!s) return; s->terminating=1;
+    if(s->instance&&s->instance->context) freerdp_abort_connect_context(s->instance->context);
+    pthread_cond_broadcast(&s->cond);
+    if(s->thread&&!s->thread_done)pthread_join(s->thread,NULL);
+    if(s->instance){freerdp_context_free(s->instance);freerdp_free(s->instance);s->instance=NULL;}
+    pthread_mutex_destroy(&s->mutex);pthread_cond_destroy(&s->cond);free(s->fb_pixels);free(s);
+}
+
+// ====== JNI ======
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint);
+
+JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetLibDir(JNIEnv* e, jobject t, jstring jpath) {
+    const char* path = (*e)->GetStringUTFChars(e,jpath,NULL);
+    LOGI("nativeSetLibDir: %s", path);
+    
+    // Register MD4 with OpenSSL EVP via dlsym (OpenSSL 3.x legacy provider unavailable on Android)
+    void* fr = dlopen("libfreerdp3.so", RTLD_NOW | RTLD_GLOBAL);
+    if(fr) {
+        typedef int (*m4i_t)(void*); typedef int (*m4u_t)(void*,const void*,size_t); typedef int (*m4f_t)(unsigned char*,void*);
+        m4i_t m4i = (m4i_t)dlsym(fr, "MD4_Init"); m4u_t m4u = (m4u_t)dlsym(fr, "MD4_Update"); m4f_t m4f = (m4f_t)dlsym(fr, "MD4_Final");
+        if(m4i && m4u && m4f) {
+            EVP_MD* m = EVP_MD_meth_new(3, NID_md4);
+            if(m) {
+                EVP_MD_meth_set_init(m, (int(*)(EVP_MD_CTX*))m4i);
+                EVP_MD_meth_set_update(m, (int(*)(EVP_MD_CTX*,const void*,size_t))m4u);
+                EVP_MD_meth_set_final(m, (int(*)(EVP_MD_CTX*,unsigned char*))m4f);
+                EVP_MD_meth_set_input_blocksize(m, 64);
+                EVP_MD_meth_set_result_size(m, 16);
+                if(EVP_add_digest(m)) LOGI("MD4 registered via EVP_add_digest");
+                else LOGE("EVP_add_digest failed");
+            }
+        } else LOGE("dlsym MD4 functions failed");
+    }
+    (*e)->ReleaseStringUTFChars(e,jpath,path);
+}
+
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect(
+    JNIEnv* e,jobject t,jstring h,jint p,jstring u,jstring pw,jstring d,jint w,jint hh){
+    return Java_com_rdp_sync_network_RdpConnector_nativeConnect2(e,t,h,p,u,pw,d,NULL,w,hh);
+}
+
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
+    JNIEnv* e,jobject t,jstring jh,jint jp,jstring ju,jstring jpw,jstring jd,jstring jrn,jint jw,jint jh2){
+    const char* host=(*e)->GetStringUTFChars(e,jh,NULL);int port=(int)jp;
+    const char* user=(*e)->GetStringUTFChars(e,ju,NULL);const char* pass=(*e)->GetStringUTFChars(e,jpw,NULL);
+    const char* domain=(*e)->GetStringUTFChars(e,jd,NULL);
+    LOGI("connect requested");
+    
+    freerdp* inst = create_instance();
+    if(!inst){snprintf(g_startup_error,sizeof(g_startup_error),"create_instance failed");goto fail;}
+    g_startup_error[0]=0;
+    
+    rdpSettings* s=inst->context->settings;
+    freerdp_settings_set_string(s,FreeRDP_ServerHostname,host);
+    freerdp_settings_set_uint32(s,FreeRDP_ServerPort,(UINT32)port);
+    freerdp_settings_set_string(s,FreeRDP_Username,user);
+    freerdp_settings_set_string(s,FreeRDP_Password,pass);
+    if(domain&&strlen(domain)>0)freerdp_settings_set_string(s,FreeRDP_Domain,domain);
+    freerdp_settings_set_uint32(s,FreeRDP_DesktopWidth,(UINT32)(jw>0?jw:1280));
+    freerdp_settings_set_uint32(s,FreeRDP_DesktopHeight,(UINT32)(jh2>0?jh2:720));
+    freerdp_settings_set_uint16(s,FreeRDP_DesktopOrientation,(jw>jh2)?ORIENTATION_LANDSCAPE:ORIENTATION_PORTRAIT);
+    freerdp_settings_set_uint32(s,FreeRDP_DesktopScaleFactor,140);
+    freerdp_settings_set_uint32(s,FreeRDP_DeviceScaleFactor,140);
+    freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,TRUE);
+    freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,TRUE);
+    freerdp_settings_set_uint32(s,FreeRDP_ColorDepth,32);
+    freerdp_settings_set_uint32(s,FreeRDP_RequestedProtocols,0x00000002|0x00000008);
+    freerdp_settings_set_bool(s,FreeRDP_IgnoreCertificate,TRUE);
+    freerdp_settings_set_bool(s,FreeRDP_AudioPlayback,FALSE);
+    
+    RdpSession* session=(RdpSession*)calloc(1,sizeof(RdpSession));
+    if(!session){snprintf(g_startup_error,sizeof(g_startup_error),"内存不足");freerdp_context_free(inst);freerdp_free(inst);goto fail;}
+    pthread_mutex_init(&session->mutex,NULL);pthread_cond_init(&session->cond,NULL);
+    session->instance=inst;
+    snprintf(session->status,sizeof(session->status),"初始化");
+    snprintf(session->diag,sizeof(session->diag),"engine=FreeRDP %s\nconnection details hidden\n",FREERDP_VERSION_FULL);
+    pthread_mutex_lock(&g_lock);if(g_session){session_destroy(g_session);g_session=NULL;}g_session=session;pthread_mutex_unlock(&g_lock);
+    
+    if(pthread_create(&session->thread,NULL,thread_fn,session)!=0){
+        snprintf(g_startup_error,sizeof(g_startup_error),"线程创建失败");
+        pthread_mutex_lock(&g_lock);g_session=NULL;pthread_mutex_unlock(&g_lock);
+        free(session->fb_pixels);pthread_mutex_destroy(&session->mutex);pthread_cond_destroy(&session->cond);free(session);
+        freerdp_context_free(inst);freerdp_free(inst);goto fail;
+    }
+    g_startup_error[0]=0;
+    (*e)->ReleaseStringUTFChars(e,jh,host);(*e)->ReleaseStringUTFChars(e,ju,user);(*e)->ReleaseStringUTFChars(e,jpw,pass);(*e)->ReleaseStringUTFChars(e,jd,domain);
+    LOGI("nativeConnect2 returning 1");return 1;
+fail:
+    (*e)->ReleaseStringUTFChars(e,jh,host);(*e)->ReleaseStringUTFChars(e,ju,user);(*e)->ReleaseStringUTFChars(e,jpw,pass);(*e)->ReleaseStringUTFChars(e,jd,domain);
+    LOGI("nativeConnect2 returning 0: %s",g_startup_error);return 0;
+}
+
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeDisconnect(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);if(g_session){session_destroy(g_session);g_session=NULL;}pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeIsConnected(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);int c=g_session?g_session->connected:0;pthread_mutex_unlock(&g_lock);return c?JNI_TRUE:JNI_FALSE;}
+JNIEXPORT jstring JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetStatus(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);const char* text="未连接";
+    if(strlen(g_startup_error)>0)text=g_startup_error;
+    else if(g_session){pthread_mutex_lock(&g_session->mutex);text=strlen(g_session->last_error)>0?g_session->last_error:g_session->status;pthread_mutex_unlock(&g_session->mutex);}
+    jstring ret=(*e)->NewStringUTF(e,text);pthread_mutex_unlock(&g_lock);return ret;}
+JNIEXPORT jstring JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetDiag(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);const char* text="";if(g_session){pthread_mutex_lock(&g_session->mutex);text=g_session->diag;pthread_mutex_unlock(&g_session->mutex);}
+    jstring ret=(*e)->NewStringUTF(e,text);pthread_mutex_unlock(&g_lock);return ret;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetWidth(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);int w=g_session?g_session->fb_width:1280;pthread_mutex_unlock(&g_lock);return w;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetHeight(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);int h=g_session?g_session->fb_height:720;pthread_mutex_unlock(&g_lock);return h;}
+JNIEXPORT jintArray JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetFrameArgb(JNIEnv* e,jobject t,jint rw,jint rh){
+    pthread_mutex_lock(&g_lock);if(!g_session||!g_session->fb_pixels||g_session->fb_size==0){pthread_mutex_unlock(&g_lock);return NULL;}
+    jintArray ret=(*e)->NewIntArray(e,g_session->fb_size);
+    if(ret){pthread_mutex_lock(&g_session->mutex);(*e)->SetIntArrayRegion(e,ret,0,g_session->fb_size,g_session->fb_pixels);pthread_mutex_unlock(&g_session->mutex);}
+    pthread_mutex_unlock(&g_lock);return ret;}
+JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetFrameId(JNIEnv* e,jobject t){
+    (void)e;(void)t;
+    jlong id=0;
+    pthread_mutex_lock(&g_lock);
+    RdpSession* s=g_session;
+    if(s){pthread_mutex_lock(&s->mutex);id=(jlong)s->frame_id;pthread_mutex_unlock(&s->mutex);}
+    pthread_mutex_unlock(&g_lock);
+    return id;}
+JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameToBitmap(JNIEnv* e,jobject t,jobject bitmap){
+    (void)t;
+    pthread_mutex_lock(&g_lock);
+    RdpSession* s=g_session;
+    if(!s||!s->fb_pixels||s->fb_size<=0||!bitmap){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
+    AndroidBitmapInfo info;
+    if(AndroidBitmap_getInfo(e,bitmap,&info)!=ANDROID_BITMAP_RESULT_SUCCESS){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
+    if(info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888||info.width!=(uint32_t)s->fb_width||info.height!=(uint32_t)s->fb_height){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
+    void* pixels=NULL;
+    if(AndroidBitmap_lockPixels(e,bitmap,&pixels)!=ANDROID_BITMAP_RESULT_SUCCESS){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
+    pthread_mutex_lock(&s->mutex);
+    /* AndroidBitmap RGBA_8888 memory is byte-order RGBA, while fb_pixels is
+       Java/Compose ARGB int data (0xAARRGGBB). Do not memcpy, otherwise red
+       and blue are swapped on little-endian devices. */
+    uint8_t* out=(uint8_t*)pixels;
+    for(int i=0;i<s->fb_size;i++){
+        uint32_t argb=(uint32_t)s->fb_pixels[i];
+        out[i*4+0]=(uint8_t)((argb>>16)&0xFF); /* R */
+        out[i*4+1]=(uint8_t)((argb>>8)&0xFF);  /* G */
+        out[i*4+2]=(uint8_t)(argb&0xFF);       /* B */
+        out[i*4+3]=(uint8_t)((argb>>24)&0xFF); /* A */
+    }
+    pthread_mutex_unlock(&s->mutex);
+    AndroidBitmap_unlockPixels(e,bitmap);
+    pthread_mutex_unlock(&g_lock);
+    return JNI_TRUE;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendPointerEvent(JNIEnv* e,jobject t,jint x,jint y,jint btn){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
+    rdpInput* in=s->instance->context->input;UINT16 f=PTR_FLAGS_MOVE;
+    if(btn==1)f=PTR_FLAGS_BUTTON1|PTR_FLAGS_DOWN;else if(btn==2)f=PTR_FLAGS_BUTTON2|PTR_FLAGS_DOWN;else if(btn==3)f=PTR_FLAGS_BUTTON3|PTR_FLAGS_DOWN;
+    in->MouseEvent(in,f,(UINT16)x,(UINT16)y);
+    if(btn!=0){UINT16 r=(btn==1)?PTR_FLAGS_BUTTON1:(btn==2)?PTR_FLAGS_BUTTON2:PTR_FLAGS_BUTTON3;in->MouseEvent(in,r,(UINT16)x,(UINT16)y);}
+    pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendWheelEvent(JNIEnv* e,jobject t,jint x,jint y,jint delta){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
+    if(delta==0){pthread_mutex_unlock(&g_lock);return 0;}
+    UINT16 amount=(UINT16)(abs(delta)>0xFF?0xFF:abs(delta));
+    UINT16 flags=(delta<0)
+        ? (PTR_FLAGS_WHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF))
+        : (PTR_FLAGS_WHEEL|amount);
+    s->instance->context->input->MouseEvent(s->instance->context->input,flags,(UINT16)x,(UINT16)y);
+    pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendHWheelEvent(JNIEnv* e,jobject t,jint x,jint y,jint delta){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
+    if(delta==0){pthread_mutex_unlock(&g_lock);return 0;}
+    UINT16 amount=(UINT16)(abs(delta)>0xFF?0xFF:abs(delta));
+    UINT16 flags=(delta<0)
+        ? (PTR_FLAGS_HWHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF))
+        : (PTR_FLAGS_HWHEEL|amount);
+    s->instance->context->input->MouseEvent(s->instance->context->input,flags,(UINT16)x,(UINT16)y);
+    pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendWheelBatch(JNIEnv* e,jobject t,jint x,jint y,jint vDelta,jint hDelta){
+    (void)e;(void)t;
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context||!s->instance->context->input){pthread_mutex_unlock(&g_lock);return -1;}
+    rdpInput* input=s->instance->context->input;
+    if(vDelta!=0){int d=(int)vDelta;UINT16 amount=(UINT16)(abs(d)>0xFF?0xFF:abs(d));UINT16 flags=(d<0)?(PTR_FLAGS_WHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF)):(PTR_FLAGS_WHEEL|amount);input->MouseEvent(input,flags,(UINT16)x,(UINT16)y);}
+    if(hDelta!=0){int d=(int)hDelta;UINT16 amount=(UINT16)(abs(d)>0xFF?0xFF:abs(d));UINT16 flags=(d<0)?(PTR_FLAGS_HWHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF)):(PTR_FLAGS_HWHEEL|amount);input->MouseEvent(input,flags,(UINT16)x,(UINT16)y);}
+    pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendKeyEvent(JNIEnv* e,jobject t,jint code,jint down){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
+    s->instance->context->input->KeyboardEvent(s->instance->context->input,(UINT16)(down?0:KBD_FLAGS_RELEASE),(UINT16)code);
+    pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUnicodeChar(JNIEnv* e,jobject t,jint code){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context||!s->instance->context->input){pthread_mutex_unlock(&g_lock);return -1;}
+    UINT16 c=(UINT16)(code&0xFFFF);
+    rdpInput* in=s->instance->context->input;
+    in->UnicodeKeyboardEvent(in,0,c);
+    in->UnicodeKeyboardEvent(in,KBD_FLAGS_RELEASE,c);
+    pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendClipboardText(JNIEnv* e,jobject t,jstring text){return 0;}
