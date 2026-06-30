@@ -524,8 +524,12 @@ JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameTo
     }
     for(int yy=0;yy<dh;yy++){
         int offset=(dy+yy)*w+dx;
-        uint8_t* dst=(uint8_t*)pixels+(size_t)(dy+yy)*info.stride+(size_t)dx*4U;
-        memcpy(dst,s->fb_pixels+offset,(size_t)dw*4U);
+        uint32_t* dst=(uint32_t*)((uint8_t*)pixels+(size_t)(dy+yy)*info.stride+(size_t)dx*4U);
+        const uint32_t* src=(const uint32_t*)(s->fb_pixels+offset);
+        for(int xx=0;xx<dw;xx++){
+            uint32_t argb=src[xx];
+            dst[xx]=(argb&0xFF00FF00U)|((argb&0x00FF0000U)>>16)|((argb&0x000000FFU)<<16);
+        }
     }
     AndroidBitmap_unlockPixels(e,bitmap);
     jint rect[4]={(jint)dx,(jint)dy,(jint)dw,(jint)dh};
