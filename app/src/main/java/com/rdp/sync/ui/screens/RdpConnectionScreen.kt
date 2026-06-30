@@ -1,7 +1,13 @@
 package com.rdp.sync.ui.screens
 
+import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.Paint
+import android.graphics.Rect as AndroidRect
+import android.graphics.RectF
+import android.view.View
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -55,25 +61,21 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
-import com.rdp.sync.ui.rdp.RdpSurfaceView
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.max
@@ -102,7 +104,6 @@ fun RdpConnectionScreen(
     var clipboardDraft by remember { mutableStateOf("") }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
-    var connectStarted by remember(device.id) { mutableStateOf(false) }
 
     fun handleKeyboardTextChange(newValue: TextFieldValue) {
         keyboardValue = newValue
@@ -140,16 +141,14 @@ fun RdpConnectionScreen(
         return if (clamped % 2 == 0) clamped else clamped - 1
     }
 
-    val remoteWidth = mobileDesktopDimension(viewportSize.width, 320)
-    val remoteHeight = mobileDesktopDimension(viewportSize.height, 480)
+    val remoteWidth = mobileDesktopDimension((viewportSize.width * 0.55f).toInt(), 640)
+    val remoteHeight = mobileDesktopDimension((viewportSize.height * 0.55f).toInt(), 960)
 
-    LaunchedEffect(device.id, viewportSize.width > 0, viewportSize.height > 0) {
+    LaunchedEffect(device.id, viewportSize.width, viewportSize.height) {
         if (viewportSize.width <= 0 || viewportSize.height <= 0) {
             status = "正在测量屏幕..."
             return@LaunchedEffect
         }
-        if (connectStarted) return@LaunchedEffect
-        connectStarted = true
         status = "正在连接 ${device.host}:${device.port} (${remoteWidth}x${remoteHeight})..."
         val started = RdpConnector.connectDevice(
             host = device.host,
@@ -175,18 +174,6 @@ fun RdpConnectionScreen(
             status = RdpConnector.getStatus()
             isConnected = RdpConnector.isConnected()
             delay(500)
-        }
-    }
-
-    LaunchedEffect(Unit) {
-        while (true) {
-            val nativeStatus = RdpConnector.getStatus()
-            val nativeConnected = RdpConnector.isConnected()
-            if (nativeConnected || connectStarted) {
-                status = nativeStatus
-                isConnected = nativeConnected
-            }
-            delay(250)
         }
     }
 
@@ -236,8 +223,8 @@ fun RdpConnectionScreen(
                 textStyle = MaterialTheme.typography.bodySmall.copy(color = Color.Transparent),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(Color.Transparent)
             )
-            if ((isConnected || connectStarted) && !status.contains("失败")) {
-                RdpSurfaceCanvas(
+            if (isConnected) {
+                RdpCanvas(
                     modifier = Modifier.fillMaxSize(),
                     pointerMode = pointerMode,
                     scale = scale,
@@ -352,240 +339,6 @@ fun RdpConnectionScreen(
     }
 }
 
-
-@Composable
-fun RdpSurfaceCanvas(
-    modifier: Modifier = Modifier,
-    pointerMode: Boolean,
-    scale: Float,
-    pan: Offset,
-    onTransform: (Float, Offset) -> Unit
-) {
-    var surfaceView by remember { mutableStateOf<RdpSurfaceView?>(null) }
-    var remoteCursor by remember { mutableStateOf(Offset(RdpConnector.getWidth() / 2f, RdpConnector.getHeight() / 2f)) }
-    var cursorReady by remember { mutableStateOf(false) }
-    var touchScrollRemainderX by remember { mutableFloatStateOf(0f) }
-    var touchScrollRemainderY by remember { mutableFloatStateOf(0f) }
-    var pendingScrollX by remember { mutableFloatStateOf(0f) }
-    var pendingScrollY by remember { mutableFloatStateOf(0f) }
-    var flingVelocityX by remember { mutableFloatStateOf(0f) }
-    var flingVelocityY by remember { mutableFloatStateOf(0f) }
-    var touchScrollAxis by remember { mutableStateOf(0) }
-    var touchScrollDrag by remember { mutableStateOf(Offset.Zero) }
-    var touchScrollDragging by remember { mutableStateOf(false) }
-    var lastDragNanos by remember { mutableStateOf(0L) }
-
-    LaunchedEffect(surfaceView, pointerMode, scale, pan, remoteCursor) {
-        surfaceView?.setPointerMode(pointerMode)
-        surfaceView?.setTransform(scale, pan.x, pan.y)
-        surfaceView?.setCursor(remoteCursor.x, remoteCursor.y)
-    }
-
-    fun clampRemote(offset: Offset): Offset {
-        val remoteWidth = RdpConnector.getWidth().toFloat().coerceAtLeast(1f)
-        val remoteHeight = RdpConnector.getHeight().toFloat().coerceAtLeast(1f)
-        return Offset(offset.x.coerceIn(0f, remoteWidth - 1f), offset.y.coerceIn(0f, remoteHeight - 1f))
-    }
-
-    fun screenToRemote(offset: Offset): Offset {
-        val (x, y) = surfaceView?.screenToRemote(offset.x, offset.y) ?: (0f to 0f)
-        return clampRemote(Offset(x, y))
-    }
-
-    fun remoteDeltaFromScreen(delta: Offset): Offset {
-        val (x, y) = surfaceView?.screenDeltaToRemote(delta.x, delta.y) ?: (delta.x to delta.y)
-        val speed = if (scale < 1f) 1.15f else 1f
-        return Offset(x * speed, y * speed)
-    }
-
-    fun sendMove(remote: Offset) {
-        val clamped = clampRemote(remote)
-        remoteCursor = clamped
-        surfaceView?.setCursor(clamped.x, clamped.y)
-        RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), 0)
-    }
-
-    fun clickAt(remote: Offset, button: Int = 1) {
-        val clamped = clampRemote(remote)
-        remoteCursor = clamped
-        surfaceView?.setCursor(clamped.x, clamped.y)
-        RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), button)
-        RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), 0)
-    }
-
-    fun sendScrollBatch(maxStep: Float = 32f) {
-        val anchor = clampRemote(remoteCursor)
-        var vDelta = 0
-        var hDelta = 0
-        if (touchScrollAxis == 1) {
-            touchScrollRemainderY += pendingScrollY
-            pendingScrollY = 0f
-            vDelta = touchScrollRemainderY.coerceIn(-maxStep, maxStep).roundToInt()
-            if (vDelta != 0) touchScrollRemainderY -= vDelta
-        } else if (touchScrollAxis == 2) {
-            touchScrollRemainderX += pendingScrollX
-            pendingScrollX = 0f
-            hDelta = touchScrollRemainderX.coerceIn(-maxStep, maxStep).roundToInt()
-            if (hDelta != 0) touchScrollRemainderX -= hDelta
-        }
-        if (vDelta != 0 || hDelta != 0) {
-            RdpConnector.sendWheelBatch(anchor.x.toInt(), anchor.y.toInt(), vDelta, hDelta)
-        }
-    }
-
-    LaunchedEffect(pointerMode) {
-        var lastFrameNanos = 0L
-        while (true) {
-            withFrameNanos { now ->
-                if (!pointerMode && touchScrollAxis != 0) {
-                    val dt = if (lastFrameNanos == 0L) 1f / 60f else ((now - lastFrameNanos) / 1_000_000_000f).coerceIn(0.001f, 0.05f)
-                    lastFrameNanos = now
-                    if (!touchScrollDragging) {
-                        pendingScrollX += flingVelocityX * dt
-                        pendingScrollY += flingVelocityY * dt
-                        surfaceView?.addPredictedOffset((flingVelocityX * dt).coerceIn(-24f, 24f), (flingVelocityY * dt).coerceIn(-24f, 24f))
-                    }
-                    sendScrollBatch()
-                    if (!touchScrollDragging) {
-                        val decay = 0.93f.pow(dt * 60f)
-                        flingVelocityX *= decay
-                        flingVelocityY *= decay
-                        if (abs(flingVelocityX) < 12f) flingVelocityX = 0f
-                        if (abs(flingVelocityY) < 12f) flingVelocityY = 0f
-                    }
-                    if (flingVelocityX == 0f && flingVelocityY == 0f &&
-                        abs(pendingScrollX) < 0.5f && abs(pendingScrollY) < 0.5f &&
-                        abs(touchScrollRemainderX) < 0.5f && abs(touchScrollRemainderY) < 0.5f
-                    ) {
-                        touchScrollRemainderX = 0f
-                        touchScrollRemainderY = 0f
-                    }
-                } else {
-                    lastFrameNanos = now
-                }
-            }
-        }
-    }
-
-    fun queueTouchScroll(remote: Offset, screenDelta: Offset) {
-        val clamped = clampRemote(remote)
-        remoteCursor = clamped
-        surfaceView?.setCursor(clamped.x, clamped.y)
-        surfaceView?.addPredictedOffset(screenDelta.x, screenDelta.y)
-        touchScrollDrag += screenDelta
-        if (touchScrollAxis == 0) {
-            val x = abs(touchScrollDrag.x)
-            val y = abs(touchScrollDrag.y)
-            if (max(x, y) < 8f) return
-            touchScrollAxis = if (y >= x * 1.25f) 1 else 2
-        }
-        val now = System.nanoTime()
-        val dt = if (lastDragNanos == 0L) 1f / 60f else ((now - lastDragNanos) / 1_000_000_000f).coerceIn(0.001f, 0.05f)
-        lastDragNanos = now
-        val scrollScale = 1.08f
-        val velocityBlend = 0.20f
-        if (touchScrollAxis == 1) {
-            val delta = screenDelta.y * scrollScale
-            pendingScrollY += delta
-            val instant = (delta / dt).coerceIn(-3200f, 3200f)
-            flingVelocityY = flingVelocityY * (1f - velocityBlend) + instant * velocityBlend
-            flingVelocityX = 0f
-        } else {
-            val delta = -screenDelta.x * scrollScale
-            pendingScrollX += delta
-            val instant = (delta / dt).coerceIn(-3200f, 3200f)
-            flingVelocityX = flingVelocityX * (1f - velocityBlend) + instant * velocityBlend
-            flingVelocityY = 0f
-        }
-    }
-
-    Box(
-        modifier = modifier
-            .pointerInput(pointerMode, scale, pan) {
-                if (pointerMode) detectTransformGestures { _, panChange, zoom, _ -> onTransform(zoom, panChange) }
-            }
-            .pointerInput(pointerMode, scale, pan) {
-                detectDragGestures(
-                    onDragStart = { offset ->
-                        if (pointerMode) {
-                            if (!cursorReady) {
-                                remoteCursor = screenToRemote(offset)
-                                cursorReady = true
-                            }
-                            sendMove(remoteCursor)
-                        } else {
-                            val remote = screenToRemote(offset)
-                            remoteCursor = remote
-                            surfaceView?.setCursor(remote.x, remote.y)
-                            touchScrollAxis = 0
-                            touchScrollDrag = Offset.Zero
-                            touchScrollDragging = true
-                            touchScrollRemainderX = 0f
-                            touchScrollRemainderY = 0f
-                            pendingScrollX = 0f
-                            pendingScrollY = 0f
-                            flingVelocityX = 0f
-                            flingVelocityY = 0f
-                            lastDragNanos = 0L
-                            surfaceView?.resetPrediction()
-                            RdpConnector.sendPointerEvent(remote.x.toInt(), remote.y.toInt(), 0)
-                        }
-                    },
-                    onDrag = { change, dragAmount ->
-                        if (pointerMode) {
-                            sendMove(remoteCursor + remoteDeltaFromScreen(dragAmount))
-                        } else {
-                            queueTouchScroll(screenToRemote(change.position), dragAmount)
-                        }
-                    },
-                    onDragEnd = {
-                        if (!pointerMode) {
-                            touchScrollDragging = false
-                            RdpConnector.sendPointerEvent(remoteCursor.x.toInt(), remoteCursor.y.toInt(), 0)
-                        }
-                    },
-                    onDragCancel = {
-                        if (!pointerMode) {
-                            touchScrollDragging = false
-                            RdpConnector.sendPointerEvent(remoteCursor.x.toInt(), remoteCursor.y.toInt(), 0)
-                            touchScrollAxis = 0
-                            touchScrollRemainderX = 0f
-                            touchScrollRemainderY = 0f
-                            pendingScrollX = 0f
-                            pendingScrollY = 0f
-                            flingVelocityX = 0f
-                            flingVelocityY = 0f
-                            surfaceView?.resetPrediction()
-                        }
-                    }
-                )
-            }
-            .pointerInput(pointerMode, scale, pan) {
-                detectTapGestures(
-                    onTap = { tapOffset -> clickAt(if (pointerMode) remoteCursor else screenToRemote(tapOffset)) },
-                    onDoubleTap = { tapOffset -> repeat(2) { clickAt(if (pointerMode) remoteCursor else screenToRemote(tapOffset)) } },
-                    onLongPress = { tapOffset -> clickAt(if (pointerMode) remoteCursor else screenToRemote(tapOffset), 2) }
-                )
-            }
-    ) {
-        AndroidView(
-            factory = { context ->
-                RdpSurfaceView(context).also {
-                    it.setPointerMode(pointerMode)
-                    it.setTransform(scale, pan.x, pan.y)
-                    surfaceView = it
-                }
-            },
-            update = {
-                it.setPointerMode(pointerMode)
-                it.setTransform(scale, pan.x, pan.y)
-                it.setCursor(remoteCursor.x, remoteCursor.y)
-            },
-            modifier = Modifier.fillMaxSize()
-        )
-    }
-}
-
 @Composable
 fun RdpCanvas(
     modifier: Modifier = Modifier,
@@ -594,7 +347,9 @@ fun RdpCanvas(
     pan: Offset,
     onTransform: (Float, Offset) -> Unit
 ) {
-    var bitmap by remember { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
+    var bitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var dirtyRect by remember { mutableStateOf<AndroidRect?>(null) }
+    var frameVersion by remember { mutableStateOf(0L) }
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
     var lastPointer by remember { mutableStateOf(Offset.Zero) }
     var remoteCursor by remember { mutableStateOf(Offset.Zero) }
@@ -613,8 +368,13 @@ fun RdpCanvas(
 
     LaunchedEffect(Unit) {
         while (true) {
-            bitmap = RdpConnector.getFrameBitmap()?.asImageBitmap()
-            if (!cursorReady && bitmap != null) {
+            val frame = RdpConnector.pollFrameBitmap()
+            if (frame != null) {
+                bitmap = frame.bitmap
+                dirtyRect = AndroidRect(frame.dirtyRect)
+                frameVersion = frame.frameId
+            }
+            if (!cursorReady && frame != null) {
                 remoteCursor = Offset(
                     RdpConnector.getWidth().toFloat() / 2f,
                     RdpConnector.getHeight().toFloat() / 2f
@@ -878,18 +638,16 @@ fun RdpCanvas(
     ) {
         val frame = bitmap
         if (frame != null) {
-            Image(
-                bitmap = frame,
-                contentDescription = "RDP frame",
+            val dirty = dirtyRect
+            val version = frameVersion
+            AndroidView(
+                factory = { context -> RdpBitmapView(context) },
+                update = { view ->
+                    view.setViewportTransform(scale, pan.x, pan.y)
+                    view.setFrame(frame, dirty, version)
+                },
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer(
-                        scaleX = scale,
-                        scaleY = scale,
-                        translationX = pan.x,
-                        translationY = pan.y
-                    ),
-                contentScale = ContentScale.Fit
             )
         } else {
             Text("等待远程桌面画面...", color = Color.White)
@@ -901,6 +659,76 @@ fun RdpCanvas(
                 drawCircle(Color(0xAA60A5FA), radius = 4f, center = cursor)
             }
         }
+    }
+}
+
+private class RdpBitmapView(context: Context) : View(context) {
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+    private var bitmap: Bitmap? = null
+    private var scale = 1f
+    private var panX = 0f
+    private var panY = 0f
+    private var frameVersion = 0L
+
+    fun setViewportTransform(newScale: Float, newPanX: Float, newPanY: Float) {
+        if (scale == newScale && panX == newPanX && panY == newPanY) return
+        scale = newScale
+        panX = newPanX
+        panY = newPanY
+        invalidate()
+    }
+
+    fun setFrame(newBitmap: Bitmap, dirtyRect: AndroidRect?, newFrameVersion: Long) {
+        if (bitmap !== newBitmap) {
+            bitmap = newBitmap
+            frameVersion = newFrameVersion
+            invalidate()
+            return
+        }
+        if (frameVersion == newFrameVersion) return
+        frameVersion = newFrameVersion
+        val dirty = dirtyRect
+        if (dirty == null || dirty.isEmpty) {
+            invalidate()
+        } else {
+            invalidateRemoteRect(dirty)
+        }
+    }
+
+    override fun onDraw(canvas: AndroidCanvas) {
+        super.onDraw(canvas)
+        val frame = bitmap ?: return
+        val rect = destinationRect(frame)
+        canvas.drawBitmap(frame, null, rect, paint)
+    }
+
+    private fun destinationRect(frame: Bitmap): RectF {
+        val viewWidth = width.toFloat().coerceAtLeast(1f)
+        val viewHeight = height.toFloat().coerceAtLeast(1f)
+        val fitScale = minOf(viewWidth / frame.width, viewHeight / frame.height)
+        val effectiveScale = fitScale * scale
+        val drawWidth = frame.width * effectiveScale
+        val drawHeight = frame.height * effectiveScale
+        val left = (viewWidth - drawWidth) / 2f + panX
+        val top = (viewHeight - drawHeight) / 2f + panY
+        return RectF(left, top, left + drawWidth, top + drawHeight)
+    }
+
+    private fun invalidateRemoteRect(remote: AndroidRect) {
+        val frame = bitmap ?: return
+        val dst = destinationRect(frame)
+        val sx = dst.width() / frame.width.toFloat().coerceAtLeast(1f)
+        val sy = dst.height() / frame.height.toFloat().coerceAtLeast(1f)
+        val left = (dst.left + remote.left * sx).toInt() - 2
+        val top = (dst.top + remote.top * sy).toInt() - 2
+        val right = (dst.left + remote.right * sx).toInt() + 2
+        val bottom = (dst.top + remote.bottom * sy).toInt() + 2
+        postInvalidateOnAnimation(
+            left.coerceIn(0, width),
+            top.coerceIn(0, height),
+            right.coerceIn(0, width),
+            bottom.coerceIn(0, height)
+        )
     }
 }
 

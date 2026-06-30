@@ -1,6 +1,7 @@
 package com.rdp.sync.network
 
 import android.graphics.Bitmap
+import android.graphics.Rect
 import android.util.Log
 
 object RdpConnector {
@@ -17,11 +18,11 @@ object RdpConnector {
     external fun nativeSetLibDir(path: String)
     external fun nativeGetFrameArgb(width: Int, height: Int): IntArray?
     external fun nativeGetFrameId(): Long
-    external fun nativeCopyFrameToBitmap(bitmap: Bitmap): Boolean
+    external fun nativeCopyFrameArgb(buffer: IntArray): Long
+    external fun nativeCopyFrameDirtyArgb(buffer: IntArray, dirty: IntArray): Long
     external fun nativeSendPointerEvent(x: Int, y: Int, button: Int): Int
     external fun nativeSendWheelEvent(x: Int, y: Int, delta: Int): Int
     external fun nativeSendHWheelEvent(x: Int, y: Int, delta: Int): Int
-    external fun nativeSendWheelBatch(x: Int, y: Int, verticalDelta: Int, horizontalDelta: Int): Int
     external fun nativeSendKeyEvent(keyCode: Int, down: Int): Int
     external fun nativeSendUnicodeChar(code: Int): Int
     external fun nativeSendClipboardText(text: String): Int
@@ -31,10 +32,17 @@ object RdpConnector {
     private const val TAG = "RdpConnector"
     @Volatile
     private var lastKotlinError: String = ""
+    private var cachedPixels: IntArray? = null
+    private var cachedBitmap: Bitmap? = null
+    private var cachedFrameId = 0L
+    private val dirtyScratch = IntArray(4)
+
+    data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
     fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720): Boolean {
         return try {
             lastKotlinError = ""
+            resetFrameCache()
             val result = nativeConnect2(
                 host.trim(),
                 port,
@@ -69,19 +77,49 @@ object RdpConnector {
 
     fun getHeight(): Int = safeNative("getHeight", 720) { nativeGetHeight().coerceAtLeast(240) }
 
-    fun getFrameId(): Long = safeNative("getFrameId", 0L) { nativeGetFrameId() }
-
-    fun copyFrameToBitmap(bitmap: Bitmap): Boolean = safeNative("copyFrameToBitmap", false) {
-        nativeCopyFrameToBitmap(bitmap)
+    fun getFrameBitmap(): Bitmap? {
+        return pollFrameBitmap()?.bitmap ?: cachedBitmap
     }
 
-    fun getFrameBitmap(): Bitmap? {
+    fun pollFrameBitmap(): FrameBitmap? {
         return try {
+            val frameId = nativeGetFrameId()
+            if (frameId <= 0L || frameId == cachedFrameId) return null
+
             val width = getWidth()
             val height = getHeight()
-            val pixels = nativeGetFrameArgb(width, height) ?: return null
-            if (pixels.size != width * height) return null
-            Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+            val size = width * height
+            if (size <= 0) return null
+
+            var cacheReset = false
+            val pixels = cachedPixels?.takeIf { it.size == size } ?: IntArray(size).also {
+                cachedPixels = it
+                cacheReset = true
+            }
+            val bitmap = cachedBitmap?.takeIf { it.width == width && it.height == height }
+                ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
+                    cachedBitmap = it
+                    cacheReset = true
+                }
+
+            val copiedFrameId = if (cacheReset) {
+                nativeCopyFrameArgb(pixels).also {
+                    dirtyScratch[0] = 0
+                    dirtyScratch[1] = 0
+                    dirtyScratch[2] = width
+                    dirtyScratch[3] = height
+                }
+            } else {
+                nativeCopyFrameDirtyArgb(pixels, dirtyScratch)
+            }
+            if (copiedFrameId <= 0L) return null
+            val x = dirtyScratch[0].coerceIn(0, width - 1)
+            val y = dirtyScratch[1].coerceIn(0, height - 1)
+            val dirtyWidth = dirtyScratch[2].coerceIn(1, width - x)
+            val dirtyHeight = dirtyScratch[3].coerceIn(1, height - y)
+            bitmap.setPixels(pixels, y * width + x, width, x, y, dirtyWidth, dirtyHeight)
+            cachedFrameId = copiedFrameId
+            FrameBitmap(bitmap, copiedFrameId, Rect(x, y, x + dirtyWidth, y + dirtyHeight))
         } catch (e: Throwable) {
             Log.e(TAG, "getFrameBitmap failed", e)
             null
@@ -98,10 +136,6 @@ object RdpConnector {
 
     fun sendHWheelEvent(x: Int, y: Int, delta: Int): Int = safeNative("sendHWheelEvent", -1) {
         nativeSendHWheelEvent(x, y, delta)
-    }
-
-    fun sendWheelBatch(x: Int, y: Int, verticalDelta: Int, horizontalDelta: Int): Int = safeNative("sendWheelBatch", -1) {
-        nativeSendWheelBatch(x, y, verticalDelta, horizontalDelta)
     }
 
     fun sendKeyEvent(keyCode: Int, down: Int): Int = safeNative("sendKeyEvent", -1) {
@@ -128,6 +162,12 @@ object RdpConnector {
 
     fun sendClipboardText(text: String): Int = safeNative("sendClipboardText", -1) {
         nativeSendClipboardText(text)
+    }
+
+    private fun resetFrameCache() {
+        cachedPixels = null
+        cachedBitmap = null
+        cachedFrameId = 0L
     }
 
     private inline fun <T> safeNative(name: String, fallback: T, block: () -> T): T {

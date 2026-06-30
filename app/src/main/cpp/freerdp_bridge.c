@@ -10,7 +10,6 @@
  */
 #include <jni.h>
 #include <android/log.h>
-#include <android/bitmap.h>
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
@@ -43,6 +42,7 @@ typedef struct {
     char diag[4096];
     int fb_width, fb_height, fb_size;
     int32_t* fb_pixels;
+    int dirty_x, dirty_y, dirty_w, dirty_h;
     volatile int64_t frame_id;
     freerdp* instance;
     pthread_t thread;
@@ -88,7 +88,7 @@ static BOOL begin_paint(rdpContext* ctx) {
 }
 
 static BOOL end_paint(rdpContext* ctx) {
-    // Copy GDI primary buffer to RdpSession frame buffer
+    // Copy the FreeRDP GDI dirty bounds to the session frame buffer.
     RdpSession* s = s_from_ctx(ctx);
     if(!s) return TRUE;
     rdpGdi* gdi = ctx->gdi;
@@ -96,17 +96,57 @@ static BOOL end_paint(rdpContext* ctx) {
     int w=(int)freerdp_settings_get_uint32(ctx->settings,FreeRDP_DesktopWidth);
     int h=(int)freerdp_settings_get_uint32(ctx->settings,FreeRDP_DesktopHeight);
     int sz=w*h; if(sz<=0) return TRUE;
+    int dx = 0, dy = 0, dw = w, dh = h;
+    if (gdi->hdc && gdi->hdc->hwnd && gdi->hdc->hwnd->invalid && !gdi->hdc->hwnd->invalid->null) {
+        HGDI_RGN invalid = gdi->hdc->hwnd->invalid;
+        dx = invalid->x;
+        dy = invalid->y;
+        dw = invalid->w;
+        dh = invalid->h;
+    }
+    if (dx < 0) { dw += dx; dx = 0; }
+    if (dy < 0) { dh += dy; dy = 0; }
+    if (dx + dw > w) dw = w - dx;
+    if (dy + dh > h) dh = h - dy;
+    if (dw <= 0 || dh <= 0) return TRUE;
+
     pthread_mutex_lock(&s->mutex);
-    if(sz!=s->fb_size){free(s->fb_pixels);s->fb_pixels=(int32_t*)calloc((size_t)sz,sizeof(int32_t));s->fb_size=sz;}
+    if(sz!=s->fb_size){
+        free(s->fb_pixels);
+        s->fb_pixels=(int32_t*)calloc((size_t)sz,sizeof(int32_t));
+        s->fb_size=sz;
+        dx=0;dy=0;dw=w;dh=h;
+    }
     if(s->fb_pixels&&gdi->primary_buffer){
         s->fb_width=w;s->fb_height=h;
-        BYTE* src=(BYTE*)gdi->primary_buffer;
-        int32_t* dst=s->fb_pixels;
-        for(int i=0;i<sz;i++) dst[i]=(int32_t)(0xFF000000U|((UINT32)src[i*4+0]<<16)|((UINT32)src[i*4+1]<<8)|(UINT32)src[i*4+2]);
+        /* Convert RGBX32 (R,G,B,X per byte) to ARGB int (A,R,G,B per byte). */
+        for (int yy = 0; yy < dh; yy++) {
+            const uint8_t* __restrict src8 = (const uint8_t*)gdi->primary_buffer + ((dy + yy) * w + dx) * 4;
+            int32_t* __restrict dst32 = s->fb_pixels + ((dy + yy) * w + dx);
+            int n = dw;
+#pragma clang loop vectorize(enable) interleave(enable)
+            while (n >= 4) {
+                uint32_t p0 = *(const uint32_t*)(src8);      /* R0,G0,B0,X0 */
+                uint32_t p1 = *(const uint32_t*)(src8 + 4);  /* R1,G1,B1,X1 */
+                uint32_t p2 = *(const uint32_t*)(src8 + 8);
+                uint32_t p3 = *(const uint32_t*)(src8 + 12);
+                dst32[0] = (int32_t)(0xFF000000U | ((p0 & 0x00FF0000U) >> 16) | (p0 & 0x0000FF00U) | ((p0 & 0x000000FFU) << 16));
+                dst32[1] = (int32_t)(0xFF000000U | ((p1 & 0x00FF0000U) >> 16) | (p1 & 0x0000FF00U) | ((p1 & 0x000000FFU) << 16));
+                dst32[2] = (int32_t)(0xFF000000U | ((p2 & 0x00FF0000U) >> 16) | (p2 & 0x0000FF00U) | ((p2 & 0x000000FFU) << 16));
+                dst32[3] = (int32_t)(0xFF000000U | ((p3 & 0x00FF0000U) >> 16) | (p3 & 0x0000FF00U) | ((p3 & 0x000000FFU) << 16));
+                src8 += 16; dst32 += 4; n -= 4;
+            }
+            while (n > 0) {
+                uint32_t p = *(const uint32_t*)src8;
+                *dst32++ = (int32_t)(0xFF000000U | ((p & 0x00FF0000U) >> 16) | (p & 0x0000FF00U) | ((p & 0x000000FFU) << 16));
+                src8 += 4; n--;
+            }
+        }
+        s->dirty_x=dx;s->dirty_y=dy;s->dirty_w=dw;s->dirty_h=dh;
         s->frame_id++;
     }
     pthread_mutex_unlock(&s->mutex);
-    if(!s->connected){pthread_mutex_lock(&s->mutex);s->connected=1;strncpy(s->status,"已连接",sizeof(s->status)-1);pthread_cond_broadcast(&s->cond);pthread_mutex_unlock(&s->mutex);LOGI("First frame rendered");}
+    if(!s->connected){pthread_mutex_lock(&s->mutex);s->connected=1;strncpy(s->status,"已连接",sizeof(s->status)-1);pthread_cond_broadcast(&s->cond);pthread_mutex_unlock(&s->mutex);/* LOGI removed for perf */}
     return TRUE;
 }
 
@@ -283,8 +323,8 @@ static void* thread_fn(void* arg) {
         }
         if(freerdp_shall_disconnect_context(inst->context)) break;
         // Small sleep to avoid busy-waiting (no eventfd in our simple setup)
-        struct timespec ts = {0, 1000000}; // 1ms: reduce input/frame pacing latency
-        nanosleep(&ts, NULL);
+        struct timespec ts = {0, 10000000}; // 10ms
+        sched_yield();
     }
     
     // Disconnect (gdi_free is called by post_disconnect callback during disconnect)
@@ -343,7 +383,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     const char* host=(*e)->GetStringUTFChars(e,jh,NULL);int port=(int)jp;
     const char* user=(*e)->GetStringUTFChars(e,ju,NULL);const char* pass=(*e)->GetStringUTFChars(e,jpw,NULL);
     const char* domain=(*e)->GetStringUTFChars(e,jd,NULL);
-    LOGI("connect requested");
+    LOGI("connect host=%s port=%d user=%s",host,port,user);
     
     freerdp* inst = create_instance();
     if(!inst){snprintf(g_startup_error,sizeof(g_startup_error),"create_instance failed");goto fail;}
@@ -358,8 +398,11 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     freerdp_settings_set_uint32(s,FreeRDP_DesktopWidth,(UINT32)(jw>0?jw:1280));
     freerdp_settings_set_uint32(s,FreeRDP_DesktopHeight,(UINT32)(jh2>0?jh2:720));
     freerdp_settings_set_uint16(s,FreeRDP_DesktopOrientation,(jw>jh2)?ORIENTATION_LANDSCAPE:ORIENTATION_PORTRAIT);
-    freerdp_settings_set_uint32(s,FreeRDP_DesktopScaleFactor,140);
-    freerdp_settings_set_uint32(s,FreeRDP_DeviceScaleFactor,140);
+    freerdp_settings_set_uint32(s,FreeRDP_DesktopPhysicalWidth,(UINT32)(jw>0?jw:1280));
+    freerdp_settings_set_uint32(s,FreeRDP_DesktopPhysicalHeight,(UINT32)(jh2>0?jh2:720));
+    freerdp_settings_set_bool(s,FreeRDP_SupportMonitorLayoutPdu,TRUE);
+    freerdp_settings_set_uint32(s,FreeRDP_DesktopScaleFactor,100);
+    freerdp_settings_set_uint32(s,FreeRDP_DeviceScaleFactor,100);
     freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,TRUE);
     freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,TRUE);
     freerdp_settings_set_uint32(s,FreeRDP_ColorDepth,32);
@@ -372,7 +415,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     pthread_mutex_init(&session->mutex,NULL);pthread_cond_init(&session->cond,NULL);
     session->instance=inst;
     snprintf(session->status,sizeof(session->status),"初始化");
-    snprintf(session->diag,sizeof(session->diag),"engine=FreeRDP %s\nconnection details hidden\n",FREERDP_VERSION_FULL);
+    snprintf(session->diag,sizeof(session->diag),"engine=FreeRDP %s\nhost=%s\nport=%d\nuser=%s\n",FREERDP_VERSION_FULL,host,port,user);
     pthread_mutex_lock(&g_lock);if(g_session){session_destroy(g_session);g_session=NULL;}g_session=session;pthread_mutex_unlock(&g_lock);
     
     if(pthread_create(&session->thread,NULL,thread_fn,session)!=0){
@@ -405,45 +448,46 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetWidth(JNI
     pthread_mutex_lock(&g_lock);int w=g_session?g_session->fb_width:1280;pthread_mutex_unlock(&g_lock);return w;}
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetHeight(JNIEnv* e,jobject t){
     pthread_mutex_lock(&g_lock);int h=g_session?g_session->fb_height:720;pthread_mutex_unlock(&g_lock);return h;}
+JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetFrameId(JNIEnv* e,jobject t){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;int64_t id=0;
+    if(s){pthread_mutex_lock(&s->mutex);id=s->frame_id;pthread_mutex_unlock(&s->mutex);}
+    pthread_mutex_unlock(&g_lock);return (jlong)id;}
+JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameArgb(JNIEnv* e,jobject t,jintArray buffer){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->fb_pixels||s->fb_size==0||!buffer){pthread_mutex_unlock(&g_lock);return 0;}
+    jsize len=(*e)->GetArrayLength(e,buffer);
+    if(len<s->fb_size){pthread_mutex_unlock(&g_lock);return 0;}
+    pthread_mutex_lock(&s->mutex);
+    int size=s->fb_size;int64_t id=s->frame_id;
+    (*e)->SetIntArrayRegion(e,buffer,0,size,s->fb_pixels);
+    pthread_mutex_unlock(&s->mutex);
+    pthread_mutex_unlock(&g_lock);return (jlong)id;}
+JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameDirtyArgb(JNIEnv* e,jobject t,jintArray buffer,jintArray dirty){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->fb_pixels||s->fb_size==0||!buffer||!dirty){pthread_mutex_unlock(&g_lock);return 0;}
+    jsize len=(*e)->GetArrayLength(e,buffer);
+    jsize dirtyLen=(*e)->GetArrayLength(e,dirty);
+    if(len<s->fb_size||dirtyLen<4){pthread_mutex_unlock(&g_lock);return 0;}
+    pthread_mutex_lock(&s->mutex);
+    int w=s->fb_width,h=s->fb_height;
+    int dx=s->dirty_x,dy=s->dirty_y,dw=s->dirty_w,dh=s->dirty_h;
+    int64_t id=s->frame_id;
+    if(dx<0){dw+=dx;dx=0;} if(dy<0){dh+=dy;dy=0;}
+    if(dx+dw>w)dw=w-dx; if(dy+dh>h)dh=h-dy;
+    if(dw<=0||dh<=0){dx=0;dy=0;dw=w;dh=h;}
+    for(int yy=0;yy<dh;yy++){
+        int offset=(dy+yy)*w+dx;
+        (*e)->SetIntArrayRegion(e,buffer,offset,dw,s->fb_pixels+offset);
+    }
+    jint rect[4]={(jint)dx,(jint)dy,(jint)dw,(jint)dh};
+    (*e)->SetIntArrayRegion(e,dirty,0,4,rect);
+    pthread_mutex_unlock(&s->mutex);
+    pthread_mutex_unlock(&g_lock);return (jlong)id;}
 JNIEXPORT jintArray JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetFrameArgb(JNIEnv* e,jobject t,jint rw,jint rh){
     pthread_mutex_lock(&g_lock);if(!g_session||!g_session->fb_pixels||g_session->fb_size==0){pthread_mutex_unlock(&g_lock);return NULL;}
     jintArray ret=(*e)->NewIntArray(e,g_session->fb_size);
     if(ret){pthread_mutex_lock(&g_session->mutex);(*e)->SetIntArrayRegion(e,ret,0,g_session->fb_size,g_session->fb_pixels);pthread_mutex_unlock(&g_session->mutex);}
     pthread_mutex_unlock(&g_lock);return ret;}
-JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetFrameId(JNIEnv* e,jobject t){
-    (void)e;(void)t;
-    jlong id=0;
-    pthread_mutex_lock(&g_lock);
-    RdpSession* s=g_session;
-    if(s){pthread_mutex_lock(&s->mutex);id=(jlong)s->frame_id;pthread_mutex_unlock(&s->mutex);}
-    pthread_mutex_unlock(&g_lock);
-    return id;}
-JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameToBitmap(JNIEnv* e,jobject t,jobject bitmap){
-    (void)t;
-    pthread_mutex_lock(&g_lock);
-    RdpSession* s=g_session;
-    if(!s||!s->fb_pixels||s->fb_size<=0||!bitmap){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
-    AndroidBitmapInfo info;
-    if(AndroidBitmap_getInfo(e,bitmap,&info)!=ANDROID_BITMAP_RESULT_SUCCESS){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
-    if(info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888||info.width!=(uint32_t)s->fb_width||info.height!=(uint32_t)s->fb_height){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
-    void* pixels=NULL;
-    if(AndroidBitmap_lockPixels(e,bitmap,&pixels)!=ANDROID_BITMAP_RESULT_SUCCESS){pthread_mutex_unlock(&g_lock);return JNI_FALSE;}
-    pthread_mutex_lock(&s->mutex);
-    /* AndroidBitmap RGBA_8888 memory is byte-order RGBA, while fb_pixels is
-       Java/Compose ARGB int data (0xAARRGGBB). Do not memcpy, otherwise red
-       and blue are swapped on little-endian devices. */
-    uint8_t* out=(uint8_t*)pixels;
-    for(int i=0;i<s->fb_size;i++){
-        uint32_t argb=(uint32_t)s->fb_pixels[i];
-        out[i*4+0]=(uint8_t)((argb>>16)&0xFF); /* R */
-        out[i*4+1]=(uint8_t)((argb>>8)&0xFF);  /* G */
-        out[i*4+2]=(uint8_t)(argb&0xFF);       /* B */
-        out[i*4+3]=(uint8_t)((argb>>24)&0xFF); /* A */
-    }
-    pthread_mutex_unlock(&s->mutex);
-    AndroidBitmap_unlockPixels(e,bitmap);
-    pthread_mutex_unlock(&g_lock);
-    return JNI_TRUE;}
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendPointerEvent(JNIEnv* e,jobject t,jint x,jint y,jint btn){
     pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
     if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
@@ -471,14 +515,6 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendHWheelEv
         ? (PTR_FLAGS_HWHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF))
         : (PTR_FLAGS_HWHEEL|amount);
     s->instance->context->input->MouseEvent(s->instance->context->input,flags,(UINT16)x,(UINT16)y);
-    pthread_mutex_unlock(&g_lock);return 0;}
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendWheelBatch(JNIEnv* e,jobject t,jint x,jint y,jint vDelta,jint hDelta){
-    (void)e;(void)t;
-    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
-    if(!s||!s->instance||!s->instance->context||!s->instance->context->input){pthread_mutex_unlock(&g_lock);return -1;}
-    rdpInput* input=s->instance->context->input;
-    if(vDelta!=0){int d=(int)vDelta;UINT16 amount=(UINT16)(abs(d)>0xFF?0xFF:abs(d));UINT16 flags=(d<0)?(PTR_FLAGS_WHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF)):(PTR_FLAGS_WHEEL|amount);input->MouseEvent(input,flags,(UINT16)x,(UINT16)y);}
-    if(hDelta!=0){int d=(int)hDelta;UINT16 amount=(UINT16)(abs(d)>0xFF?0xFF:abs(d));UINT16 flags=(d<0)?(PTR_FLAGS_HWHEEL|PTR_FLAGS_WHEEL_NEGATIVE|((0x100-amount)&0xFF)):(PTR_FLAGS_HWHEEL|amount);input->MouseEvent(input,flags,(UINT16)x,(UINT16)y);}
     pthread_mutex_unlock(&g_lock);return 0;}
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendKeyEvent(JNIEnv* e,jobject t,jint code,jint down){
     pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
