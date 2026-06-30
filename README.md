@@ -1,141 +1,224 @@
 # RdpSync
 
-> Android RDP 远程桌面客户端 · WebDAV 设备同步 · 针对移动端触摸操作深度优化
-> 
-> **已知唯一同时具备 WebDAV 同步 + 移动端触控优化的开源 Android RDP 客户端**
+Android RDP remote desktop client with WebDAV device synchronization and mobile-first touch controls.
+
+RdpSync focuses on a very specific gap: an open Android RDP client that can keep RDP device profiles in sync through a generic WebDAV endpoint. In practice, it is one of the few, and currently known to be the only open mobile RDP app in this niche that combines RDP connectivity, WebDAV profile sync, and touch/scrolling optimizations in one project.
 
 [![Android](https://img.shields.io/badge/Android-8.0%2B-green)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-blue)](https://kotlinlang.org)
-[![FreeRDP](https://img.shields.io/badge/FreeRDP-3.24.2-orange)](https://www.freerdp.com)
+[![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-## ✨ 核心特性
+## Highlights
 
-### 渲染性能（V1.0.7 经过完整流畅度优化）
+- RDP desktop connections powered by FreeRDP through a small JNI bridge.
+- WebDAV synchronization for saved device profiles across Android devices.
+- Mobile-oriented pointer mode and direct-touch mode.
+- Smooth touch scrolling with wheel batching and fling decay.
+- SurfaceView based renderer paced by Android vsync.
+- Reusable bitmap/frame buffer path to reduce allocations during long sessions.
+- Native dirty-rectangle tracking and `frameId` de-duplication to avoid unnecessary redraws.
+- Adaptive remote resolution for phone and foldable screen ratios.
+- No analytics SDK, telemetry SDK, advertising SDK, or bundled third-party tracking.
 
-- **Bitmap 复用** — 分辨率变化时创建一次，不再每帧分配新 Bitmap，消除 GC 压力
-- **frameId 去重刷新** — 画面静止时 CPU 降至接近零，不再每 16ms 无效轮询
-- **dirty rect 局部更新** — 只拷贝和绘制 FreeRDP GDI 报告的脏区域，而非整帧搬运
-- **自定义 AndroidView 渲染** — 绕过 Compose Image 重组开销，直接 `onDraw(canvas.drawBitmap)`
-- **RGBX32 → ARGB 向量化转换** — 零色彩偏差的像素格式转换
+## Use Cases
 
-### 输入体验
+- Keep the same RDP server list on several Android phones or tablets.
+- Connect to Windows desktops, Windows Server hosts, or compatible xrdp endpoints from a touch screen.
+- Use a self-hosted WebDAV service such as Nextcloud, Alist, CloudDrive2, or another standards-compatible provider for profile backup.
+- Test or operate remote Windows tools from a mobile device without relying on a proprietary profile sync service.
 
-- **双模式输入** — 触控板鼠标模式 / 直接触摸模式一键切换
-- **精准触摸滚动** — 轴锁定 + 速度滤波 + fling 惯性衰减，接近原生滚动手感
-- **60fps 滚轮调度** — Android 端对 Windows 端的平滑滚轮事件发送
-- **键盘输入** — 完整的 Unicode 文本发送支持
+## Feature Overview
 
-### 连接管理
+### RDP Connection
 
-- **WebDAV 设备同步** — 连接配置（主机/端口/账号/分辨率）加密存储并通过 WebDAV 在多设备间共享
-- **自适应分辨率** — 按手机屏幕比例自动计算远端桌面分辨率，折叠屏友好
-- **屏幕常亮** — RDP 连接期间保持屏幕唤醒
-- **硬件加速** — AndroidManifest 启用 GPU 渲染
+- Host, port, username, password, domain, server name, and resolution fields.
+- CredSSP/NLA oriented connection path through FreeRDP.
+- Certificate acceptance mode suitable for lab/self-hosted RDP endpoints.
+- Screen keep-awake behavior during an active remote desktop session.
+- Hardware accelerated Android activity rendering.
 
-### 隐私与安全
+### Mobile Input
 
-- 所有数据本地存储（Room 数据库 + DataStore）
-- WebDAV 通信使用 Basic Auth over HTTPS
-- 无遥测、无分析、无第三方数据收集
+- Pointer mode for trackpad-like cursor control.
+- Direct-touch mode for touch-to-coordinate interaction.
+- Unicode text input support.
+- Axis-aware scroll handling and 60 fps wheel event scheduling.
+- Fling velocity smoothing to avoid overly aggressive remote scrolling.
 
-## 🏗️ 技术架构
+### Rendering
 
-| 层 | 技术栈 |
-|---|--------|
-| UI | Jetpack Compose + 自定义 AndroidView（`RdpBitmapView`） |
-| 状态管理 | Compose `mutableStateOf` + ViewModel + Flow |
-| 持久化 | Room (SQLite) + DataStore Preferences |
-| 网络同步 | OkHttp + WebDAV (Basic Auth over HTTPS) |
-| RDP 引擎 | FreeRDP 3.24.2（C JNI bridge，ARM64 交叉编译） |
-| 加密 | OpenSSL 3.4.1（静态链接到 native `.so`） |
-| 构建 | Gradle + CMake + NDK 26 |
+- FreeRDP GDI renders into a native primary buffer.
+- JNI copies the remote frame into an Android-compatible ARGB buffer.
+- A single reusable Android `Bitmap` is retained across frames when size is stable.
+- `frameId` only advances when the native side has a changed frame.
+- Dirty rectangles are tracked by the native bridge and used to reduce pixel copying work.
+- `RdpSurfaceView` draws through `SurfaceHolder.lockCanvas()` on Choreographer vsync.
 
-### 渲染数据流
+### WebDAV Sync
 
+- The app serializes saved device profiles into `rdpsync_devices.json`.
+- WebDAV upload, download, merge, and connection-test flows are implemented with OkHttp.
+- The connection test validates collection creation and read/write/delete behavior.
+- URLs are normalized so a mistakenly entered file URL can be treated as its parent collection.
+- Merge uses a stable device key based on host, port, username, and domain.
+
+## Architecture
+
+| Area | Implementation |
+| --- | --- |
+| UI | Jetpack Compose screens plus `RdpSurfaceView` for the live desktop |
+| State | ViewModel, Kotlin Flow, Compose state |
+| Local data | Room database for device profiles, SharedPreferences for WebDAV settings |
+| Sync | OkHttp WebDAV client, JSON payload format |
+| RDP engine | FreeRDP 3.x native libraries |
+| Native bridge | C/JNI bridge in `app/src/main/cpp/freerdp_bridge.c` |
+| Crypto/TLS dependency | OpenSSL built for Android and linked with FreeRDP |
+| Build | Gradle, Android Gradle Plugin, CMake, Android NDK |
+
+### Data Flow
+
+```text
+Compose screens
+  -> DeviceViewModel
+  -> Room / SharedPreferences / SyncManager
+  -> WebDavSyncService
+  -> WebDAV collection / rdpsync_devices.json
 ```
-FreeRDP GDI EndPaint (dirty rects)
-  → native C 桥接层记录脏区域
-  → JNI: nativeGetFrameId() → frameId 去重判断
-  → JNI: nativeCopyFrameArgb(IntArray) → 仅拷贝脏区域像素
-  → Kotlin: Bitmap.setPixels(dirtyRect)
-  → RdpBitmapView: postInvalidateOnAnimation(dirtyRect)
-  → View.onDraw(canvas.drawBitmap)
+
+```text
+RdpConnectionScreen
+  -> RdpConnector Kotlin wrapper
+  -> JNI native bridge
+  -> FreeRDP instance and GDI callbacks
+  -> native frame buffer + dirty rectangle metadata
+  -> RdpSurfaceView bitmap copy and canvas draw
 ```
 
-## 📊 与同类客户端对比
+### Native Render Loop
 
-| 能力 | RdpSync | Microsoft RD Client | aFreeRDP | bVNC | 1Remote |
-|------|---------|-------------------|----------|------|---------|
-| RDP 连接 | ✅ | ✅ | ✅ | ❌ VNC only | ✅ (PC) |
-| 触控板鼠标模式 | ✅ | ✅ | ✅ | -- | ❌ |
-| 直接触摸模式 | ✅ | ✅ | ❌ | -- | ❌ |
-| 触摸滚动优化 | ✅✅ 超越 | ✅ | ❌ | ❌ | -- |
-| 脏区域局部刷新 | ✅ | ❌ 整帧 | ✅ | ❌ | ❌ |
-| frameId 去重 | ✅ | ❌ | ❌ | ❌ | ❌ |
-| 自适应手机分辨率 | ✅ | ✅ | ❌ | ❌ | ❌ |
-| WebDAV 设备同步 | ✅ | ❌ | ❌ | ❌ | ❌ |
-| 硬件加速 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 开源 | ✅ MIT | ❌ | ✅ GPLv2 | ✅ GPLv3 | ✅ MIT |
-| 移动端 | ✅ | ✅ | ✅ | ✅ | ❌ |
+```text
+FreeRDP EndPaint callback
+  -> read GDI invalid region
+  -> convert RGBX32 pixels to Android ARGB
+  -> store dirty rectangle and increment frameId
+  -> Kotlin checks frameId
+  -> copy frame into reusable Bitmap
+  -> SurfaceView draws on the next vsync
+```
 
-## 🚀 快速开始
+## Comparison
 
-### 下载
+| Capability | RdpSync | Microsoft RD Client | aFreeRDP | bVNC | 1Remote |
+| --- | --- | --- | --- | --- | --- |
+| Android RDP client | Yes | Yes | Yes | No, VNC focused | No, desktop focused |
+| Open source | Yes | No | Yes | Yes | Yes |
+| WebDAV profile sync | Yes | No | No | No | No |
+| Self-hosted sync backend | Yes | No | No | No | No |
+| Pointer-style mobile control | Yes | Yes | Yes | Not RDP | No |
+| Direct touch mode | Yes | Yes | Limited | Not RDP | No |
+| Dirty-region render path | Yes | Not documented | Varies | Not RDP | No |
+| Mobile-first resolution handling | Yes | Yes | Limited | Limited | No |
 
-从 [Releases](https://github.com/Shermanxwz/rdpsync-android/releases) 获取最新 APK。
+This table is a product-level comparison, not a benchmark claim. RdpSync's strongest advantage is not that it replaces every mature commercial client, but that it combines open-source Android RDP access with WebDAV-based device profile portability.
 
-- **当前版本**：`1.0.7`
-- **ABI**：`arm64-v8a`（64 位 ARM）
-- **最低系统**：Android 8.0 (API 26)
+## Privacy Model
 
-### 使用
+RdpSync is designed to avoid project-owned cloud services.
 
-1. 添加设备 — 填写 Windows 主机地址、端口、凭据
-2. 可选：配置 WebDAV 同步 — 输入 WebDAV 地址和凭据，设备列表自动云端备份
-3. 点击连接 — 进入远程桌面
-4. 工具栏按钮切换触摸/鼠标模式
+- No analytics or telemetry code is included.
+- No advertising SDK is included.
+- RDP credentials are stored locally because they are required to connect.
+- WebDAV credentials are stored locally because they are required to sync.
+- When WebDAV sync is used, device profiles are uploaded to the WebDAV server selected by the user.
+- The WebDAV JSON currently includes device connection fields, including RDP username and password.
+- Use HTTPS WebDAV endpoints and avoid syncing high-value production credentials until an encrypted credential store is implemented.
 
-### 构建
+For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
+
+## Quick Start
+
+### Download
+
+Get the latest APK from the project's GitHub Releases page.
+
+- Current app version: `1.0.7`
+- Minimum Android version: Android 8.0, API 26
+- Current packaged ABI target: `arm64-v8a`
+
+### Basic Usage
+
+1. Add a device profile with host, port, credentials, optional domain, and resolution.
+2. Open the device and start an RDP session.
+3. Switch between pointer mode and direct-touch mode from the connection screen.
+4. Optionally configure WebDAV sync and use upload, download, or merge.
+
+### Build Requirements
+
+- JDK 21 or compatible JDK for the Android build.
+- Android SDK with API 35.
+- Android NDK installed locally.
+- CMake and Ninja through the Android SDK tooling.
+- FreeRDP and OpenSSL Android native libraries built before APK packaging.
+
+### Build Commands
 
 ```bash
-# 要求：Android NDK 26+、JDK 21+
-git clone https://github.com/Shermanxwz/rdpsync-android.git
+git clone <repository-url>
 cd rdpsync-android
+
+bash scripts/build-openssl-android.sh
+bash scripts/build-freerdp-android.sh
 bash scripts/build-apk.sh
 ```
 
-## 📂 项目结构
+`scripts/build-apk.sh` expects the native FreeRDP/OpenSSL outputs under `build/freerdp-android/` and places generated `.so` files under `app/src/main/jniLibs/arm64-v8a/`. These native outputs and APK artifacts are intentionally ignored by Git.
 
+## Project Layout
+
+```text
+.
+├── app/src/main/cpp/
+│   ├── freerdp_bridge.c          # FreeRDP lifecycle, JNI calls, frame buffer bridge
+│   ├── freerdp_client_stub.c     # Native client stub symbols
+│   └── CMakeLists.txt
+├── app/src/main/java/com/rdp/sync/
+│   ├── data/                     # Room entity and DAO
+│   ├── database/                 # Room database singleton
+│   ├── manager/                  # Sync orchestration and merge logic
+│   ├── network/                  # RDP wrapper and WebDAV service
+│   ├── repository/               # Device repository
+│   ├── ui/                       # Compose screens, navigation, theme, RDP view
+│   └── viewmodel/                # DeviceViewModel and UI state
+├── scripts/                      # Native dependency and APK build scripts
+├── assets/                       # Source icon asset
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── PRIVACY.md
+└── SECURITY.md
 ```
-app/src/main/
-├── cpp/                    # FreeRDP JNI 桥接层 (C)
-│   └── freerdp_bridge.c    # nativeGetFrameId, nativeCopyFrameArgb, 脏区域管理
-├── java/com/rdp/sync/
-│   ├── data/               # Room Entity + DAO
-│   ├── database/           # Room Database
-│   ├── manager/            # 同步管理器
-│   ├── network/            # RDP 连接器 + WebDAV 服务
-│   ├── repository/         # 设备仓库
-│   ├── ui/
-│   │   ├── MainActivity.kt
-│   │   ├── navigation/     # Compose 导航
-│   │   ├── screens/        # 设备列表/编辑/详情/连接界面
-│   │   └── theme/          # 主题 + 排版
-│   └── viewmodel/          # DeviceViewModel
-└── res/                    # Android 资源
-```
 
-## 📝 更新日志
+## Roadmap
 
-见 [CHANGELOG.md](CHANGELOG.md)
+- Encrypted credential storage using Android Keystore backed keys.
+- Optional redaction or exclusion of RDP passwords from WebDAV sync payloads.
+- Multi-ABI release builds.
+- Signed release workflow.
+- Better certificate verification and trust-on-first-use UX.
+- Import/export format documentation.
+- More automated tests around sync merge behavior and WebDAV edge cases.
 
-## 📄 许可证
+## Contributing
 
-MIT License — 详见 [LICENSE](LICENSE)
+Issues and pull requests are welcome. Keep reports free of private server addresses, production credentials, personal tokens, or screenshots containing sensitive desktop content. See [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
-## 🙏 致谢
+## License
 
-- [FreeRDP](https://www.freerdp.com) — 开源 RDP 协议实现
-- [OkHttp](https://square.github.io/okhttp/) — HTTP 客户端
-- Jetpack Compose / Room / DataStore — Android 官方框架
+MIT License. See [LICENSE](LICENSE).
+
+## Acknowledgements
+
+- [FreeRDP](https://www.freerdp.com) for the RDP implementation.
+- [OpenSSL](https://www.openssl.org) for TLS and cryptographic primitives used by the native stack.
+- [OkHttp](https://square.github.io/okhttp/) for WebDAV HTTP requests.
+- Android Jetpack libraries including Compose, Room, and lifecycle components.

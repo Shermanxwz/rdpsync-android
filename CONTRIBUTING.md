@@ -1,45 +1,69 @@
 # Contributing to RdpSync
 
-感谢参与 RdpSync。当前项目重点是 Android RDP 连接体验和 WebDAV 设备列表同步。
+Thanks for helping improve RdpSync. The project is centered on Android RDP connectivity, mobile touch interaction, and WebDAV device profile synchronization.
 
-## 开发环境
+## Ground Rules
+
+- Do not commit real RDP hosts, usernames, passwords, WebDAV URLs, access tokens, private keys, personal contact details, or screenshots containing sensitive desktop content.
+- Use placeholders such as `example.com`, `user`, `password`, and `<repository-url>` in documentation and examples.
+- Keep source changes focused. Avoid unrelated formatting churn in files you are not changing.
+- Prefer clear bug reports with reproducible steps, Android version, device model, server type, and app version.
+
+## Development Environment
+
+Recommended baseline:
 
 - JDK 21
 - Android SDK 35
-- Android NDK 28.0.13004108
-- Gradle 8.13
-- Rust + `aarch64-linux-android` target
+- Android NDK installed locally
+- CMake/Ninja from Android SDK tooling
+- Gradle wrapper from this repository
+- A WebDAV test endpoint with disposable credentials
+- A test RDP endpoint with non-production credentials
 
-## 构建验证
+The current app module targets Android API 35 and minimum API 26. Native build scripts currently assume an Android NDK under `/opt/android-sdk/ndk/28.0.13004108`; override the environment or edit the script locally if your SDK layout differs.
 
-提交前请至少运行：
+## Native Dependency Build
+
+Build OpenSSL and FreeRDP before packaging the APK:
 
 ```bash
-export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
-export ANDROID_HOME=/opt/android-sdk
-export ANDROID_NDK=/opt/android-sdk/ndk/28.0.13004108
-export NDK_HOME=$ANDROID_NDK
-export CC_aarch64_linux_android=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang
-export CXX_aarch64_linux_android=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android26-clang++
-export AR_aarch64_linux_android=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar
-export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CC_aarch64_linux_android
-
-cd app/src/main/jni/rdpsync-connector
-cargo check --target aarch64-linux-android
-cargo build --release --target aarch64-linux-android
-cp target/aarch64-linux-android/release/librdpsync.so ../../../jniLibs/arm64-v8a/librdpsync.so
-cd ../../../../..
-./gradlew clean :app:assembleDebug :app:testDebugUnitTest :app:lintDebug
+bash scripts/build-openssl-android.sh
+bash scripts/build-freerdp-android.sh
 ```
 
-## RDP 调试原则
+Generated native libraries are copied into `app/src/main/jniLibs/arm64-v8a/` and are ignored by Git.
 
-- 先用 FreeRDP `/auth-only` 交叉验证账号、NLA/CredSSP 和服务端安全策略。
-- 强制 NLA 的 Windows Server 需要严格 HYBRID/HYBRID_EX：CredSSP 开启时不要同时请求 TLS 图形登录降级。
-- 发布前检查 APK 内 native ABI，不要提交伪 ABI。
+## APK Build
 
-## WebDAV 调试原则
+```bash
+bash scripts/build-apk.sh
+```
 
-- 设置页必须先通过“测试连接”。
-- WebDAV 目录 URL 不是文件 URL；如果误填 `rdpsync_devices.json`，代码会自动转为父目录。
-- 智能合并不能吞掉 WebDAV 错误，避免误覆盖云端。
+For Gradle-only checks after native libraries are present:
+
+```bash
+./gradlew --no-daemon :app:assembleDebug
+./gradlew --no-daemon :app:lintDebug
+./gradlew --no-daemon :app:testDebugUnitTest
+```
+
+## RDP Debugging Notes
+
+- Validate credentials and NLA/CredSSP behavior with a desktop FreeRDP client when possible.
+- Keep test hosts disposable. Do not paste real production server addresses into public issues.
+- If a server requires NLA, avoid adding fallback behavior that silently downgrades authentication.
+- Check that the APK contains the expected `arm64-v8a` native libraries before testing on device.
+- Keep connection logs useful but avoid logging credentials, tokens, or full private URLs.
+
+## WebDAV Debugging Notes
+
+- The settings screen should pass "test connection" before sync is considered ready.
+- WebDAV input should be a collection URL, not a direct JSON file URL. The app attempts to normalize common mistakes.
+- Test upload, download, merge, and failed-auth behavior separately.
+- Merge behavior should preserve existing useful values and must not silently swallow WebDAV errors.
+- Use HTTPS WebDAV endpoints for any non-disposable data.
+
+## Documentation Changes
+
+Documentation should describe current behavior accurately. In particular, do not claim encrypted credential storage until the implementation actually uses an encrypted store such as Android Keystore backed encryption.

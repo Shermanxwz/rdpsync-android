@@ -2,11 +2,11 @@
 
 ## Supported Versions
 
-Only the latest debug APK in `releases/` is supported for testing.
+Only the latest published APK or the latest build from the default branch is considered supported for testing.
 
 ## Reporting a Vulnerability
 
-Please open a GitHub issue with:
+Open a GitHub issue with:
 
 - RdpSync version
 - Android version and device model
@@ -14,8 +14,21 @@ Please open a GitHub issue with:
 - WebDAV server type when relevant
 - Exact error text and reproduction steps
 
-Do not paste real production passwords, access tokens, or private WebDAV URLs into public issues.
+Do not include production passwords, personal access tokens, private keys, private WebDAV URLs, private RDP hostnames/IP addresses, or screenshots that reveal sensitive desktop content. Replace them with placeholders.
 
-## Notes
+## Current Security Notes
 
-RdpSync stores RDP/WebDAV credentials locally for connection and synchronization features. Treat debug APKs as testing builds and avoid using them with high-value production credentials until a signed release build and encrypted credential store are added.
+- RDP credentials are stored locally because the app needs them to connect.
+- WebDAV credentials are stored locally because the app needs them to synchronize.
+- The current implementation does not yet provide an app-level encrypted credential store.
+- WebDAV sync uploads saved device profile data to the user-selected WebDAV server. The JSON payload currently includes RDP username and password fields.
+- Use HTTPS WebDAV endpoints.
+- Treat debug APKs as testing builds.
+- Avoid high-value production credentials until encrypted storage and a signed release workflow are in place.
+
+## Planned Hardening
+
+- Android Keystore backed encryption for local credentials.
+- Optional password exclusion or redaction for WebDAV sync.
+- Signed release artifacts.
+- Stronger certificate trust UX for RDP endpoints.

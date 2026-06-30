@@ -1,5 +1,1 @@
 blank_issues_enabled: true
-contact_links:
-  - name: RdpSync 使用说明
-    url: https://github.com/Shermanxwz/rdpsync-android#readme
-    about: 先查看 README 中的 RDP 登录、WebDAV 同步和构建说明。
