@@ -22,6 +22,7 @@ target_link_directories(rdpsync PRIVATE
 target_link_libraries(rdpsync
     freerdp3
     winpr3
+    jnigraphics
     log
     android
     ssl

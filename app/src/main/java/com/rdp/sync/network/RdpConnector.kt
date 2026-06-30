@@ -20,6 +20,7 @@ object RdpConnector {
     external fun nativeGetFrameId(): Long
     external fun nativeCopyFrameArgb(buffer: IntArray): Long
     external fun nativeCopyFrameDirtyArgb(buffer: IntArray, dirty: IntArray): Long
+    external fun nativeCopyFrameToBitmap(bitmap: Bitmap, dirty: IntArray, forceFull: Boolean): Long
     external fun nativeSendPointerEvent(x: Int, y: Int, button: Int): Int
     external fun nativeSendWheelEvent(x: Int, y: Int, delta: Int): Int
     external fun nativeSendHWheelEvent(x: Int, y: Int, delta: Int): Int
@@ -32,10 +33,10 @@ object RdpConnector {
     private const val TAG = "RdpConnector"
     @Volatile
     private var lastKotlinError: String = ""
-    private var cachedPixels: IntArray? = null
     private var cachedBitmap: Bitmap? = null
     private var cachedFrameId = 0L
     private val dirtyScratch = IntArray(4)
+    private val frameLock = Any()
 
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
@@ -88,36 +89,21 @@ object RdpConnector {
 
             val width = getWidth()
             val height = getHeight()
-            val size = width * height
-            if (size <= 0) return null
-
             var cacheReset = false
-            val pixels = cachedPixels?.takeIf { it.size == size } ?: IntArray(size).also {
-                cachedPixels = it
-                cacheReset = true
-            }
             val bitmap = cachedBitmap?.takeIf { it.width == width && it.height == height }
                 ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
                     cachedBitmap = it
                     cacheReset = true
                 }
 
-            val copiedFrameId = if (cacheReset) {
-                nativeCopyFrameArgb(pixels).also {
-                    dirtyScratch[0] = 0
-                    dirtyScratch[1] = 0
-                    dirtyScratch[2] = width
-                    dirtyScratch[3] = height
-                }
-            } else {
-                nativeCopyFrameDirtyArgb(pixels, dirtyScratch)
+            val copiedFrameId = synchronized(frameLock) {
+                nativeCopyFrameToBitmap(bitmap, dirtyScratch, cacheReset)
             }
             if (copiedFrameId <= 0L) return null
             val x = dirtyScratch[0].coerceIn(0, width - 1)
             val y = dirtyScratch[1].coerceIn(0, height - 1)
             val dirtyWidth = dirtyScratch[2].coerceIn(1, width - x)
             val dirtyHeight = dirtyScratch[3].coerceIn(1, height - y)
-            bitmap.setPixels(pixels, y * width + x, width, x, y, dirtyWidth, dirtyHeight)
             cachedFrameId = copiedFrameId
             FrameBitmap(bitmap, copiedFrameId, Rect(x, y, x + dirtyWidth, y + dirtyHeight))
         } catch (e: Throwable) {
@@ -164,8 +150,9 @@ object RdpConnector {
         nativeSendClipboardText(text)
     }
 
+    fun <T> withFrameLock(block: () -> T): T = synchronized(frameLock) { block() }
+
     private fun resetFrameCache() {
-        cachedPixels = null
         cachedBitmap = null
         cachedFrameId = 0L
     }

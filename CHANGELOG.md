@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.8 - 2026-07-01
+
+### Improved
+
+- Added real native frame-loop pacing so the FreeRDP check loop no longer hot-spins between socket checks.
+- Added direct native dirty-region copies into the Android `Bitmap` with `AndroidBitmap_lockPixels`, removing the Java `IntArray` to `Bitmap.setPixels` hop from the render path.
+- Moved RDP frame polling and bitmap updates off the Compose UI coroutine, leaving the main thread to receive completed frames and schedule invalidation.
+- Guarded bitmap writes and draws with a shared frame lock to avoid tearing while keeping the expensive copy work off the UI thread.
+
 ## 1.0.7 - 2026-06-30
 
 ### Improved

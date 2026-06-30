@@ -76,7 +76,10 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
@@ -367,8 +370,10 @@ fun RdpCanvas(
     var lastDragNanos by remember { mutableStateOf(0L) }
 
     LaunchedEffect(Unit) {
-        while (true) {
-            val frame = RdpConnector.pollFrameBitmap()
+        while (isActive) {
+            val frame = withContext(Dispatchers.Default) {
+                RdpConnector.pollFrameBitmap()
+            }
             if (frame != null) {
                 bitmap = frame.bitmap
                 dirtyRect = AndroidRect(frame.dirtyRect)
@@ -699,7 +704,9 @@ private class RdpBitmapView(context: Context) : View(context) {
         super.onDraw(canvas)
         val frame = bitmap ?: return
         val rect = destinationRect(frame)
-        canvas.drawBitmap(frame, null, rect, paint)
+        RdpConnector.withFrameLock {
+            canvas.drawBitmap(frame, null, rect, paint)
+        }
     }
 
     private fun destinationRect(frame: Bitmap): RectF {

@@ -9,12 +9,15 @@
  *   PostDisconnect -> gdi_free
  */
 #include <jni.h>
+#include <android/bitmap.h>
 #include <android/log.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <dlfcn.h>
+#include <time.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/settings.h>
 #include <freerdp/constants.h>
@@ -75,6 +78,24 @@ static void s_diag(RdpSession* s, const char* line) {
     pthread_mutex_unlock(&s->mutex);
 }
 
+static void sleep_for_frame_pacing(void) {
+    const struct timespec ts = {0, 1000000}; // 1ms
+    nanosleep(&ts, NULL);
+}
+
+static void normalize_dirty_rect(int w, int h, int* dx, int* dy, int* dw, int* dh) {
+    if (*dx < 0) { *dw += *dx; *dx = 0; }
+    if (*dy < 0) { *dh += *dy; *dy = 0; }
+    if (*dx + *dw > w) *dw = w - *dx;
+    if (*dy + *dh > h) *dh = h - *dy;
+    if (*dw <= 0 || *dh <= 0) {
+        *dx = 0;
+        *dy = 0;
+        *dw = w;
+        *dh = h;
+    }
+}
+
 // ====== Frame buffer management ======
 static RdpSession* s_from_ctx(rdpContext* ctx) {
     if(!ctx||!ctx->instance) return NULL;
@@ -104,10 +125,7 @@ static BOOL end_paint(rdpContext* ctx) {
         dw = invalid->w;
         dh = invalid->h;
     }
-    if (dx < 0) { dw += dx; dx = 0; }
-    if (dy < 0) { dh += dy; dy = 0; }
-    if (dx + dw > w) dw = w - dx;
-    if (dy + dh > h) dh = h - dy;
+    normalize_dirty_rect(w, h, &dx, &dy, &dw, &dh);
     if (dw <= 0 || dh <= 0) return TRUE;
 
     pthread_mutex_lock(&s->mutex);
@@ -322,9 +340,8 @@ static void* thread_fn(void* arg) {
             s_error(s,"连接中断"); break;
         }
         if(freerdp_shall_disconnect_context(inst->context)) break;
-        // Small sleep to avoid busy-waiting (no eventfd in our simple setup)
-        struct timespec ts = {0, 10000000}; // 10ms
-        sched_yield();
+        // Keep the simple check_fds loop from hot-spinning on Android.
+        sleep_for_frame_pacing();
     }
     
     // Disconnect (gdi_free is called by post_disconnect callback during disconnect)
@@ -472,13 +489,45 @@ JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameDi
     int w=s->fb_width,h=s->fb_height;
     int dx=s->dirty_x,dy=s->dirty_y,dw=s->dirty_w,dh=s->dirty_h;
     int64_t id=s->frame_id;
-    if(dx<0){dw+=dx;dx=0;} if(dy<0){dh+=dy;dy=0;}
-    if(dx+dw>w)dw=w-dx; if(dy+dh>h)dh=h-dy;
-    if(dw<=0||dh<=0){dx=0;dy=0;dw=w;dh=h;}
+    normalize_dirty_rect(w,h,&dx,&dy,&dw,&dh);
     for(int yy=0;yy<dh;yy++){
         int offset=(dy+yy)*w+dx;
         (*e)->SetIntArrayRegion(e,buffer,offset,dw,s->fb_pixels+offset);
     }
+    jint rect[4]={(jint)dx,(jint)dy,(jint)dw,(jint)dh};
+    (*e)->SetIntArrayRegion(e,dirty,0,4,rect);
+    pthread_mutex_unlock(&s->mutex);
+    pthread_mutex_unlock(&g_lock);return (jlong)id;}
+JNIEXPORT jlong JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameToBitmap(JNIEnv* e,jobject t,jobject bitmap,jintArray dirty,jboolean forceFull){
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->fb_pixels||s->fb_size==0||!bitmap||!dirty){pthread_mutex_unlock(&g_lock);return 0;}
+    jsize dirtyLen=(*e)->GetArrayLength(e,dirty);
+    if(dirtyLen<4){pthread_mutex_unlock(&g_lock);return 0;}
+    AndroidBitmapInfo info;
+    if(AndroidBitmap_getInfo(e,bitmap,&info)!=ANDROID_BITMAP_RESULT_SUCCESS){
+        pthread_mutex_unlock(&g_lock);return 0;
+    }
+    pthread_mutex_lock(&s->mutex);
+    int w=s->fb_width,h=s->fb_height;
+    if((int)info.width!=w||(int)info.height!=h||info.format!=ANDROID_BITMAP_FORMAT_RGBA_8888){
+        pthread_mutex_unlock(&s->mutex);pthread_mutex_unlock(&g_lock);return 0;
+    }
+    int dx=forceFull?0:s->dirty_x;
+    int dy=forceFull?0:s->dirty_y;
+    int dw=forceFull?w:s->dirty_w;
+    int dh=forceFull?h:s->dirty_h;
+    int64_t id=s->frame_id;
+    normalize_dirty_rect(w,h,&dx,&dy,&dw,&dh);
+    void* pixels=NULL;
+    if(AndroidBitmap_lockPixels(e,bitmap,&pixels)!=ANDROID_BITMAP_RESULT_SUCCESS){
+        pthread_mutex_unlock(&s->mutex);pthread_mutex_unlock(&g_lock);return 0;
+    }
+    for(int yy=0;yy<dh;yy++){
+        int offset=(dy+yy)*w+dx;
+        uint8_t* dst=(uint8_t*)pixels+(size_t)(dy+yy)*info.stride+(size_t)dx*4U;
+        memcpy(dst,s->fb_pixels+offset,(size_t)dw*4U);
+    }
+    AndroidBitmap_unlockPixels(e,bitmap);
     jint rect[4]={(jint)dx,(jint)dy,(jint)dw,(jint)dh};
     (*e)->SetIntArrayRegion(e,dirty,0,4,rect);
     pthread_mutex_unlock(&s->mutex);
