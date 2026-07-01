@@ -76,12 +76,13 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
+import com.rdp.sync.network.RdpInputDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
@@ -216,10 +217,11 @@ fun RdpConnectionScreen(
         }
     }
 
+    val disposeScope = rememberCoroutineScope()
     DisposableEffect(Unit) {
         onDispose {
             userDisconnected = true
-            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            disposeScope.launch(Dispatchers.IO) {
                 RdpConnector.disconnect()
             }
         }
@@ -700,16 +702,35 @@ fun RdpCanvas(
             .pointerInput(pointerMode, scale, pan) {
                 detectTapGestures(
                     onTap = { tapOffset ->
-                        clickAt(if (pointerMode) remoteCursor else toRemote(tapOffset))
+                        if (pointerMode) {
+                            clickAt(remoteCursor)
+                        } else {
+                            val remote = toRemote(tapOffset)
+                            if (!RdpConnector.sendRdpeiTap(remote.x.toInt(), remote.y.toInt())) {
+                                clickAt(remote)
+                            }
+                        }
                     },
                     onDoubleTap = { tapOffset ->
-                        val remote = if (pointerMode) remoteCursor else toRemote(tapOffset)
-                        repeat(2) {
-                            clickAt(remote)
+if (pointerMode) {
+                            val remote = remoteCursor
+                            repeat(2) { clickAt(remote) }
+                        } else {
+                            val remote = toRemote(tapOffset)
+                            if (!RdpConnector.sendRdpeiDoubleTap(remote.x.toInt(), remote.y.toInt())) {
+                                repeat(2) { clickAt(remote) }
+                            }
                         }
                     },
                     onLongPress = { tapOffset ->
-                        clickAt(if (pointerMode) remoteCursor else toRemote(tapOffset), 2)
+                        if (pointerMode) {
+                            clickAt(remoteCursor, 2)
+                        } else {
+                            val remote = toRemote(tapOffset)
+                            if (!RdpConnector.sendRdpeiLongPress(remote.x.toInt(), remote.y.toInt())) {
+                                clickAt(remote, 2)
+                            }
+                        }
                     }
                 )
             },

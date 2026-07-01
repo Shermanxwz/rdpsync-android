@@ -478,6 +478,7 @@ static void session_destroy(RdpSession* s) {
 }
 
 // ====== JNI ======
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean);
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean);
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint);
 
@@ -516,12 +517,12 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     return Java_com_rdp_sync_network_RdpConnector_nativeConnect3(e,t,jh,jp,ju,jpw,jd,jrn,jw,jh2,JNI_TRUE);
 }
 
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(
-    JNIEnv* e,jobject t,jstring jh,jint jp,jstring ju,jstring jpw,jstring jd,jstring jrn,jint jw,jint jh2,jboolean enableTouchInput){
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
+    JNIEnv* e,jobject t,jstring jh,jint jp,jstring ju,jstring jpw,jstring jd,jstring jrn,jint jw,jint jh2,jboolean enableTouchInput,jboolean compatMode){
     const char* host=(*e)->GetStringUTFChars(e,jh,NULL);int port=(int)jp;
     const char* user=(*e)->GetStringUTFChars(e,ju,NULL);const char* pass=(*e)->GetStringUTFChars(e,jpw,NULL);
     const char* domain=(*e)->GetStringUTFChars(e,jd,NULL);
-    LOGI("connect host=%s port=%d user=%s rdpei=%s",host,port,user,enableTouchInput?"on":"off");
+    LOGI("connect host=%s port=%d user=%s rdpei=%s compat=%s",host,port,user,enableTouchInput?"on":"off",compatMode?"on":"off");
     
     freerdp* inst = create_instance();
     if(!inst){snprintf(g_startup_error,sizeof(g_startup_error),"create_instance failed");goto fail;}
@@ -539,12 +540,20 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(
     freerdp_settings_set_uint16(s,FreeRDP_DesktopOrientation,(jw>jh2)?ORIENTATION_LANDSCAPE:ORIENTATION_PORTRAIT);
     freerdp_settings_set_uint32(s,FreeRDP_DesktopPhysicalWidth,(UINT32)(jw>0?jw:1280));
     freerdp_settings_set_uint32(s,FreeRDP_DesktopPhysicalHeight,(UINT32)(jh2>0?jh2:720));
-    freerdp_settings_set_bool(s,FreeRDP_SupportMonitorLayoutPdu,FALSE);
+    
+    if(compatMode){
+        freerdp_settings_set_bool(s,FreeRDP_SupportMonitorLayoutPdu,FALSE);
+        freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,FALSE);
+        freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,FALSE);
+        freerdp_settings_set_bool(s,FreeRDP_MultiTouchInput,FALSE);
+    } else {
+        freerdp_settings_set_bool(s,FreeRDP_SupportMonitorLayoutPdu,TRUE);
+        freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,TRUE);
+        freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,TRUE);
+        freerdp_settings_set_bool(s,FreeRDP_MultiTouchInput,enableTouchInput?TRUE:FALSE);
+    }
     freerdp_settings_set_uint32(s,FreeRDP_DesktopScaleFactor,100);
     freerdp_settings_set_uint32(s,FreeRDP_DeviceScaleFactor,100);
-    freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,FALSE);
-    freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,FALSE);
-    freerdp_settings_set_bool(s,FreeRDP_MultiTouchInput,enableTouchInput?TRUE:FALSE);
     freerdp_settings_set_bool(s,FreeRDP_NetworkAutoDetect,FALSE);
     freerdp_settings_set_bool(s,FreeRDP_SupportHeartbeatPdu,FALSE);
     freerdp_settings_set_bool(s,FreeRDP_SupportMultitransport,FALSE);
@@ -555,33 +564,53 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(
     freerdp_settings_set_bool(s,FreeRDP_RedirectSerialPorts,FALSE);
     freerdp_settings_set_bool(s,FreeRDP_RedirectParallelPorts,FALSE);
     freerdp_settings_set_uint32(s,FreeRDP_ColorDepth,32);
-    freerdp_settings_set_uint32(s,FreeRDP_RequestedProtocols,0x00000001|0x00000002);
+    freerdp_settings_set_uint32(s,FreeRDP_RequestedProtocols,0x00000001|0x00000002|0x00000008);
     freerdp_settings_set_bool(s,FreeRDP_IgnoreCertificate,TRUE);
     freerdp_settings_set_bool(s,FreeRDP_AudioPlayback,FALSE);
     
     RdpSession* session=(RdpSession*)calloc(1,sizeof(RdpSession));
-    if(!session){snprintf(g_startup_error,sizeof(g_startup_error),"内存不足");freerdp_context_free(inst);freerdp_free(inst);goto fail;}
+    if(!session){snprintf(g_startup_error,sizeof(g_startup_error),"no memory");freerdp_context_free(inst);freerdp_free(inst);goto fail;}
     pthread_mutex_init(&session->mutex,NULL);pthread_cond_init(&session->cond,NULL);
     session->instance=inst;
-    snprintf(session->status,sizeof(session->status),"初始化");
-    snprintf(session->diag,sizeof(session->diag),"engine=FreeRDP %s\nhost=%s\nport=%d\nuser=%s\n",FREERDP_VERSION_FULL,host,port,user);
-    s_diag(session,enableTouchInput?"rdpei=requested":"rdpei=disabled");
+    snprintf(session->status,sizeof(session->status),"init");
+    {
+        char diag_start[1024];
+        snprintf(diag_start,sizeof(diag_start),"engine=FreeRDP %s\nhost=%s\nport=%d\nuser=%s\n",FREERDP_VERSION_FULL,host,port,user);
+        memcpy(session->diag,diag_start,strlen(diag_start)+1);
+    }
+    if(compatMode){
+        s_diag(session,"connection=compatibility-retry");
+        s_diag(session,"rdpei=disabled");
+        s_diag(session,"display-control=off");
+        s_diag(session,"dynamic-resolution=off");
+    } else {
+        s_diag(session,"protocols=0x0000000b");
+        s_diag(session,"display-control=on");
+        s_diag(session,"dynamic-resolution=on");
+        s_diag(session,enableTouchInput?"rdpei=requested":"rdpei=disabled");
+    }
     pthread_mutex_lock(&g_lock);if(g_session){session_destroy(g_session);g_session=NULL;}g_session=session;pthread_mutex_unlock(&g_lock);
     
     if(pthread_create(&session->thread,NULL,thread_fn,session)!=0){
-        snprintf(g_startup_error,sizeof(g_startup_error),"线程创建失败");
+        snprintf(g_startup_error,sizeof(g_startup_error),"thread create failed");
         pthread_mutex_lock(&g_lock);g_session=NULL;pthread_mutex_unlock(&g_lock);
         free(session->fb_pixels);pthread_mutex_destroy(&session->mutex);pthread_cond_destroy(&session->cond);free(session);
         freerdp_context_free(inst);freerdp_free(inst);goto fail;
     }
     g_startup_error[0]=0;
     (*e)->ReleaseStringUTFChars(e,jh,host);(*e)->ReleaseStringUTFChars(e,ju,user);(*e)->ReleaseStringUTFChars(e,jpw,pass);(*e)->ReleaseStringUTFChars(e,jd,domain);
-    LOGI("nativeConnect2 returning 1");return 1;
+    LOGI("nativeConnect4 returning 1");return 1;
 fail:
     (*e)->ReleaseStringUTFChars(e,jh,host);(*e)->ReleaseStringUTFChars(e,ju,user);(*e)->ReleaseStringUTFChars(e,jpw,pass);(*e)->ReleaseStringUTFChars(e,jd,domain);
-    LOGI("nativeConnect2 returning 0: %s",g_startup_error);return 0;
+    LOGI("nativeConnect4 returning 0: %s",g_startup_error);return 0;
 }
 
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(
+    JNIEnv* e,jobject t,jstring jh,jint jp,jstring ju,jstring jpw,jstring jd,jstring jrn,jint jw,jint jh2,jboolean enableTouchInput){
+    return Java_com_rdp_sync_network_RdpConnector_nativeConnect4(e,t,jh,jp,ju,jpw,jd,jrn,jw,jh2,enableTouchInput,JNI_FALSE);
+}
+
+// nativeConnect3 old body follows (unreachable, kept for reference):
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeDisconnect(JNIEnv* e,jobject t){
     pthread_mutex_lock(&g_lock);if(g_session){session_destroy(g_session);g_session=NULL;}pthread_mutex_unlock(&g_lock);return 0;}
 JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeIsConnected(JNIEnv* e,jobject t){
