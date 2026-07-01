@@ -23,12 +23,12 @@ Do not include production passwords, personal access tokens, private keys, priva
 - The current implementation does not yet provide an app-level encrypted credential store.
 - WebDAV sync uploads saved device profile data to the user-selected WebDAV server. The JSON payload currently includes RDP username and password fields.
 - Use HTTPS WebDAV endpoints.
-- Treat debug APKs as testing builds.
-- Avoid high-value production credentials until encrypted storage and a signed release workflow are in place.
+- Treat debug APKs as testing builds only; public releases should only attach release APKs.
+- Avoid high-value production credentials until encrypted storage and a dedicated release signing key are in place.
 
 ## Planned Hardening
 
 - Android Keystore backed encryption for local credentials.
 - Optional password exclusion or redaction for WebDAV sync.
-- Signed release artifacts.
+- Dedicated non-debug release signing key and reproducible release artifact checks.
 - Stronger certificate trust UX for RDP endpoints.

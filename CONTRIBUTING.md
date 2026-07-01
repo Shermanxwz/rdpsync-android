@@ -67,3 +67,11 @@ For Gradle-only checks after native libraries are present:
 ## Documentation Changes
 
 Documentation should describe current behavior accurately. In particular, do not claim encrypted credential storage until the implementation actually uses an encrypted store such as Android Keystore backed encryption.
+
+## Release Checklist
+
+- Build public APKs from the same commit that is tagged.
+- Keep release notes aligned with the tagged source.
+- Attach release APKs only; do not attach debug APKs to public GitHub releases.
+- Verify the APK contains the native `arm64-v8a` FreeRDP/OpenSSL libraries before publishing.
+- Do one final secret scan for real hosts, usernames, passwords, WebDAV URLs, access tokens, and private keys.

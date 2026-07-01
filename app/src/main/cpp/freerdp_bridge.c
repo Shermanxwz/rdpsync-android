@@ -522,7 +522,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
     const char* host=(*e)->GetStringUTFChars(e,jh,NULL);int port=(int)jp;
     const char* user=(*e)->GetStringUTFChars(e,ju,NULL);const char* pass=(*e)->GetStringUTFChars(e,jpw,NULL);
     const char* domain=(*e)->GetStringUTFChars(e,jd,NULL);
-    LOGI("connect host=%s port=%d user=%s rdpei=%s compat=%s",host,port,user,enableTouchInput?"on":"off",compatMode?"on":"off");
+    LOGI("connect requested port=%d rdpei=%s compat=%s",port,enableTouchInput?"on":"off",compatMode?"on":"off");
     
     freerdp* inst = create_instance();
     if(!inst){snprintf(g_startup_error,sizeof(g_startup_error),"create_instance failed");goto fail;}
@@ -575,7 +575,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
     snprintf(session->status,sizeof(session->status),"init");
     {
         char diag_start[1024];
-        snprintf(diag_start,sizeof(diag_start),"engine=FreeRDP %s\nhost=%s\nport=%d\nuser=%s\n",FREERDP_VERSION_FULL,host,port,user);
+        snprintf(diag_start,sizeof(diag_start),"engine=FreeRDP %s\nport=%d\n",FREERDP_VERSION_FULL,port);
         memcpy(session->diag,diag_start,strlen(diag_start)+1);
     }
     if(compatMode){

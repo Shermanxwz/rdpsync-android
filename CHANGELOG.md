@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.11 - 2026-07-01
+
+### Fixed
+
+- Removed the public debug APK from the latest GitHub release so users only see the release artifact.
+- Bumped the app version after the `v1.0.10` tag/release-asset mismatch.
+- Removed RDP host and username values from native connection logs and startup diagnostics.
+
+### Documentation
+
+- Updated README version and renderer wording to match the current Android `View` bitmap renderer.
+- Added clearer release hygiene notes so tags, APK assets, and release notes should come from the same commit.
+
 ## 1.0.9 - 2026-07-01
 
 ### Added

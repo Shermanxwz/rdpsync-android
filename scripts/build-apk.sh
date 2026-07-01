@@ -29,9 +29,9 @@ $CC -shared -o "$JNILIBS/librdpsync.so" -O2 -fPIC \
 echo "  librdpsync.so compiled: $(ls -lh $JNILIBS/librdpsync.so | awk '{print $5}')"
 
 echo ""
-echo "=== 2. Build APK ==="
+echo "=== 2. Build release APK ==="
 cd "$PROJECT_DIR"
-./gradlew clean :app:assembleDebug --no-daemon
+./gradlew clean :app:assembleRelease --no-daemon
 echo "  APK built"
 
 echo ""
@@ -40,15 +40,15 @@ echo "  JNI symbols:"
 nm -D "$JNILIBS/librdpsync.so" | grep -E 'nativeConnect|nativeDisconnect|nativeGetStatus|nativeGetDiag'
 echo ""
 echo "  APK native libs:"
-jar tf app/build/outputs/apk/debug/app-debug.apk | grep 'lib/arm64-v8a/.*\.so'
+jar tf app/build/outputs/apk/release/app-release.apk | grep 'lib/arm64-v8a/.*\.so'
 echo ""
 echo "  APK SHA256:"
-sha256sum app/build/outputs/apk/debug/app-debug.apk
+sha256sum app/build/outputs/apk/release/app-release.apk
 
 echo ""
 echo "=== 4. Copy release ==="
 mkdir -p releases
-cp app/build/outputs/apk/debug/app-debug.apk releases/rdpsync-product.apk
+cp app/build/outputs/apk/release/app-release.apk releases/rdpsync-product.apk
 echo "  releases/rdpsync-product.apk ready"
 echo ""
 echo "=== DONE ==="

@@ -16,7 +16,7 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 - Mobile-oriented pointer mode and direct-touch mode.
 - RDPEI native touch input is attempted first in direct-touch drags, with wheel/HWheel fallback if the channel is unavailable.
 - Smooth touch scrolling with wheel batching and fling decay.
-- SurfaceView based renderer paced by Android vsync.
+- Android `View` based renderer paced by Android vsync.
 - Reusable bitmap/frame buffer path to reduce allocations during long sessions.
 - Native dirty-rectangle tracking and `frameId` de-duplication to avoid unnecessary redraws.
 - Adaptive remote resolution for phone and foldable screen ratios.
@@ -55,7 +55,7 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 - A single reusable Android `Bitmap` is retained across frames when size is stable.
 - `frameId` only advances when the native side has a changed frame.
 - Dirty rectangles are tracked by the native bridge and used to reduce pixel copying work.
-- `RdpSurfaceView` draws through `SurfaceHolder.lockCanvas()` on Choreographer vsync.
+- `RdpBitmapView` draws the reusable bitmap through Android `Canvas` invalidation.
 
 ### WebDAV Sync
 
@@ -69,7 +69,7 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 
 | Area | Implementation |
 | --- | --- |
-| UI | Jetpack Compose screens plus `RdpSurfaceView` for the live desktop |
+| UI | Jetpack Compose screens plus `RdpBitmapView` for the live desktop |
 | State | ViewModel, Kotlin Flow, Compose state |
 | Local data | Room database for device profiles, SharedPreferences for WebDAV settings |
 | Sync | OkHttp WebDAV client, JSON payload format |
@@ -94,7 +94,7 @@ RdpConnectionScreen
   -> JNI native bridge
   -> FreeRDP instance and GDI callbacks
   -> native frame buffer + dirty rectangle metadata
-  -> RdpSurfaceView bitmap copy and canvas draw
+  -> RdpBitmapView bitmap copy and canvas draw
 ```
 
 ### Native Render Loop
@@ -106,7 +106,7 @@ FreeRDP EndPaint callback
   -> store dirty rectangle and increment frameId
   -> Kotlin checks frameId
   -> copy frame into reusable Bitmap
-  -> SurfaceView draws on the next vsync
+  -> Android View draws on the next invalidation
 ```
 
 ## Comparison
@@ -144,7 +144,7 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 Get the latest APK from the project's GitHub Releases page.
 
-- Current app version: `1.0.9`
+- Current app version: `1.0.11`
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 
@@ -205,7 +205,7 @@ bash scripts/build-apk.sh
 - Encrypted credential storage using Android Keystore backed keys.
 - Optional redaction or exclusion of RDP passwords from WebDAV sync payloads.
 - Multi-ABI release builds.
-- Signed release workflow.
+- Dedicated non-debug release signing key.
 - Better certificate verification and trust-on-first-use UX.
 - Import/export format documentation.
 - More automated tests around sync merge behavior and WebDAV edge cases.
