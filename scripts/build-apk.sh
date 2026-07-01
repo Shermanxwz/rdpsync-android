@@ -24,7 +24,7 @@ $CC -shared -o "$JNILIBS/librdpsync.so" -O2 -fPIC \
     -I"$BDIR/openssl-arm64/include" \
     -L"$JNILIBS" -L"$BDIR/openssl-arm64/lib" \
     "$PROJECT_DIR/app/src/main/cpp/freerdp_bridge.c" \
-    -lfreerdp3 -lwinpr3 -lssl -lcrypto -ljnigraphics -llog -landroid \
+    -lfreerdp-client3 -lfreerdp3 -lwinpr3 -lssl -lcrypto -ljnigraphics -llog -landroid \
     -Wl,-rpath-link="$JNILIBS"
 echo "  librdpsync.so compiled: $(ls -lh $JNILIBS/librdpsync.so | awk '{print $5}')"
 

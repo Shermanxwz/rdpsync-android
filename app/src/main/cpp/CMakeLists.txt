@@ -19,7 +19,10 @@ target_link_directories(rdpsync PRIVATE
     ${CMAKE_SOURCE_DIR}/../build/freerdp-android/openssl-arm64/lib
 )
 
+target_compile_definitions(rdpsync PRIVATE _GNU_SOURCE)
+
 target_link_libraries(rdpsync
+    freerdp-client3
     freerdp3
     winpr3
     jnigraphics

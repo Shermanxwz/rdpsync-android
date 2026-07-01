@@ -14,6 +14,7 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 - RDP desktop connections powered by FreeRDP through a small JNI bridge.
 - WebDAV synchronization for saved device profiles across Android devices.
 - Mobile-oriented pointer mode and direct-touch mode.
+- RDPEI native touch input is attempted first in direct-touch drags, with wheel/HWheel fallback if the channel is unavailable.
 - Smooth touch scrolling with wheel batching and fling decay.
 - SurfaceView based renderer paced by Android vsync.
 - Reusable bitmap/frame buffer path to reduce allocations during long sessions.
@@ -42,8 +43,9 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 
 - Pointer mode for trackpad-like cursor control.
 - Direct-touch mode for touch-to-coordinate interaction.
+- RDPEI native touch down/move/up/cancel is used first for direct-touch drags when the server negotiates the channel.
 - Unicode text input support.
-- Axis-aware scroll handling and 60 fps wheel event scheduling.
+- Axis-aware scroll handling and 60 fps wheel event scheduling remain as fallback for servers or builds without RDPEI.
 - Fling velocity smoothing to avoid overly aggressive remote scrolling.
 
 ### Rendering
@@ -142,7 +144,7 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 Get the latest APK from the project's GitHub Releases page.
 
-- Current app version: `1.0.8`
+- Current app version: `1.0.9`
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 

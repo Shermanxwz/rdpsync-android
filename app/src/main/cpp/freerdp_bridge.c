@@ -5,15 +5,18 @@
  *   PreConnect -> subscribe events
  *   freerdp_connect() -> internally calls PreConnect, then PostConnect
  *   PostConnect -> gdi_init, register pointer, set BeginPaint/EndPaint/DesktopResize
- *   Thread -> freerdp_check_fds loop
+ *   Thread -> freerdp_get_event_handles / freerdp_check_event_handles loop
  *   PostDisconnect -> gdi_free
  */
+#define _GNU_SOURCE
 #include <jni.h>
 #include <android/bitmap.h>
 #include <android/log.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
+#include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <dlfcn.h>
@@ -26,6 +29,13 @@
 #include <freerdp/gdi/gdi.h>
 #include <freerdp/version.h>
 #include <freerdp/graphics.h>
+#include <freerdp/client.h>
+#include <freerdp/addin.h>
+#include <freerdp/client/channels.h>
+#include <freerdp/client/rdpei.h>
+#include <freerdp/channels/rdpei.h>
+#include <freerdp/channels/channels.h>
+#include <winpr/synch.h>
 #include <winpr/wlog.h>
 #include <openssl/evp.h>
 
@@ -54,6 +64,13 @@ typedef struct {
 static RdpSession* g_session = NULL;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_startup_error[1024] = "";
+
+enum {
+    TOUCH_EVENT_DOWN = 0,
+    TOUCH_EVENT_MOVE = 1,
+    TOUCH_EVENT_UP = 2,
+    TOUCH_EVENT_CANCEL = 3
+};
 
 static void s_status(RdpSession* s, const char* fmt, ...) {
     char b[1024]; va_list ap; va_start(ap,fmt); vsnprintf(b,sizeof(b),fmt,ap); va_end(ap);
@@ -162,6 +179,9 @@ static BOOL end_paint(rdpContext* ctx) {
         }
         s->dirty_x=dx;s->dirty_y=dy;s->dirty_w=dw;s->dirty_h=dh;
         s->frame_id++;
+        if (s->frame_id <= 5) {
+            LOGI("frame copied id=%lld size=%dx%d dirty=%d,%d %dx%d", (long long)s->frame_id, w, h, dx, dy, dw, dh);
+        }
     }
     pthread_mutex_unlock(&s->mutex);
     if(!s->connected){pthread_mutex_lock(&s->mutex);s->connected=1;strncpy(s->status,"已连接",sizeof(s->status)-1);pthread_cond_broadcast(&s->cond);pthread_mutex_unlock(&s->mutex);/* LOGI removed for perf */}
@@ -216,8 +236,50 @@ static BOOL register_pointer(rdpGraphics* graphics) {
 }
 
 // ====== PreConnect callback ======
+static void rdpsync_OnChannelConnectedEventHandler(void* context, const ChannelConnectedEventArgs* e) {
+    if (!context || !e) return;
+    if (strcmp(e->name, RDPEI_DVC_CHANNEL_NAME) == 0 || strcmp(e->name, RDPEI_CHANNEL_NAME) == 0) {
+        LOGI("RDPEI channel connected: %s", e->name);
+        RdpSession* s = s_from_ctx((rdpContext*)context);
+        if (s) s_diag(s, "rdpei=connected");
+    }
+    freerdp_client_OnChannelConnectedEventHandler(context, e);
+}
+
+static void rdpsync_OnChannelDisconnectedEventHandler(void* context, const ChannelDisconnectedEventArgs* e) {
+    if (!context || !e) return;
+    if (strcmp(e->name, RDPEI_DVC_CHANNEL_NAME) == 0 || strcmp(e->name, RDPEI_CHANNEL_NAME) == 0) {
+        LOGI("RDPEI channel disconnected: %s", e->name);
+        RdpSession* s = s_from_ctx((rdpContext*)context);
+        if (s) s_diag(s, "rdpei=disconnected");
+    }
+    freerdp_client_OnChannelDisconnectedEventHandler(context, e);
+}
+
 static BOOL pre_connect(freerdp* instance) {
     LOGI("pre_connect");
+    RdpSession* session = s_from_ctx(instance->context);
+    int rc = PubSub_SubscribeChannelConnected(instance->context->pubSub, rdpsync_OnChannelConnectedEventHandler);
+    if (rc != CHANNEL_RC_OK) {
+        LOGE("subscribe channel connected failed: 0x%08x", rc);
+        if (session) s_diag(session, "rdpei=subscribe-connected-failed");
+        return FALSE;
+    }
+    rc = PubSub_SubscribeChannelDisconnected(instance->context->pubSub, rdpsync_OnChannelDisconnectedEventHandler);
+    if (rc != CHANNEL_RC_OK) {
+        LOGE("subscribe channel disconnected failed: 0x%08x", rc);
+        if (session) s_diag(session, "rdpei=subscribe-disconnected-failed");
+        return FALSE;
+    }
+    if (!freerdp_client_load_channels(instance)) {
+        DWORD err = GetLastError();
+        LOGE("freerdp_client_load_channels failed: 0x%08lx", (unsigned long)err);
+        if (session) s_diag(session, "rdpei=load-channels-failed-fallback");
+        freerdp_settings_set_bool(instance->context->settings, FreeRDP_MultiTouchInput, FALSE);
+        return TRUE;
+    }
+    if (session) s_diag(session, "rdpei=channels-loaded");
+    LOGI("client channels loaded");
     return TRUE;
 }
 
@@ -259,7 +321,20 @@ static void post_disconnect(freerdp* instance) {
 // ====== Authentication callbacks ======
 static BOOL authenticate_ex(freerdp* instance, char** username, char** password, char** domain, rdp_auth_reason reason) {
     LOGI("authenticate_ex: reason=%d", reason);
-    // Credentials already set in settings, just return TRUE to proceed
+    if (!instance || !instance->context || !instance->context->settings) return FALSE;
+    rdpSettings* settings = instance->context->settings;
+    const char* user = freerdp_settings_get_string(settings, FreeRDP_Username);
+    const char* pass = freerdp_settings_get_string(settings, FreeRDP_Password);
+    const char* dom = freerdp_settings_get_string(settings, FreeRDP_Domain);
+    if (username && (!*username || strlen(*username) == 0) && user && strlen(user) > 0) {
+        *username = strdup(user);
+    }
+    if (password && (!*password || strlen(*password) == 0) && pass && strlen(pass) > 0) {
+        *password = strdup(pass);
+    }
+    if (domain && (!*domain || strlen(*domain) == 0) && dom && strlen(dom) > 0) {
+        *domain = strdup(dom);
+    }
     return TRUE;
 }
 
@@ -298,16 +373,19 @@ static void client_ctx_free(freerdp* instance, rdpContext* context) {
 // ====== Instance creation ======
 static freerdp* create_instance(void) {
     setenv("HOME", "/data/data/com.rdp.sync/files", 1);
-    freerdp* inst = freerdp_new();
-    if (!inst) { LOGE("freerdp_new failed"); return NULL; }
-    inst->ContextSize = sizeof(rdpContext);
-    inst->ContextNew = client_ctx_new;
-    inst->ContextFree = client_ctx_free;
-    if (!freerdp_context_new(inst)) {
-        LOGE("freerdp_context_new failed");
-        freerdp_free(inst);
+    RDP_CLIENT_ENTRY_POINTS entry = {0};
+    entry.Version = RDP_CLIENT_INTERFACE_VERSION;
+    entry.Size = sizeof(RDP_CLIENT_ENTRY_POINTS_V1);
+    entry.ContextSize = sizeof(rdpClientContext);
+    entry.ClientNew = client_ctx_new;
+    entry.ClientFree = client_ctx_free;
+
+    rdpContext* ctx = freerdp_client_context_new(&entry);
+    if (!ctx || !ctx->instance) {
+        LOGE("freerdp_client_context_new failed");
         return NULL;
     }
+    freerdp* inst = ctx->instance;
     LOGI("Instance created OK");
     return inst;
 }
@@ -331,38 +409,76 @@ static void* thread_fn(void* arg) {
     LOGI("freerdp_connect OK");
     s_status(s,"已连接"); s_diag(s,"connected=OK");
     
-    // Event loop (same as android_freerdp_run)
+    // Event loop (same shape as FreeRDP Android's android_freerdp_run).
     while(!s->terminating){
-        if(!freerdp_check_fds(inst)){
+        HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {0};
+        DWORD count = freerdp_get_event_handles(inst->context, handles, MAXIMUM_WAIT_OBJECTS);
+        if(count == 0){
+            LOGE("freerdp_get_event_handles failed");
+            s_error(s,"连接中断"); break;
+        }
+        DWORD status = WaitForMultipleObjects(count, handles, FALSE, 100);
+        if(status == WAIT_TIMEOUT) continue;
+        if(status == WAIT_FAILED){
+            LOGE("WaitForMultipleObjects failed: 0x%08lx", (unsigned long)GetLastError());
+            s_error(s,"连接中断"); break;
+        }
+        if(!freerdp_check_event_handles(inst->context)){
             UINT32 e=freerdp_get_last_error(inst->context);
             const char* es=freerdp_get_last_error_string(e);
-            LOGE("freerdp_check_fds failed: 0x%08x",e);
+            LOGE("freerdp_check_event_handles failed: 0x%08x %s",e,es?es:"?");
             s_error(s,"连接中断"); break;
         }
         if(freerdp_shall_disconnect_context(inst->context)) break;
-        // Keep the simple check_fds loop from hot-spinning on Android.
-        sleep_for_frame_pacing();
     }
     
-    // Disconnect (gdi_free is called by post_disconnect callback during disconnect)
-    freerdp_disconnect(inst);
+    // Disconnect. Skip if aborting (session_destroy already called freerdp_abort_connect_context,
+    // which tears down the connection internally). Doing a second disconnect on a freed context
+    // would crash.
+    if (!s->terminating) freerdp_disconnect(inst);
     
 cleanup:
-    s->instance=NULL;s->terminating=0;
+    s->terminating=0;
     pthread_mutex_lock(&s->mutex);s->thread_done=1;pthread_cond_broadcast(&s->cond);pthread_mutex_unlock(&s->mutex);
     LOGI("Thread exited"); return NULL;
 }
 
 static void session_destroy(RdpSession* s) {
-    if(!s) return; s->terminating=1;
-    if(s->instance&&s->instance->context) freerdp_abort_connect_context(s->instance->context);
+    if(!s) return;
+    s->terminating=1;
+    if(s->instance && s->instance->context) freerdp_abort_connect_context(s->instance->context);
     pthread_cond_broadcast(&s->cond);
-    if(s->thread&&!s->thread_done)pthread_join(s->thread,NULL);
-    if(s->instance){freerdp_context_free(s->instance);freerdp_free(s->instance);s->instance=NULL;}
-    pthread_mutex_destroy(&s->mutex);pthread_cond_destroy(&s->cond);free(s->fb_pixels);free(s);
+    if(s->thread && !s->thread_done){
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_sec += 2;
+        pthread_mutex_lock(&s->mutex);
+        while(!s->thread_done){
+            if(pthread_cond_timedwait(&s->cond, &s->mutex, &ts) != 0) break;
+        }
+        pthread_mutex_unlock(&s->mutex);
+        if(!s->thread_done){
+            // Thread is truly stuck. Detach it and leak the session resources
+            // to avoid a use-after-free crash. The thread will clean up its own
+            // stack when it finally exits (inst is still owned by the thread).
+            LOGI("thread still busy after 2s, detaching (session leaked to avoid crash)");
+            pthread_detach(s->thread);
+            return;  // DO NOT free s, fb_pixels, or context — thread may still use them
+        }
+    }
+    // Thread completed normally, safe to free everything
+    if(s->instance){
+        freerdp_client_context_free(s->instance->context);
+        s->instance = NULL;
+    }
+    pthread_mutex_destroy(&s->mutex);
+    pthread_cond_destroy(&s->cond);
+    free(s->fb_pixels);
+    free(s);
 }
 
 // ====== JNI ======
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean);
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint);
 
 JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetLibDir(JNIEnv* e, jobject t, jstring jpath) {
@@ -397,10 +513,15 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect(
 
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     JNIEnv* e,jobject t,jstring jh,jint jp,jstring ju,jstring jpw,jstring jd,jstring jrn,jint jw,jint jh2){
+    return Java_com_rdp_sync_network_RdpConnector_nativeConnect3(e,t,jh,jp,ju,jpw,jd,jrn,jw,jh2,JNI_TRUE);
+}
+
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(
+    JNIEnv* e,jobject t,jstring jh,jint jp,jstring ju,jstring jpw,jstring jd,jstring jrn,jint jw,jint jh2,jboolean enableTouchInput){
     const char* host=(*e)->GetStringUTFChars(e,jh,NULL);int port=(int)jp;
     const char* user=(*e)->GetStringUTFChars(e,ju,NULL);const char* pass=(*e)->GetStringUTFChars(e,jpw,NULL);
     const char* domain=(*e)->GetStringUTFChars(e,jd,NULL);
-    LOGI("connect host=%s port=%d user=%s",host,port,user);
+    LOGI("connect host=%s port=%d user=%s rdpei=%s",host,port,user,enableTouchInput?"on":"off");
     
     freerdp* inst = create_instance();
     if(!inst){snprintf(g_startup_error,sizeof(g_startup_error),"create_instance failed");goto fail;}
@@ -412,18 +533,29 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     freerdp_settings_set_string(s,FreeRDP_Username,user);
     freerdp_settings_set_string(s,FreeRDP_Password,pass);
     if(domain&&strlen(domain)>0)freerdp_settings_set_string(s,FreeRDP_Domain,domain);
+    freerdp_settings_set_bool(s,FreeRDP_AutoLogonEnabled,TRUE);
     freerdp_settings_set_uint32(s,FreeRDP_DesktopWidth,(UINT32)(jw>0?jw:1280));
     freerdp_settings_set_uint32(s,FreeRDP_DesktopHeight,(UINT32)(jh2>0?jh2:720));
     freerdp_settings_set_uint16(s,FreeRDP_DesktopOrientation,(jw>jh2)?ORIENTATION_LANDSCAPE:ORIENTATION_PORTRAIT);
     freerdp_settings_set_uint32(s,FreeRDP_DesktopPhysicalWidth,(UINT32)(jw>0?jw:1280));
     freerdp_settings_set_uint32(s,FreeRDP_DesktopPhysicalHeight,(UINT32)(jh2>0?jh2:720));
-    freerdp_settings_set_bool(s,FreeRDP_SupportMonitorLayoutPdu,TRUE);
+    freerdp_settings_set_bool(s,FreeRDP_SupportMonitorLayoutPdu,FALSE);
     freerdp_settings_set_uint32(s,FreeRDP_DesktopScaleFactor,100);
     freerdp_settings_set_uint32(s,FreeRDP_DeviceScaleFactor,100);
-    freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,TRUE);
-    freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,TRUE);
+    freerdp_settings_set_bool(s,FreeRDP_SupportDisplayControl,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_DynamicResolutionUpdate,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_MultiTouchInput,enableTouchInput?TRUE:FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_NetworkAutoDetect,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_SupportHeartbeatPdu,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_SupportMultitransport,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_DeviceRedirection,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_RedirectDrives,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_RedirectSmartCards,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_RedirectPrinters,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_RedirectSerialPorts,FALSE);
+    freerdp_settings_set_bool(s,FreeRDP_RedirectParallelPorts,FALSE);
     freerdp_settings_set_uint32(s,FreeRDP_ColorDepth,32);
-    freerdp_settings_set_uint32(s,FreeRDP_RequestedProtocols,0x00000002|0x00000008);
+    freerdp_settings_set_uint32(s,FreeRDP_RequestedProtocols,0x00000001|0x00000002);
     freerdp_settings_set_bool(s,FreeRDP_IgnoreCertificate,TRUE);
     freerdp_settings_set_bool(s,FreeRDP_AudioPlayback,FALSE);
     
@@ -433,6 +565,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect2(
     session->instance=inst;
     snprintf(session->status,sizeof(session->status),"初始化");
     snprintf(session->diag,sizeof(session->diag),"engine=FreeRDP %s\nhost=%s\nport=%d\nuser=%s\n",FREERDP_VERSION_FULL,host,port,user);
+    s_diag(session,enableTouchInput?"rdpei=requested":"rdpei=disabled");
     pthread_mutex_lock(&g_lock);if(g_session){session_destroy(g_session);g_session=NULL;}g_session=session;pthread_mutex_unlock(&g_lock);
     
     if(pthread_create(&session->thread,NULL,thread_fn,session)!=0){
@@ -569,6 +702,22 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendHWheelEv
         : (PTR_FLAGS_HWHEEL|amount);
     s->instance->context->input->MouseEvent(s->instance->context->input,flags,(UINT16)x,(UINT16)y);
     pthread_mutex_unlock(&g_lock);return 0;}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendTouchEvent(JNIEnv* e,jobject t,jint pointerId,jint eventType,jint x,jint y){
+    (void)e;(void)t;
+    pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
+    if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
+    rdpClientContext* cctx=(rdpClientContext*)s->instance->context;
+    if(!cctx->rdpei){pthread_mutex_unlock(&g_lock);return -2;}
+    UINT32 flags=0;
+    switch(eventType){
+        case TOUCH_EVENT_DOWN: flags=FREERDP_TOUCH_DOWN; break;
+        case TOUCH_EVENT_MOVE: flags=FREERDP_TOUCH_MOTION; break;
+        case TOUCH_EVENT_UP: flags=FREERDP_TOUCH_UP; break;
+        case TOUCH_EVENT_CANCEL: flags=FREERDP_TOUCH_CANCEL; break;
+        default: pthread_mutex_unlock(&g_lock);return -4;
+    }
+    BOOL ok=freerdp_client_handle_touch(cctx,flags,(INT32)pointerId,0,(INT32)x,(INT32)y);
+    pthread_mutex_unlock(&g_lock);return ok?0:-3;}
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendKeyEvent(JNIEnv* e,jobject t,jint code,jint down){
     pthread_mutex_lock(&g_lock);RdpSession* s=g_session;
     if(!s||!s->instance||!s->instance->context){pthread_mutex_unlock(&g_lock);return -1;}
