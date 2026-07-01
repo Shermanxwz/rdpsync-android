@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.9 - 2026-07-01
+
+### Added
+
+- Enabled the Android FreeRDP client channel build path for RDPEI native touch input (`WITH_CHANNELS=ON`, `CHANNEL_RDPEI_CLIENT=ON`, DRDYNVC client channel enabled) while keeping X11/Wayland/SDL/server components disabled.
+- Added a JNI `nativeSendTouchEvent(pointerId, eventType, x, y)` path and Kotlin `sendTouchEvent(...)` wrapper for direct-touch down/move/up/cancel events.
+- Direct-touch drag now attempts RDPEI first, so horizontal drag/scroll gestures can use native touch instead of relying only on HWheel simulation.
+
+### Fallback
+
+- If RDPEI is not compiled, the server does not negotiate the RDPEI dynamic channel, the channel disconnects, or sending a touch event fails, direct-touch falls back to the existing wheel/HWheel path and pointer/mouse fallback without crashing.
+
 ## 1.0.8 - 2026-07-01
 
 ### Improved

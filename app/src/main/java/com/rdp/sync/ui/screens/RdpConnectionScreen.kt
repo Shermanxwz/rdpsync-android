@@ -80,6 +80,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.GlobalScope
+import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.pow
@@ -107,6 +109,9 @@ fun RdpConnectionScreen(
     var clipboardDraft by remember { mutableStateOf("") }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var connectStarted by remember(device.id) { mutableStateOf(false) }
+    var rdpeiRetryStarted by remember(device.id) { mutableStateOf(false) }
+    var userDisconnected by remember(device.id) { mutableStateOf(false) }
 
     fun handleKeyboardTextChange(newValue: TextFieldValue) {
         keyboardValue = newValue
@@ -147,28 +152,50 @@ fun RdpConnectionScreen(
     val remoteWidth = mobileDesktopDimension((viewportSize.width * 0.55f).toInt(), 640)
     val remoteHeight = mobileDesktopDimension((viewportSize.height * 0.55f).toInt(), 960)
 
-    LaunchedEffect(device.id, viewportSize.width, viewportSize.height) {
-        if (viewportSize.width <= 0 || viewportSize.height <= 0) {
+    LaunchedEffect(device.id) {
+        while (viewportSize.width <= 0 || viewportSize.height <= 0) {
             status = "正在测量屏幕..."
+            delay(100)
+        }
+        if (connectStarted) {
+            while (!userDisconnected) {
+                status = RdpConnector.getStatus()
+                isConnected = RdpConnector.isConnected()
+                delay(500)
+            }
             return@LaunchedEffect
         }
-        status = "正在连接 ${device.host}:${device.port} (${remoteWidth}x${remoteHeight})..."
-        val started = RdpConnector.connectDevice(
-            host = device.host,
-            port = device.port,
-            username = device.username,
-            password = device.password,
-            domain = device.domain,
-            rdpServerName = device.rdpServerName,
-            width = remoteWidth,
-            height = remoteHeight
-        )
+        connectStarted = true
+
+        val connectWidth = mobileDesktopDimension((viewportSize.width * 0.55f).toInt(), 640)
+        val connectHeight = mobileDesktopDimension((viewportSize.height * 0.55f).toInt(), 960)
+
+        fun startConnection(enableTouchInput: Boolean): Boolean {
+            status = if (enableTouchInput) {
+                "正在连接 ${device.host}:${device.port} (${connectWidth}x${connectHeight})..."
+            } else {
+                "正在兼容模式重连 ${device.host}:${device.port}..."
+            }
+            return RdpConnector.connectDevice(
+                host = device.host,
+                port = device.port,
+                username = device.username,
+                password = device.password,
+                domain = device.domain,
+                rdpServerName = device.rdpServerName,
+                width = connectWidth,
+                height = connectHeight,
+                enableTouchInput = enableTouchInput
+            )
+        }
+
+        val started = startConnection(enableTouchInput = true)
         if (!started) {
             val nativeStatus = RdpConnector.getStatus()
             status = if (nativeStatus.isNotBlank() && nativeStatus != "未连接") {
                 nativeStatus
             } else {
-                "RDP native 启动失败：nativeConnect2 返回 0。请查看诊断信息和 logcat。"
+                "RDP native 启动失败：nativeConnect3 返回 0。请查看诊断信息和 logcat。"
             }
             isConnected = false
             return@LaunchedEffect
@@ -176,12 +203,26 @@ fun RdpConnectionScreen(
         while (true) {
             status = RdpConnector.getStatus()
             isConnected = RdpConnector.isConnected()
+            if (!isConnected && !rdpeiRetryStarted &&
+                (status.contains("0x0002001c", ignoreCase = true) ||
+                    status.contains("Timeout waiting for activation", ignoreCase = true))
+            ) {
+                rdpeiRetryStarted = true
+                RdpConnector.disconnect()
+                delay(250)
+                startConnection(enableTouchInput = false)
+            }
             delay(500)
         }
     }
 
     DisposableEffect(Unit) {
-        onDispose { RdpConnector.disconnect() }
+        onDispose {
+            userDisconnected = true
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                RdpConnector.disconnect()
+            }
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -189,7 +230,7 @@ fun RdpConnectionScreen(
             title = { Text("远程桌面 - ${device.name}") },
             navigationIcon = {
                 IconButton(onClick = {
-                    RdpConnector.disconnect()
+                    userDisconnected = true
                     onBack()
                 }) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回") }
             },
@@ -294,7 +335,7 @@ fun RdpConnectionScreen(
                         RdpConnector.sendKeyEvent(0x1D, 0)
                     }) { Text("Ctrl Alt Del") }
                     IconButton(onClick = {
-                        RdpConnector.disconnect()
+                        userDisconnected = true
                         onBack()
                     }) { Icon(Icons.Default.Stop, contentDescription = "断开") }
                 }
@@ -367,6 +408,8 @@ fun RdpCanvas(
     var touchScrollAnchor by remember { mutableStateOf(Offset.Zero) }
     var touchScrollDrag by remember { mutableStateOf(Offset.Zero) }
     var touchScrollDragging by remember { mutableStateOf(false) }
+    var rdpeiTouchActive by remember { mutableStateOf(false) }
+    var rdpeiTouchFailed by remember { mutableStateOf(false) }
     var lastDragNanos by remember { mutableStateOf(0L) }
 
     LaunchedEffect(Unit) {
@@ -452,6 +495,13 @@ fun RdpCanvas(
         RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), 0)
     }
 
+    fun sendRdpeiTouch(pointerId: Int, eventType: Int, remote: Offset): Boolean {
+        val clamped = clampRemote(remote)
+        remoteCursor = clamped
+        lastPointer = clamped
+        return RdpConnector.sendTouchEvent(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+    }
+
     fun sendScrollFrame(maxStep: Float = 18f) {
         val clamped = clampRemote(touchScrollAnchor)
         remoteCursor = clamped
@@ -491,7 +541,9 @@ fun RdpCanvas(
                         pendingScrollX += flingVelocityX * dt
                         pendingScrollY += flingVelocityY * dt
                     }
-                    sendScrollFrame()
+                    if (!rdpeiTouchActive || rdpeiTouchFailed) {
+                        sendScrollFrame()
+                    }
 
                     if (!touchScrollDragging) {
                         // Frame-rate independent decay: close to 0.90 per 60 Hz
@@ -521,6 +573,13 @@ fun RdpCanvas(
         remoteCursor = clamped
         lastPointer = clamped
         touchScrollAnchor = clamped
+
+        if (rdpeiTouchActive && !rdpeiTouchFailed) {
+            if (sendRdpeiTouch(0, 1, clamped)) {
+                return
+            }
+            rdpeiTouchFailed = true
+        }
 
         touchScrollDrag += screenDelta
         if (touchScrollAxis == 0) {
@@ -590,8 +649,12 @@ fun RdpCanvas(
                             pendingScrollY = 0f
                             flingVelocityX = 0f
                             flingVelocityY = 0f
+                            rdpeiTouchFailed = false
+                            rdpeiTouchActive = sendRdpeiTouch(0, 0, remote)
                             lastDragNanos = 0L
-                            RdpConnector.sendPointerEvent(remote.x.toInt(), remote.y.toInt(), 0)
+                            if (!rdpeiTouchActive) {
+                                RdpConnector.sendPointerEvent(remote.x.toInt(), remote.y.toInt(), 0)
+                            }
                         }
                     },
                     onDrag = { change, dragAmount ->
@@ -605,13 +668,24 @@ fun RdpCanvas(
                     onDragEnd = {
                         if (!pointerMode) {
                             touchScrollDragging = false
-                            RdpConnector.sendPointerEvent(lastPointer.x.toInt(), lastPointer.y.toInt(), 0)
+                            if (rdpeiTouchActive && !rdpeiTouchFailed) {
+                                if (!sendRdpeiTouch(0, 2, lastPointer)) rdpeiTouchFailed = true
+                            } else {
+                                RdpConnector.sendPointerEvent(lastPointer.x.toInt(), lastPointer.y.toInt(), 0)
+                            }
+                            rdpeiTouchActive = false
                         }
                     },
                     onDragCancel = {
                         if (!pointerMode) {
                             touchScrollDragging = false
-                            RdpConnector.sendPointerEvent(lastPointer.x.toInt(), lastPointer.y.toInt(), 0)
+                            if (rdpeiTouchActive && !rdpeiTouchFailed) {
+                                sendRdpeiTouch(0, 3, lastPointer)
+                            } else {
+                                RdpConnector.sendPointerEvent(lastPointer.x.toInt(), lastPointer.y.toInt(), 0)
+                            }
+                            rdpeiTouchActive = false
+                            rdpeiTouchFailed = false
                             touchScrollAxis = 0
                             touchScrollRemainderX = 0f
                             touchScrollRemainderY = 0f

@@ -11,6 +11,7 @@ object RdpConnector {
 
     external fun nativeConnect(host: String, port: Int, username: String, password: String, domain: String, width: Int, height: Int): Int
     external fun nativeConnect2(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int): Int
+    external fun nativeConnect3(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean): Int
     external fun nativeDisconnect(): Int
     external fun nativeIsConnected(): Boolean
     external fun nativeGetStatus(): String
@@ -24,6 +25,7 @@ object RdpConnector {
     external fun nativeSendPointerEvent(x: Int, y: Int, button: Int): Int
     external fun nativeSendWheelEvent(x: Int, y: Int, delta: Int): Int
     external fun nativeSendHWheelEvent(x: Int, y: Int, delta: Int): Int
+    external fun nativeSendTouchEvent(pointerId: Int, eventType: Int, x: Int, y: Int): Int
     external fun nativeSendKeyEvent(keyCode: Int, down: Int): Int
     external fun nativeSendUnicodeChar(code: Int): Int
     external fun nativeSendClipboardText(text: String): Int
@@ -40,11 +42,11 @@ object RdpConnector {
 
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
-    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720): Boolean {
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true): Boolean {
         return try {
             lastKotlinError = ""
             resetFrameCache()
-            val result = nativeConnect2(
+            val result = nativeConnect3(
                 host.trim(),
                 port,
                 username.trim(),
@@ -52,7 +54,8 @@ object RdpConnector {
                 domain.trim(),
                 rdpServerName.trim(),
                 width,
-                height
+                height,
+                enableTouchInput
             )
             Log.d(TAG, "Connect result: $result")
             result == 1
@@ -122,6 +125,12 @@ object RdpConnector {
 
     fun sendHWheelEvent(x: Int, y: Int, delta: Int): Int = safeNative("sendHWheelEvent", -1) {
         nativeSendHWheelEvent(x, y, delta)
+    }
+
+    fun sendTouchEvent(pointerId: Int, eventType: Int, x: Int, y: Int): Boolean {
+        return safeNative("sendTouchEvent", false) {
+            nativeSendTouchEvent(pointerId, eventType, x, y) == 0
+        }
     }
 
     fun sendKeyEvent(keyCode: Int, down: Int): Int = safeNative("sendKeyEvent", -1) {
