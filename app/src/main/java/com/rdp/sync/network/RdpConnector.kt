@@ -3,6 +3,7 @@ package com.rdp.sync.network
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
+import kotlinx.coroutines.delay
 
 object RdpConnector {
     init {
@@ -89,23 +90,23 @@ object RdpConnector {
         return false
     }
 
-    fun sendRdpeiTap(x: Int, y: Int): Boolean {
+    suspend fun sendRdpeiTap(x: Int, y: Int): Boolean {
         if (!sendTouchEvent(0, 0, x, y)) return false
-        Thread.sleep(30)
+        delay(30)
         return sendTouchEvent(0, 2, x, y)
     }
-    fun sendRdpeiDoubleTap(x: Int, y: Int): Boolean {
+    suspend fun sendRdpeiDoubleTap(x: Int, y: Int): Boolean {
         if (!sendTouchEvent(0, 0, x, y)) return false
-        Thread.sleep(25)
+        delay(25)
         if (!sendTouchEvent(0, 2, x, y)) return false
-        Thread.sleep(80)
+        delay(80)
         if (!sendTouchEvent(0, 0, x, y)) return false
-        Thread.sleep(25)
+        delay(25)
         return sendTouchEvent(0, 2, x, y)
     }
-    fun sendRdpeiLongPress(x: Int, y: Int): Boolean {
+    suspend fun sendRdpeiLongPress(x: Int, y: Int): Boolean {
         if (!sendTouchEvent(0, 0, x, y)) return false
-        Thread.sleep(550)
+        delay(550)
         return sendTouchEvent(0, 2, x, y)
     }
 
@@ -117,9 +118,14 @@ object RdpConnector {
     fun getDiag(): String {
         val native = safeNative("getDiag", "") { nativeGetDiag() }
         val kotlin = buildString {
-            if (rdpeiConnected) append("rdpei=connected\n")
-            else if (rdpeiDisabled) append("rdpei=disabled\n")
-            else append("rdpei=not-negotiated\n")
+            // Only add kotlin-side rdpei status when native does not report it,
+            // so we never show conflicting lines like "rdpei=not-negotiated" and
+            // native "rdpei=connected" simultaneously.
+            if (!native.contains("rdpei=", ignoreCase = true)) {
+                if (rdpeiConnected) append("rdpei=connected\n")
+                else if (rdpeiDisabled) append("rdpei=disabled\n")
+                else append("rdpei=not-negotiated\n")
+            }
             if (touchFailedCode != 0) append("rdpei=touch-send-failed:$touchFailedCode\n")
             if (compatMode) append("connection=compatibility-retry\n")
         }

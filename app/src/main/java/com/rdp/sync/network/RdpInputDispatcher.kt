@@ -7,9 +7,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * V1.0.9 Input event dispatcher.
  * Decouples Compose gesture callbacks from blocking native JNI calls.
+ *
+ * DOWN / UP / CANCEL / CLICK are enqueued as ordered individual jobs so they
+ * are never merged. MOVE events are throttle-merged to reduce wire chatter.
  */
 class RdpInputDispatcher(
     private val touchSender: (Int, Int, Int, Int) -> Boolean,
+    private val wheelSender: (Int, Int, Int) -> Int,
     private val hwheelSender: (Int, Int, Int) -> Int,
     private val pointerSender: (Int, Int, Int) -> Int,
 ) {
@@ -54,10 +58,14 @@ class RdpInputDispatcher(
         }
     }
 
+    /** enqueue a full click: DOWN (button flags) then UP (0). */
     fun enqueuePointerClick(x: Int, y: Int, button: Int) {
         if (shutdown.get()) return
         scope.launch {
-            try { pointerSender(x, y, button) } catch (_: Exception) {}
+            try {
+                pointerSender(x, y, button)
+                pointerSender(x, y, 0)
+            } catch (_: Exception) {}
         }
     }
 
@@ -71,7 +79,7 @@ class RdpInputDispatcher(
                 val d = wheelDelta; val wx = wheelX; val wy = wheelY
                 wheelDelta = 0
                 if (d != 0) {
-                    try { RdpConnector.sendWheelEvent(wx, wy, d) } catch (_: Exception) {}
+                    try { wheelSender(wx, wy, d) } catch (_: Exception) {}
                 }
             }
         }
@@ -87,12 +95,18 @@ class RdpInputDispatcher(
                 val d = hwheelDelta; val hx = hwheelX; val hy = hwheelY
                 hwheelDelta = 0
                 if (d != 0) {
-                    try { RdpConnector.sendHWheelEvent(hx, hy, d) } catch (_: Exception) {}
+                    try { hwheelSender(hx, hy, d) } catch (_: Exception) {}
                 }
             }
         }
     }
 
+    /**
+     * Enqueue a touch event.
+     *
+     * - DOWN (0), UP (2), CANCEL (3) → dispatched immediately (never merged).
+     * - MOVE (1) → throttle-merged like pointer moves.
+     */
     fun enqueueTouch(pointerId: Int, eventType: Int, x: Int, y: Int) {
         if (shutdown.get()) return
         when (eventType) {

@@ -171,7 +171,7 @@ fun RdpConnectionScreen(
         val connectWidth = mobileDesktopDimension((viewportSize.width * 0.55f).toInt(), 640)
         val connectHeight = mobileDesktopDimension((viewportSize.height * 0.55f).toInt(), 960)
 
-        fun startConnection(enableTouchInput: Boolean): Boolean {
+        fun startConnection(enableTouchInput: Boolean, compatibilityMode: Boolean): Boolean {
             status = if (enableTouchInput) {
                 "正在连接 ${device.host}:${device.port} (${connectWidth}x${connectHeight})..."
             } else {
@@ -186,11 +186,12 @@ fun RdpConnectionScreen(
                 rdpServerName = device.rdpServerName,
                 width = connectWidth,
                 height = connectHeight,
-                enableTouchInput = enableTouchInput
+                enableTouchInput = enableTouchInput,
+                compatibilityMode = compatibilityMode
             )
         }
 
-        val started = startConnection(enableTouchInput = true)
+        val started = startConnection(enableTouchInput = true, compatibilityMode = false)
         if (!started) {
             val nativeStatus = RdpConnector.getStatus()
             status = if (nativeStatus.isNotBlank() && nativeStatus != "未连接") {
@@ -211,7 +212,7 @@ fun RdpConnectionScreen(
                 rdpeiRetryStarted = true
                 RdpConnector.disconnect()
                 delay(250)
-                startConnection(enableTouchInput = false)
+                startConnection(enableTouchInput = false, compatibilityMode = true)
             }
             delay(500)
         }
@@ -414,6 +415,16 @@ fun RdpCanvas(
     var rdpeiTouchFailed by remember { mutableStateOf(false) }
     var lastDragNanos by remember { mutableStateOf(0L) }
 
+    val dispatcher = remember {
+        RdpInputDispatcher(
+            touchSender = { pid, et, x, y -> RdpConnector.sendTouchEvent(pid, et, x, y) },
+            wheelSender = { x, y, d -> RdpConnector.sendWheelEvent(x, y, d) },
+            hwheelSender = { x, y, d -> RdpConnector.sendHWheelEvent(x, y, d) },
+            pointerSender = { x, y, btn -> RdpConnector.sendPointerEvent(x, y, btn) }
+        )
+    }
+    val coroutineScope = rememberCoroutineScope()
+
     LaunchedEffect(Unit) {
         while (isActive) {
             val frame = withContext(Dispatchers.Default) {
@@ -486,22 +497,28 @@ fun RdpCanvas(
         val clamped = clampRemote(remote)
         remoteCursor = clamped
         lastPointer = clamped
-        RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), 0)
+        dispatcher.enqueuePointerMove(clamped.x.toInt(), clamped.y.toInt())
     }
 
     fun clickAt(remote: Offset, button: Int = 1) {
         val clamped = clampRemote(remote)
         remoteCursor = clamped
         lastPointer = clamped
-        RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), button)
-        RdpConnector.sendPointerEvent(clamped.x.toInt(), clamped.y.toInt(), 0)
+        dispatcher.enqueuePointerClick(clamped.x.toInt(), clamped.y.toInt(), button)
     }
 
     fun sendRdpeiTouch(pointerId: Int, eventType: Int, remote: Offset): Boolean {
         val clamped = clampRemote(remote)
         remoteCursor = clamped
         lastPointer = clamped
-        return RdpConnector.sendTouchEvent(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+        return if (eventType == 1) {
+            // MOVE → throttle-merged via dispatcher, fire-and-forget
+            dispatcher.enqueueTouch(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+            true
+        } else {
+            // DOWN/UP/CANCEL → synchronous, never merged
+            RdpConnector.sendTouchEvent(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+        }
     }
 
     fun sendScrollFrame(maxStep: Float = 18f) {
@@ -518,7 +535,7 @@ fun RdpCanvas(
             val delta = touchScrollRemainderY.coerceIn(-maxStep, maxStep).roundToInt()
             if (delta != 0) {
                 touchScrollRemainderY -= delta
-                RdpConnector.sendWheelEvent(clamped.x.toInt(), clamped.y.toInt(), delta)
+                dispatcher.enqueueWheel(clamped.x.toInt(), clamped.y.toInt(), delta)
             }
         } else if (touchScrollAxis == 2) {
             touchScrollRemainderX += pendingScrollX
@@ -526,7 +543,7 @@ fun RdpCanvas(
             val delta = touchScrollRemainderX.coerceIn(-maxStep, maxStep).roundToInt()
             if (delta != 0) {
                 touchScrollRemainderX -= delta
-                RdpConnector.sendHWheelEvent(clamped.x.toInt(), clamped.y.toInt(), delta)
+                dispatcher.enqueueHWheel(clamped.x.toInt(), clamped.y.toInt(), delta)
             }
         }
     }
@@ -655,7 +672,7 @@ fun RdpCanvas(
                             rdpeiTouchActive = sendRdpeiTouch(0, 0, remote)
                             lastDragNanos = 0L
                             if (!rdpeiTouchActive) {
-                                RdpConnector.sendPointerEvent(remote.x.toInt(), remote.y.toInt(), 0)
+                                dispatcher.enqueuePointerMove(remote.x.toInt(), remote.y.toInt())
                             }
                         }
                     },
@@ -673,7 +690,7 @@ fun RdpCanvas(
                             if (rdpeiTouchActive && !rdpeiTouchFailed) {
                                 if (!sendRdpeiTouch(0, 2, lastPointer)) rdpeiTouchFailed = true
                             } else {
-                                RdpConnector.sendPointerEvent(lastPointer.x.toInt(), lastPointer.y.toInt(), 0)
+                                dispatcher.enqueuePointerMove(lastPointer.x.toInt(), lastPointer.y.toInt())
                             }
                             rdpeiTouchActive = false
                         }
@@ -684,7 +701,7 @@ fun RdpCanvas(
                             if (rdpeiTouchActive && !rdpeiTouchFailed) {
                                 sendRdpeiTouch(0, 3, lastPointer)
                             } else {
-                                RdpConnector.sendPointerEvent(lastPointer.x.toInt(), lastPointer.y.toInt(), 0)
+                                dispatcher.enqueuePointerMove(lastPointer.x.toInt(), lastPointer.y.toInt())
                             }
                             rdpeiTouchActive = false
                             rdpeiTouchFailed = false
@@ -706,8 +723,10 @@ fun RdpCanvas(
                             clickAt(remoteCursor)
                         } else {
                             val remote = toRemote(tapOffset)
-                            if (!RdpConnector.sendRdpeiTap(remote.x.toInt(), remote.y.toInt())) {
-                                clickAt(remote)
+                            coroutineScope.launch {
+                                if (!RdpConnector.sendRdpeiTap(remote.x.toInt(), remote.y.toInt())) {
+                                    clickAt(remote)
+                                }
                             }
                         }
                     },
@@ -717,8 +736,10 @@ if (pointerMode) {
                             repeat(2) { clickAt(remote) }
                         } else {
                             val remote = toRemote(tapOffset)
-                            if (!RdpConnector.sendRdpeiDoubleTap(remote.x.toInt(), remote.y.toInt())) {
-                                repeat(2) { clickAt(remote) }
+                            coroutineScope.launch {
+                                if (!RdpConnector.sendRdpeiDoubleTap(remote.x.toInt(), remote.y.toInt())) {
+                                    repeat(2) { clickAt(remote) }
+                                }
                             }
                         }
                     },
@@ -727,8 +748,10 @@ if (pointerMode) {
                             clickAt(remoteCursor, 2)
                         } else {
                             val remote = toRemote(tapOffset)
-                            if (!RdpConnector.sendRdpeiLongPress(remote.x.toInt(), remote.y.toInt())) {
-                                clickAt(remote, 2)
+                            coroutineScope.launch {
+                                if (!RdpConnector.sendRdpeiLongPress(remote.x.toInt(), remote.y.toInt())) {
+                                    clickAt(remote, 2)
+                                }
                             }
                         }
                     }
@@ -758,6 +781,12 @@ if (pointerMode) {
                 drawCircle(Color.White, radius = 11f, center = cursor, style = Stroke(width = 2f))
                 drawCircle(Color(0xAA60A5FA), radius = 4f, center = cursor)
             }
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            dispatcher.shutdown()
         }
     }
 }
