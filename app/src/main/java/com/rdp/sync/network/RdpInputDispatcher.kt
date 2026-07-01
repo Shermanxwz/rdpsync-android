@@ -58,13 +58,13 @@ class RdpInputDispatcher(
         }
     }
 
-    /** enqueue a full click: DOWN (button flags) then UP (0). */
+    /** enqueue a click: native pointerSender(button != 0) already sends
+     * down + release.  Do NOT send an extra button=0 (move) after the click. */
     fun enqueuePointerClick(x: Int, y: Int, button: Int) {
         if (shutdown.get()) return
         scope.launch {
             try {
                 pointerSender(x, y, button)
-                pointerSender(x, y, 0)
             } catch (_: Exception) {}
         }
     }
@@ -120,12 +120,28 @@ class RdpInputDispatcher(
                 if (touchMovePending.compareAndSet(false, true)) {
                     scope.launch {
                         delay(TOUCH_MOVE_THROTTLE_MS)
-                        touchMovePending.set(false)
-                        val cx = latestTouchX; val cy = latestTouchY
-                        try { touchSender(0, 1, cx, cy) } catch (_: Exception) {}
+                        // Only one wins: this delay job or flushPendingTouchMoveNow()
+                        if (touchMovePending.compareAndSet(true, false)) {
+                            val cx = latestTouchX; val cy = latestTouchY
+                            try { touchSender(0, 1, cx, cy) } catch (_: Exception) {}
+                        }
                     }
                 }
             }
+        }
+    }
+
+    /**
+     * Immediately send the latest pending touch MOVE if any.
+     * Used before UP/CANCEL to guarantee move-before-release ordering.
+     *
+     * Uses compareAndSet(true, false) so only one caller (this or the
+     * delay job in enqueueTouch) actually sends; the other becomes a no-op.
+     */
+    fun flushPendingTouchMoveNow() {
+        if (touchMovePending.compareAndSet(true, false)) {
+            val cx = latestTouchX; val cy = latestTouchY
+            try { touchSender(0, 1, cx, cy) } catch (_: Exception) {}
         }
     }
 

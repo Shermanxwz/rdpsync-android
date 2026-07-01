@@ -511,13 +511,21 @@ fun RdpCanvas(
         val clamped = clampRemote(remote)
         remoteCursor = clamped
         lastPointer = clamped
-        return if (eventType == 1) {
-            // MOVE → throttle-merged via dispatcher, fire-and-forget
-            dispatcher.enqueueTouch(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
-            true
-        } else {
-            // DOWN/UP/CANCEL → synchronous, never merged
-            RdpConnector.sendTouchEvent(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+        return when (eventType) {
+            1 -> {
+                // MOVE → throttle-merged via dispatcher, fire-and-forget
+                dispatcher.enqueueTouch(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+                true
+            }
+            2, 3 -> {
+                // UP / CANCEL → flush pending MOVE first, then send synchronously
+                dispatcher.flushPendingTouchMoveNow()
+                RdpConnector.sendTouchEvent(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+            }
+            else -> {
+                // DOWN (0) → synchronous, never merged
+                RdpConnector.sendTouchEvent(pointerId, eventType, clamped.x.toInt(), clamped.y.toInt())
+            }
         }
     }
 
