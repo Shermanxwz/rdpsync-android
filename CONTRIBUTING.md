@@ -21,18 +21,20 @@ Recommended baseline:
 - A WebDAV test endpoint with disposable credentials
 - A test RDP endpoint with non-production credentials
 
-The current app module targets Android API 35 and minimum API 26. Native build scripts currently assume an Android NDK under `/opt/android-sdk/ndk/28.0.13004108`; override the environment or edit the script locally if your SDK layout differs.
+The current app module targets Android API 35 and minimum API 26. Native build scripts currently assume an Android NDK under `/opt/android-sdk/ndk/28.0.13004108`; override `ANDROID_HOME`/`ANDROID_NDK` if your SDK layout differs.
 
 ## Native Dependency Build
 
-Build OpenSSL and FreeRDP before packaging the APK:
+The canonical scripts pin FreeRDP 3.32.2 by commit and OpenSSL 3.5.9 LTS by SHA256. Build the actual runtime before any APK is considered installable:
 
 ```bash
-bash scripts/build-openssl-android.sh
-bash scripts/build-freerdp-android.sh
+bash scripts/build-native.sh
+bash scripts/test-native.sh
 ```
 
 Generated native libraries are copied into `app/src/main/jniLibs/arm64-v8a/` and are ignored by Git.
+
+The native host fixtures include production bridge code with Android/JNI stubs and sanitizer instrumentation; they are not a real-server test. In ptrace-only sandboxes, use `ASAN_OPTIONS=detect_leaks=0` and disclose that LeakSanitizer was unavailable.
 
 ## APK Build
 
@@ -47,6 +49,8 @@ For Gradle-only checks after native libraries are present:
 ./gradlew --no-daemon :app:lintDebug
 ./gradlew --no-daemon :app:testDebugUnitTest
 ```
+
+`build-apk.sh` runs unit tests, lint, preview packaging and ELF/JNI/dependency/signature/16 KiB alignment checks. Debug builds have package suffix `.preview`, preserving the installed app and its data. Never claim a fresh debug signer can upgrade existing releases. The emulator workflow builds x86_64 and uses an isolated loopback-only xrdp fixture on a standard GitHub-hosted runner; never point it at a user host.
 
 ## RDP Debugging Notes
 

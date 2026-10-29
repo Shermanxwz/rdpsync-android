@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$ROOT"
+mkdir -p build/emulator-evidence
+adb logcat -c
+adb shell settings put system accelerometer_rotation 0
+adb shell settings put system user_rotation 0
+adb shell getprop ro.build.fingerprint >build/emulator-evidence/emulator-fingerprint.txt
+adb shell getprop ro.product.cpu.abilist >build/emulator-evidence/emulator-abis.txt
+cleanup() {
+  adb logcat -d >build/emulator-evidence/logcat.txt || true
+  adb pull /sdcard/Android/data/com.rdp.sync.preview/files/rdp-evidence build/emulator-evidence/ || true
+  adb exec-out screencap -p >build/emulator-evidence/final-emulator.png || true
+}
+trap cleanup EXIT
+./gradlew --no-daemon -PnativeAbis=x86_64 \
+  -Pandroid.testInstrumentationRunnerArguments.rdpFixture=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.RdpFixtureInstrumentedTest \
+  :app:connectedDebugAndroidTest

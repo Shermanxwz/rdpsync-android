@@ -1,34 +1,28 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
-
-# Build FreeRDP 3.x for Android arm64-v8a
-# Run from repository root
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$SCRIPT_DIR/.."
-NDK_DIR="/opt/android-sdk/ndk/28.0.13004108"
-TOOLCHAIN="$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64"
-API_LEVEL=26
-ABI="arm64-v8a"
-
+source "$(dirname "$0")/native-env.sh"
+NDK_DIR="$ANDROID_NDK"
 # Create build directory
 BUILD_DIR="$PROJECT_DIR/build/freerdp-android"
 mkdir -p "$BUILD_DIR"
 
-# Download FreeRDP 3.9.0
+# Download FreeRDP 3.32.2
 FREERDP_DIR="$BUILD_DIR/freerdp-src"
 if [ ! -d "$FREERDP_DIR" ]; then
-    echo "Downloading FreeRDP 3.9.0..."
+    echo "Downloading FreeRDP 3.32.2..."
     cd "$BUILD_DIR"
-    git clone --depth 1 --branch 3.9.0 https://github.com/FreeRDP/FreeRDP.git freerdp-src 2>&1
+    git clone --depth 1 --branch 3.32.2 https://github.com/FreeRDP/FreeRDP.git freerdp-src 2>&1
 fi
 
+# Verify the exact tested upstream commit, rather than silently accepting a moved tag.
+[[ "$(git -C "$FREERDP_DIR" rev-parse HEAD)" == "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc" ]] || { echo "Unexpected FreeRDP source revision" >&2; exit 1; }
+
 # Build FreeRDP
-BUILD_OUT="$BUILD_DIR/build-arm64"
+BUILD_OUT="$BUILD_DIR/build-$BUILD_ARCH"
 mkdir -p "$BUILD_OUT"
 cd "$BUILD_OUT"
 
-echo "Configuring FreeRDP 3.9.0 for $ABI..."
+echo "Configuring FreeRDP 3.32.2 for $ABI..."
 cmake "$FREERDP_DIR" \
     -DCMAKE_TOOLCHAIN_FILE="$NDK_DIR/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI="$ABI" \
@@ -72,7 +66,9 @@ cmake "$FREERDP_DIR" \
     -DCHANNEL_AINPUT=OFF \
     -DCHANNEL_AUDIN=OFF \
     -DCHANNEL_CLIPRDR=OFF \
-    -DCHANNEL_DISP=OFF \
+    -DCHANNEL_DISP=ON \
+    -DCHANNEL_DISP_CLIENT=ON \
+    -DCHANNEL_DISP_SERVER=OFF \
     -DCHANNEL_DRIVE=OFF \
     -DCHANNEL_ECHO=OFF \
     -DCHANNEL_ENCOMSP=OFF \
@@ -81,7 +77,9 @@ cmake "$FREERDP_DIR" \
     -DCHANNEL_PARALLEL=OFF \
     -DCHANNEL_PRINTER=OFF \
     -DCHANNEL_RAIL=OFF \
-    -DCHANNEL_RDPDR=OFF \
+    -DCHANNEL_RDPDR=ON \
+    -DCHANNEL_RDPDR_CLIENT=ON \
+    -DCHANNEL_RDPDR_SERVER=OFF \
     -DCHANNEL_RDPECAM=OFF \
     -DCHANNEL_RDPEMSC=OFF \
     -DCHANNEL_RDPGFX=OFF \
@@ -94,14 +92,18 @@ cmake "$FREERDP_DIR" \
     -DWITH_DSP_FFMPEG=OFF \
     -DWITH_INTERNAL_MD4=ON \
     -DWITH_INTERNAL_RC4=ON \
-    -DOPENSSL_ROOT_DIR="$BUILD_DIR/openssl-arm64" \
-    2>&1 | tail -30
+    -DOPENSSL_ROOT_DIR="$OPENSSL_OUT" \
+    -DOPENSSL_INCLUDE_DIR="$OPENSSL_OUT/include" \
+    -DOPENSSL_CRYPTO_LIBRARY="$OPENSSL_OUT/lib/libcrypto.a" \
+    -DOPENSSL_SSL_LIBRARY="$OPENSSL_OUT/lib/libssl.a" \
+    -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
+
 
 echo "Building FreeRDP..."
-cmake --build . -j$(nproc) 2>&1 | tail -20
+cmake --build . -j"$JOBS"
 
 # Copy output .so files to jniLibs
-JNILIBS="$PROJECT_DIR/app/src/main/jniLibs/arm64-v8a"
+JNILIBS="$PROJECT_DIR/app/src/main/jniLibs/$ABI"
 mkdir -p "$JNILIBS"
 
 echo "Copying FreeRDP .so files..."

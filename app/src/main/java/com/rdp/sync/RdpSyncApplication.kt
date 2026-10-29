@@ -6,7 +6,7 @@ import com.rdp.sync.network.RdpConnector
 class RdpSyncApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        // Tell FreeRDP's OpenSSL where to find the legacy provider (for MD4/NTLM)
+        // Retain the JNI initialization entry point; WinPR supplies its tested internal MD4 path.
         RdpConnector.nativeSetLibDir(applicationInfo.nativeLibraryDir)
     }
 }

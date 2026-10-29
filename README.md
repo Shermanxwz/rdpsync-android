@@ -9,6 +9,21 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 [![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
+## 1.1 preview: display and input overhaul
+
+The preview starts every session in **direct-touch mode**. Touchpad mode remains a temporary session toggle. Display settings offer **fit window**, saved profile dimensions, 1280×720 and 1920×1080, with economy/balanced/sharp quality ceilings and opt-in adaptive quality.
+
+- Live resolution changes use the RDP Display Control channel, after server capability negotiation. The displayed size is the **actual received framebuffer**, not a stretched approximation. Unsupported or unacknowledged requests retain the current session and offer an explicit reconnect.
+- Fit-window sizing preserves aspect ratio and safely bounds memory; rotation/window changes are debounced. Opening the Android keyboard does not request a remote desktop resize.
+- Adaptive mode uses genuine server-reported RTT/bandwidth plus local bitmap-copy/draw-submission timings. It uses sustained samples and asymmetric cooldowns; idle, absent and stale network reports are not guessed from Wi-Fi/cellular or low frame rate. Some servers do not report network metrics.
+- Quality changes adjust **remote pixel count and local presentation FPS**, not an invented live codec/colour-depth setting. Fixed manual resolutions remain exact when adaptive mode is off.
+- Native rendering unions all damage until consumed, respects both row strides, and removes redundant channel conversions. A lifecycle-bound Android View polls on vsync without per-frame Compose recomposition.
+- Input is an ordered, bounded worker stream with held mouse buttons, extended keys, IME composition and cancellation/release handling.
+
+**Install safely:** CI produces `RdpSync Preview` (`com.rdp.sync.preview`), signed with a development key. It installs alongside the existing app; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged; no release/store publishing is performed.
+
+**Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/RDPGFX video acceleration is not enabled; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. Existing certificate-ignore behaviour and plaintext saved/WebDAV credentials remain security limitations: use only trusted lab endpoints and avoid high-value credentials. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
+
 ## Highlights
 
 - RDP desktop connections powered by FreeRDP through a small JNI bridge.
@@ -19,7 +34,7 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 - Android `View` based renderer paced by Android vsync.
 - Reusable bitmap/frame buffer path to reduce allocations during long sessions.
 - Native dirty-rectangle tracking and `frameId` de-duplication to avoid unnecessary redraws.
-- Adaptive remote resolution for phone and foldable screen ratios.
+- Server-negotiated dynamic remote resolution, with honest capability fallback and optional measured adaptive quality.
 - No analytics SDK, telemetry SDK, advertising SDK, or bundled third-party tracking.
 
 ## Use Cases
@@ -51,11 +66,11 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 ### Rendering
 
 - FreeRDP GDI renders into a native primary buffer.
-- JNI copies the remote frame into an Android-compatible ARGB buffer.
+- JNI copies RGBA dirty rows directly into an Android-compatible ARGB_8888 bitmap.
 - A single reusable Android `Bitmap` is retained across frames when size is stable.
 - `frameId` only advances when the native side has a changed frame.
 - Dirty rectangles are tracked by the native bridge and used to reduce pixel copying work.
-- `RdpBitmapView` draws the reusable bitmap through Android `Canvas` invalidation.
+- `RdpDesktopView` draws the reusable bitmap through Android `Canvas` invalidation.
 
 ### WebDAV Sync
 
@@ -69,7 +84,7 @@ RdpSync focuses on a very specific gap: an open Android RDP client that can keep
 
 | Area | Implementation |
 | --- | --- |
-| UI | Jetpack Compose screens plus `RdpBitmapView` for the live desktop |
+| UI | Jetpack Compose screens plus `RdpDesktopView` for the live desktop |
 | State | ViewModel, Kotlin Flow, Compose state |
 | Local data | Room database for device profiles, SharedPreferences for WebDAV settings |
 | Sync | OkHttp WebDAV client, JSON payload format |
@@ -94,7 +109,7 @@ RdpConnectionScreen
   -> JNI native bridge
   -> FreeRDP instance and GDI callbacks
   -> native frame buffer + dirty rectangle metadata
-  -> RdpBitmapView bitmap copy and canvas draw
+  -> RdpDesktopView bitmap copy and canvas draw
 ```
 
 ### Native Render Loop
@@ -102,33 +117,22 @@ RdpConnectionScreen
 ```text
 FreeRDP EndPaint callback
   -> read GDI invalid region
-  -> convert RGBX32 pixels to Android ARGB
-  -> store dirty rectangle and increment frameId
+  -> copy valid RGBA dirty rows using the GDI stride
+  -> union pending dirty regions and increment frameId
   -> Kotlin checks frameId
   -> copy frame into reusable Bitmap
   -> Android View draws on the next invalidation
 ```
 
-## Comparison
+## Scope
 
-| Capability | RdpSync | Microsoft RD Client | aFreeRDP | bVNC | 1Remote |
-| --- | --- | --- | --- | --- | --- |
-| Android RDP client | Yes | Yes | Yes | No, VNC focused | No, desktop focused |
-| Open source | Yes | No | Yes | Yes | Yes |
-| WebDAV profile sync | Yes | No | No | No | No |
-| Self-hosted sync backend | Yes | No | No | No | No |
-| Pointer-style mobile control | Yes | Yes | Yes | Not RDP | No |
-| Direct touch mode | Yes | Yes | Limited | Not RDP | No |
-| Dirty-region render path | Yes | Not documented | Varies | Not RDP | No |
-| Mobile-first resolution handling | Yes | Yes | Limited | Limited | No |
-
-This table is a product-level comparison, not a benchmark claim. RdpSync's strongest advantage is not that it replaces every mature commercial client, but that it combines open-source Android RDP access with WebDAV-based device profile portability.
+RdpSync combines open-source Android RDP with WebDAV profile portability. The preview improves correctness and interaction in that scope; it does not claim every feature or performance characteristic of mature commercial clients. Android emulator tests exercise real isolated RDP sessions, but are not physical-phone or Windows-server certification.
 
 ## Privacy Model
 
 RdpSync is designed to avoid project-owned cloud services.
 
-- No analytics or telemetry code is included.
+- No analytics SDK or uploaded telemetry is included. Local session counters are used for diagnostics and optional adaptive quality.
 - No advertising SDK is included.
 - RDP credentials are stored locally because they are required to connect.
 - WebDAV credentials are stored locally because they are required to sync.
@@ -144,7 +148,7 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 Get the latest APK from the project's GitHub Releases page.
 
-- Current app version: `1.0.11`
+- Current preview version: `1.1.0-preview` (development-only, not a tagged release)
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 
@@ -169,12 +173,12 @@ Get the latest APK from the project's GitHub Releases page.
 git clone <repository-url>
 cd rdpsync-android
 
-bash scripts/build-openssl-android.sh
-bash scripts/build-freerdp-android.sh
+export ANDROID_HOME=/path/to/android-sdk
+export JAVA_HOME=/path/to/jdk-21
 bash scripts/build-apk.sh
 ```
 
-`scripts/build-apk.sh` expects the native FreeRDP/OpenSSL outputs under `build/freerdp-android/` and places generated `.so` files under `app/src/main/jniLibs/arm64-v8a/`. These native outputs and APK artifacts are intentionally ignored by Git.
+`scripts/build-apk.sh` builds pinned FreeRDP 3.32.2 and OpenSSL 3.5.9 LTS from verified source, then tests/lints/packages a side-by-side preview. It uses NDK 28.0.13004108 and places generated `.so` files under `app/src/main/jniLibs/arm64-v8a/`. Override `ANDROID_NDK` if needed. The `ABI=x86_64` native build and Gradle `-PnativeAbis=x86_64` are used only for emulator testing. These native outputs and APK artifacts are intentionally ignored by Git.
 
 ## Project Layout
 

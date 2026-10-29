@@ -3,6 +3,8 @@ package com.rdp.sync.network
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
+import android.os.SystemClock
+import com.rdp.sync.display.*
 import kotlinx.coroutines.delay
 
 object RdpConnector {
@@ -33,6 +35,10 @@ object RdpConnector {
     external fun nativeSendClipboardText(text: String): Int
     external fun nativeGetWidth(): Int
     external fun nativeGetHeight(): Int
+    external fun nativeRequestResize(width: Int, height: Int, desktopScale: Int): Int
+    external fun nativeGetDisplayControlState(): Int
+    external fun nativeGetTelemetry(): LongArray
+    external fun nativeSendMouseButton(x: Int, y: Int, button: Int, down: Boolean): Int
 
     private const val TAG = "RdpConnector"
     @Volatile private var lastKotlinError: String = ""
@@ -46,12 +52,96 @@ object RdpConnector {
     @Volatile var compatMode = false
     @Volatile var touchFailedCode = 0
 
+    data class DisplayStatus(
+        val summary: String,
+        val reconnectRequired: Boolean,
+        val actual: DesktopSize,
+        val requested: DesktopSize?,
+        val quality: DisplayQuality,
+        val capability: Int,
+        val adaptiveReason: String
+    )
+
+    private var displaySettings = SessionDisplaySettings()
+    private val adaptiveController = AdaptiveQualityController()
+    private val resizeCoordinator = ResizeCoordinator()
+    private var renderFrames = 0L
+    private var renderCopyNanos = 0L
+    private var renderDrawNanos = 0L
+    private var lastSampleFrames = 0L
+    private var lastSampleCopyNanos = 0L
+    private var lastSampleDrawNanos = 0L
+    private var adaptiveReason = "自适应已关闭"
+    private var connectedAtMillis = 0L
+    private var lastDisplayStatus = DisplayStatus("等待连接", false, DesktopSize(1280, 720), null,
+        DisplayQuality.BALANCED, 0, "自适应已关闭")
+
+    @Synchronized fun configureDisplay(settings: SessionDisplaySettings) {
+        if (displaySettings == settings) return
+        displaySettings = settings
+        adaptiveController.reset(settings.quality)
+        resizeCoordinator.reset()
+        adaptiveReason = if (settings.adaptive) "等待有效网络测量" else "自适应已关闭"
+    }
+
+    @Synchronized fun getDisplaySettings(): SessionDisplaySettings = displaySettings
+    @Synchronized fun targetFrameRate(): Int = if (displaySettings.adaptive) adaptiveController.quality.maxFps else displaySettings.quality.maxFps
+    @Synchronized fun recordRenderedFrame(copyNanos: Long, drawNanos: Long) {
+        renderFrames++
+        renderCopyNanos += copyNanos.coerceAtLeast(0)
+        renderDrawNanos += drawNanos.coerceAtLeast(0)
+    }
+
+    @Synchronized fun resolveDisplay(viewWidth: Int, viewHeight: Int, profileWidth: Int = 1280, profileHeight: Int = 720): DesktopSize =
+        DisplayPolicy.resolve(viewWidth, viewHeight, displaySettings, adaptiveController.quality, profileWidth, profileHeight)
+
+    @Synchronized fun updateDisplay(viewWidth: Int, viewHeight: Int, profileWidth: Int = 1280, profileHeight: Int = 720): DisplayStatus {
+        val now = SystemClock.elapsedRealtime()
+        val stats = safeNative("telemetry", longArrayOf()) { nativeGetTelemetry() }
+        val frames = (renderFrames - lastSampleFrames).coerceAtLeast(0)
+        val sample = QualitySample(now,
+            stats.getOrNull(5)?.takeIf { it > 0 }, stats.getOrNull(6)?.takeIf { it > 0 },
+            stats.getOrNull(7)?.takeIf { it >= 0 }, frames,
+            if (frames > 0) (renderCopyNanos - lastSampleCopyNanos) / frames / 1_000_000.0 else 0.0,
+            if (frames > 0) (renderDrawNanos - lastSampleDrawNanos) / frames / 1_000_000.0 else 0.0)
+        lastSampleFrames = renderFrames; lastSampleCopyNanos = renderCopyNanos; lastSampleDrawNanos = renderDrawNanos
+        if (displaySettings.adaptive) adaptiveReason = adaptiveController.observe(sample, displaySettings.quality).reason
+        val quality = if (displaySettings.adaptive) adaptiveController.quality else displaySettings.quality
+        val actual = if (stats.size >= 10 && stats[8] in 1..4096 && stats[9] in 1..4096)
+            DesktopSize(stats[8].toInt(), stats[9].toInt()) else lastDisplayStatus.actual
+        val desired = resolveDisplay(viewWidth, viewHeight, profileWidth, profileHeight)
+        val capability = safeNative("displayControl", 0) { nativeGetDisplayControlState() }
+        resizeCoordinator.update(now, desired, actual, capability) { nativeRequestResize(it.width, it.height, 100) }
+        val unsupported = capability < 0 || (capability != 2 && now - connectedAtMillis > 8_000)
+        val network = if (sample.networkSampleAgeMillis?.let { it <= 10_000 } == true && sample.rttMillis != null)
+            " · RTT ${sample.rttMillis} ms" else if (displaySettings.adaptive) " · 网络测量不可用 / 等待中" else ""
+        val resolution = "${actual.width} × ${actual.height}"
+        val summary = when {
+            resizeCoordinator.failure != null -> "$resolution · ${resizeCoordinator.failure}"
+            resizeCoordinator.requested != null -> "$resolution → ${resizeCoordinator.requested!!.width} × ${resizeCoordinator.requested!!.height}（等待服务器）"
+            unsupported && desired != actual -> "$resolution · 服务器未启用动态分辨率；重连应用设置"
+            else -> "$resolution · ${quality.title}$network"
+        }
+        lastDisplayStatus = DisplayStatus(summary, (unsupported && desired != actual) || resizeCoordinator.failure != null,
+            actual, resizeCoordinator.requested, quality, capability, adaptiveReason)
+        return lastDisplayStatus
+    }
+
+    @Synchronized fun pollDisplayStatus(): DisplayStatus = lastDisplayStatus
+
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
     fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false): Boolean {
         return try {
             lastKotlinError = ""
             resetFrameCache()
+            synchronized(this) {
+                resizeCoordinator.reset()
+                adaptiveController.reset(displaySettings.quality)
+                connectedAtMillis = SystemClock.elapsedRealtime()
+                renderFrames = 0; renderCopyNanos = 0; renderDrawNanos = 0
+                lastSampleFrames = 0; lastSampleCopyNanos = 0; lastSampleDrawNanos = 0
+            }
             compatMode = compatibilityMode
             rdpeiConnected = false
             rdpeiDisabled = !enableTouchInput
@@ -77,6 +167,7 @@ object RdpConnector {
     fun isConnected(): Boolean = safeNative("isConnected", false) { nativeIsConnected() }
 
     fun sendPointerEvent(x: Int, y: Int, button: Int): Int = safeNative("sendPointerEvent", -1) { nativeSendPointerEvent(x, y, button) }
+    fun sendMouseButton(x: Int, y: Int, button: Int, down: Boolean): Int = safeNative("sendMouseButton", -1) { nativeSendMouseButton(x, y, button, down) }
     fun sendWheelEvent(x: Int, y: Int, delta: Int): Int = safeNative("sendWheelEvent", -1) { nativeSendWheelEvent(x, y, delta) }
     fun sendHWheelEvent(x: Int, y: Int, delta: Int): Int = safeNative("sendHWheelEvent", -1) { nativeSendHWheelEvent(x, y, delta) }
 
@@ -132,30 +223,34 @@ object RdpConnector {
         return "$kotlin$native"
     }
 
-    fun getWidth(): Int = safeNative("getWidth", 1280) { nativeGetWidth().coerceAtLeast(320) }
-    fun getHeight(): Int = safeNative("getHeight", 720) { nativeGetHeight().coerceAtLeast(240) }
+    fun getWidth(): Int = safeNative("getWidth", 1280) { nativeGetWidth().coerceIn(1, DisplayPolicy.MAX_DIMENSION) }
+    fun getHeight(): Int = safeNative("getHeight", 720) { nativeGetHeight().coerceIn(1, DisplayPolicy.MAX_DIMENSION) }
 
     fun getFrameBitmap(): Bitmap? = pollFrameBitmap()?.bitmap ?: cachedBitmap
 
-    fun pollFrameBitmap(): FrameBitmap? {
-        return try {
-            val frameId = nativeGetFrameId()
-            if (frameId <= 0L || frameId == cachedFrameId) return null
-            val width = getWidth()
-            val height = getHeight()
-            var cacheReset = false
-            val bitmap = cachedBitmap?.takeIf { it.width == width && it.height == height }
-                ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also {
-                    cachedBitmap = it; cacheReset = true
-                }
-            val copiedFrameId = synchronized(frameLock) {
-                nativeCopyFrameToBitmap(bitmap, dirtyScratch, cacheReset)
-            }
-            if (copiedFrameId <= 0L) return null
+    fun pollFrameBitmap(): FrameBitmap? = synchronized(frameLock) {
+        try {
+            // One native lock supplies an atomic frame generation + dimensions.
+            // Separate width/height calls can form an oversized hybrid during rotation.
+            val frameInfo = nativeGetTelemetry()
+            if (frameInfo.size < 10) return@synchronized null
+            val frameId = frameInfo[0]
+            if (frameId <= 0L || frameId == cachedFrameId) return@synchronized null
+            val width = frameInfo[8].toInt()
+            val height = frameInfo[9].toInt()
+            if (width !in 1..DisplayPolicy.MAX_DIMENSION || height !in 1..DisplayPolicy.MAX_DIMENSION ||
+                width.toLong() * height > DisplayPolicy.MAX_PIXELS) return@synchronized null
+            val current = cachedBitmap?.takeIf { it.width == width && it.height == height }
+            val bitmap = current ?: Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            val copiedFrameId = nativeCopyFrameToBitmap(bitmap, dirtyScratch, current == null)
+            // Native size may advance again after metadata. Retain the previous good
+            // bitmap and try the new generation next vsync; never stretch mismatched rows.
+            if (copiedFrameId <= 0L) return@synchronized null
             val x = dirtyScratch[0].coerceIn(0, width - 1)
             val y = dirtyScratch[1].coerceIn(0, height - 1)
             val dirtyWidth = dirtyScratch[2].coerceIn(1, width - x)
             val dirtyHeight = dirtyScratch[3].coerceIn(1, height - y)
+            cachedBitmap = bitmap
             cachedFrameId = copiedFrameId
             FrameBitmap(bitmap, copiedFrameId, Rect(x, y, x + dirtyWidth, y + dirtyHeight))
         } catch (e: Throwable) {
@@ -167,12 +262,24 @@ object RdpConnector {
 
     fun sendTextInput(text: String): Int {
         var result = 0
-        text.forEach { char ->
+        text.forEachIndexed { index, char ->
             result = when (char) {
                 '\n', '\r' -> sendKeyStroke(0x1C)
                 '\b' -> sendKeyStroke(0x0E)
-                else -> safeNative("sendUnicodeChar", -1) { nativeSendUnicodeChar(char.code) }
+                else -> {
+                    val deadline = SystemClock.elapsedRealtime() + 2_000
+                    var code: Int
+                    do {
+                        code = safeNative("sendUnicodeChar", -1) { nativeSendUnicodeChar(char.code) }
+                        if (code == -5) Thread.sleep(4) // queue backpressure, never UI-thread JNI blocking
+                    } while (code == -5 && SystemClock.elapsedRealtime() < deadline)
+                    code
+                }
             }
+            if (result != 0) return result
+            // This API is called by the IO input actor; pace large commits so native
+            // input cannot starve network decode or fill the bounded event queue.
+            if (index > 0 && index % 32 == 0) Thread.sleep(4)
         }
         return result
     }
@@ -187,7 +294,7 @@ object RdpConnector {
 
     fun <T> withFrameLock(block: () -> T): T = synchronized(frameLock) { block() }
 
-    private fun resetFrameCache() { cachedBitmap = null; cachedFrameId = 0L }
+    private fun resetFrameCache() = synchronized(frameLock) { cachedBitmap = null; cachedFrameId = 0L }
 
     private inline fun <T> safeNative(name: String, fallback: T, block: () -> T): T {
         return try { block() } catch (e: Throwable) { Log.e(TAG, "$name failed", e); fallback }

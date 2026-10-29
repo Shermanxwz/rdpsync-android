@@ -1,33 +1,25 @@
 cmake_minimum_required(VERSION 3.22)
-project(rdpsync-native)
-
+project(rdpsync-native C)
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-add_library(rdpsync SHARED
-    freerdp_bridge.c
-)
-
+# The dependency scripts and this optional IDE/CMake entry point share paths.
+get_filename_component(RDPSYNC_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+set(RDPSYNC_DEPS_DIR "${RDPSYNC_ROOT}/build/freerdp-android" CACHE PATH "Built FreeRDP dependencies")
+if(ANDROID_ABI STREQUAL "arm64-v8a")
+    set(RDPSYNC_ARCH arm64)
+elseif(ANDROID_ABI STREQUAL "x86_64")
+    set(RDPSYNC_ARCH x86_64)
+else()
+    message(FATAL_ERROR "Unsupported Android ABI: ${ANDROID_ABI}")
+endif()
+add_library(rdpsync SHARED freerdp_bridge.c)
 target_include_directories(rdpsync PRIVATE
-    ${CMAKE_SOURCE_DIR}/../build/freerdp-android/freerdp-src/include
-    ${CMAKE_SOURCE_DIR}/../build/freerdp-android/freerdp-src/winpr/include
-    ${CMAKE_SOURCE_DIR}/../build/freerdp-android/openssl-arm64/include
-    ${CMAKE_SOURCE_DIR}/../build/freerdp-android/build-arm64/include
-)
-
-target_link_directories(rdpsync PRIVATE
-    ${CMAKE_SOURCE_DIR}/../build/freerdp-android/openssl-arm64/lib
-)
-
-target_compile_definitions(rdpsync PRIVATE _GNU_SOURCE)
-
-target_link_libraries(rdpsync
-    freerdp-client3
-    freerdp3
-    winpr3
-    jnigraphics
-    log
-    android
-    ssl
-    crypto
-)
+    "${RDPSYNC_DEPS_DIR}/freerdp-src/include"
+    "${RDPSYNC_DEPS_DIR}/freerdp-src/winpr/include"
+    "${RDPSYNC_DEPS_DIR}/build-${RDPSYNC_ARCH}/include"
+    "${RDPSYNC_DEPS_DIR}/build-${RDPSYNC_ARCH}/winpr/include")
+target_link_directories(rdpsync PRIVATE "${RDPSYNC_ROOT}/app/src/main/jniLibs/${ANDROID_ABI}")
+target_link_libraries(rdpsync freerdp-client3 freerdp3 winpr3 jnigraphics log android)
+# The bundled shared libraries contain their statically linked OpenSSL dependencies.
+target_link_options(rdpsync PRIVATE "-Wl,-z,max-page-size=16384")
