@@ -8,6 +8,7 @@ import com.rdp.sync.database.DeviceDatabase
 import com.rdp.sync.manager.SyncDirection
 import com.rdp.sync.manager.SyncManager
 import com.rdp.sync.network.WebDavSyncService
+import com.rdp.sync.network.safeOperationMessage
 import com.rdp.sync.repository.DeviceRepository
 import com.rdp.sync.security.SecureWebDavSettings
 import kotlinx.coroutines.Dispatchers
@@ -57,7 +58,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                     _uiState.update { it.copy(devices = devices, isLoading = false) }
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(error = e.message, isLoading = false) }
+                _uiState.update { it.copy(error = safeOperationMessage(e), isLoading = false) }
             }
         }
     }
@@ -67,7 +68,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(isSaving = true, error = null) }
         viewModelScope.launch {
             val device = Device(name = name.trim(), host = host.trim(), port = port, username = username.trim(), password = password, domain = domain.trim(), rdpServerName = rdpServerName.trim(), width = width, height = height)
-            try { repository.insertDevice(device); onSaved() } catch (e: Exception) { _uiState.update { it.copy(error = e.message) } }
+            try { repository.insertDevice(device); onSaved() } catch (e: Exception) { _uiState.update { it.copy(error = safeOperationMessage(e)) } }
             finally { _uiState.update { it.copy(isSaving = false) } }
         }
     }
@@ -76,14 +77,14 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         if (_uiState.value.isSaving) return
         _uiState.update { it.copy(isSaving = true, error = null) }
         viewModelScope.launch {
-            try { repository.updateDevice(device.copy(name = device.name.trim(), host = device.host.trim(), username = device.username.trim(), domain = device.domain.trim(), rdpServerName = device.rdpServerName.trim())); onSaved() } catch (e: Exception) { _uiState.update { it.copy(error = e.message) } }
+            try { repository.updateDevice(device.copy(name = device.name.trim(), host = device.host.trim(), username = device.username.trim(), domain = device.domain.trim(), rdpServerName = device.rdpServerName.trim())); onSaved() } catch (e: Exception) { _uiState.update { it.copy(error = safeOperationMessage(e)) } }
             finally { _uiState.update { it.copy(isSaving = false) } }
         }
     }
 
     fun deleteDevice(device: Device) {
         viewModelScope.launch {
-            try { repository.deleteDevice(device) } catch (e: Exception) { _uiState.update { it.copy(error = e.message) } }
+            try { repository.deleteDevice(device) } catch (e: Exception) { _uiState.update { it.copy(error = safeOperationMessage(e)) } }
         }
     }
 
@@ -95,7 +96,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 _uiState.update { it.copy(webDavUrl = cleanUrl, webDavUsername = username.trim(), webDavPassword = password,
                     webDavCredentialUnavailable = false, message = "WebDAV 设置已加密保存") }
                 configureSyncManager(_uiState.value)
-            } catch (e: Exception) { _uiState.update { it.copy(error = e.message) } }
+            } catch (e: Exception) { _uiState.update { it.copy(error = safeOperationMessage(e)) } }
         }
     }
 
@@ -116,7 +117,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 result.devicesToStore?.let { repository.importDevices(it, mergeOnlyNew = result.mergeOnlyNew) }
                 _uiState.update { it.copy(isSyncing = false, message = result.message) }
-            } catch (e: Exception) { _uiState.update { it.copy(isSyncing = false, error = "同步失败: ${e.message}") } }
+            } catch (e: Exception) { _uiState.update { it.copy(isSyncing = false, error = "同步失败: ${safeOperationMessage(e)}") } }
         }
     }
 
@@ -129,7 +130,7 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
             }
             result.fold(
                 onSuccess = { message -> _uiState.update { it.copy(isSyncing = false, message = message) } },
-                onFailure = { e -> _uiState.update { it.copy(isSyncing = false, error = "WebDAV 测试失败: ${e.message}") } }
+                onFailure = { e -> _uiState.update { it.copy(isSyncing = false, error = "WebDAV 测试失败: ${safeOperationMessage(e)}") } }
             )
         }
     }

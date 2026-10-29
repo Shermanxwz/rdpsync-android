@@ -145,7 +145,7 @@ class AdaptiveQualityController(initial: DisplayQuality = DisplayQuality.BALANCE
         }
         val changed = next != quality
         val reason = when {
-            renderPressure -> "持续渲染压力"
+            renderPressure -> "本机渲染压力（非网速判断）"
             badNetwork -> "网络延迟 / 带宽压力"
             healthyNetwork -> "网络稳定"
             else -> "等待有效网络测量（静止画面不会降级）"

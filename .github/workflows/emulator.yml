@@ -41,7 +41,9 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh', 'app/src/main/cpp/**') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          restore-keys: |
+            rdp-native-x86_64-${{ runner.os }}-
       - name: Build actual x86_64 RDP libraries and instrumentation
         env:
           ABI: x86_64
@@ -57,7 +59,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh', 'app/src/main/cpp/**') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
       - name: Start disposable isolated xrdp desktop and weak-link proxy
         run: |
           bash scripts/fixtures/start-rdp-fixture.sh

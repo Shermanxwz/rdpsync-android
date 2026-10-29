@@ -6,7 +6,8 @@ import com.rdp.sync.network.RdpConnector
 class RdpSyncApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        // Retain the JNI initialization entry point; WinPR supplies its tested internal MD4 path.
-        RdpConnector.nativeSetLibDir(applicationInfo.nativeLibraryDir)
+        // Android does not supply HOME; initialize private WinPR/FreeRDP runtime paths
+        // before any session context is allocated. Never use nativeLibraryDir as writable data.
+        RdpConnector.initialize(this)
     }
 }

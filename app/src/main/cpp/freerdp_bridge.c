@@ -14,6 +14,9 @@
 #include <stdarg.h>
 #include <stdatomic.h>
 #include <time.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/settings.h>
 #include <freerdp/constants.h>
@@ -78,6 +81,46 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 /* Serializes connection replacement without holding g_lock while joining. */
 static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_startup_error[1024];
+static char g_runtime_home[PATH_MAX], g_runtime_cache[PATH_MAX];
+
+/* Android has no shell HOME. FreeRDP requires it while allocating settings,
+ * before any connection callback. Only the Application's private directories
+ * are supplied here; never substitute /tmp or the read-only native library dir. */
+static int private_directory(const char* path, char resolved[PATH_MAX]) {
+    struct stat info;
+    return path && path[0] == '/' && realpath(path, resolved) &&
+        stat(resolved, &info) == 0 && S_ISDIR(info.st_mode) && info.st_uid == geteuid() &&
+        !(info.st_mode & S_IWOTH) &&
+        (!(info.st_mode & S_IWGRP) || info.st_gid == getegid()) &&
+        access(resolved, R_OK | W_OK | X_OK) == 0;
+}
+static int initialize_runtime(const char* home, const char* cache) {
+    char resolved_home[PATH_MAX], resolved_cache[PATH_MAX];
+    if (!private_directory(home, resolved_home) || !private_directory(cache, resolved_cache))
+        return 0;
+    pthread_mutex_lock(&g_lifecycle_lock);
+    int result = 0;
+    if (g_runtime_home[0]) {
+        /* Idempotent, but never mutate process environment under live threads. */
+        result = !strcmp(g_runtime_home, resolved_home) && !strcmp(g_runtime_cache, resolved_cache);
+    } else {
+        pthread_mutex_lock(&g_lock);
+        const int no_session = g_session == NULL;
+        pthread_mutex_unlock(&g_lock);
+        if (no_session && setenv("HOME", resolved_home, 1) == 0 &&
+            setenv("TMPDIR", resolved_cache, 1) == 0 &&
+            setenv("XDG_CONFIG_HOME", resolved_home, 1) == 0 &&
+            setenv("XDG_DATA_HOME", resolved_home, 1) == 0 &&
+            setenv("XDG_CACHE_HOME", resolved_cache, 1) == 0 &&
+            setenv("XDG_RUNTIME_DIR", resolved_cache, 1) == 0) {
+            snprintf(g_runtime_home, sizeof(g_runtime_home), "%s", resolved_home);
+            snprintf(g_runtime_cache, sizeof(g_runtime_cache), "%s", resolved_cache);
+            result = 1;
+        }
+    }
+    pthread_mutex_unlock(&g_lifecycle_lock);
+    return result;
+}
 
 static int64_t monotonic_us(void) {
     struct timespec ts;
@@ -366,24 +409,31 @@ static BOOL reject_redirect(freerdp* instance) {
 static BOOL configure_security(rdpSettings* settings) {
     /* Mandatory for every mode, including compatibility retries. A legacy RDP
      * connection has no TLS certificate callback and must never be negotiated. */
-    return freerdp_settings_set_bool(settings, FreeRDP_ExternalCertificateManagement, TRUE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, FALSE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, FALSE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_AutoDenyCertificate, FALSE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE) &&
-        freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE) &&
-        /* X.224 precedes TLS. Suppress its optional plaintext username cookie. */
-        freerdp_settings_set_bool(settings, FreeRDP_MstscCookieMode, FALSE) &&
-        freerdp_settings_set_uint32(settings, FreeRDP_CookieMaxLength, 0) &&
-        freerdp_settings_set_bool(settings, FreeRDP_SendPreconnectionPdu, FALSE) &&
-        freerdp_settings_set_uint32(settings, FreeRDP_AuthenticationLevel, 2) &&
-        freerdp_settings_set_string(settings, FreeRDP_CertificateAcceptedFingerprints, NULL) &&
-        freerdp_settings_set_uint32(settings, FreeRDP_AcceptedCertLength, 0) &&
-        freerdp_settings_set_uint32(settings, FreeRDP_GatewayAcceptedCertLength, 0) &&
-        freerdp_settings_set_uint32(settings, FreeRDP_RedirectionAcceptedCertLength, 0);
+#define SECURITY_SETTING(type, key, value) do { \
+    if (!freerdp_settings_set_##type(settings, key, value)) { \
+        LOGE("Security setting initialization failed: %s", #key); return FALSE; \
+    } \
+} while (0)
+    SECURITY_SETTING(bool, FreeRDP_ExternalCertificateManagement, TRUE);
+    SECURITY_SETTING(bool, FreeRDP_IgnoreCertificate, FALSE);
+    SECURITY_SETTING(bool, FreeRDP_AutoAcceptCertificate, FALSE);
+    SECURITY_SETTING(bool, FreeRDP_AutoDenyCertificate, FALSE);
+    SECURITY_SETTING(bool, FreeRDP_RdpSecurity, FALSE);
+    SECURITY_SETTING(bool, FreeRDP_UseRdpSecurityLayer, FALSE);
+    SECURITY_SETTING(bool, FreeRDP_TlsSecurity, TRUE);
+    SECURITY_SETTING(bool, FreeRDP_NlaSecurity, TRUE);
+    SECURITY_SETTING(bool, FreeRDP_NegotiateSecurityLayer, TRUE);
+    /* X.224 precedes TLS; suppress its optional plaintext username cookie. */
+    SECURITY_SETTING(bool, FreeRDP_MstscCookieMode, FALSE);
+    SECURITY_SETTING(uint32, FreeRDP_CookieMaxLength, 0);
+    SECURITY_SETTING(bool, FreeRDP_SendPreconnectionPdu, FALSE);
+    SECURITY_SETTING(uint32, FreeRDP_AuthenticationLevel, 2);
+    SECURITY_SETTING(string, FreeRDP_CertificateAcceptedFingerprints, NULL);
+    SECURITY_SETTING(uint32, FreeRDP_AcceptedCertLength, 0);
+    SECURITY_SETTING(uint32, FreeRDP_GatewayAcceptedCertLength, 0);
+    SECURITY_SETTING(uint32, FreeRDP_RedirectionAcceptedCertLength, 0);
+#undef SECURITY_SETTING
+    return TRUE;
 }
 static BOOL client_ctx_new(freerdp* instance, rdpContext* context) {
     (void)context;
@@ -664,6 +714,58 @@ unlock:
 }
 
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean,jstring);
+JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeInitialize(
+    JNIEnv* env, jobject obj, jstring jhome, jstring jcache) {
+    (void)obj;
+    if (!jhome || !jcache) return JNI_FALSE;
+    const char* home = (*env)->GetStringUTFChars(env, jhome, NULL);
+    if (!home) return JNI_FALSE;
+    const char* cache = (*env)->GetStringUTFChars(env, jcache, NULL);
+    const int result = cache && initialize_runtime(home, cache);
+    if (cache) (*env)->ReleaseStringUTFChars(env, jcache, cache);
+    (*env)->ReleaseStringUTFChars(env, jhome, home);
+    pthread_mutex_lock(&g_lock);
+    if (!g_session) {
+        if (result) g_startup_error[0] = 0;
+        else snprintf(g_startup_error, sizeof(g_startup_error), "远程桌面私有运行目录初始化失败");
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (!result) LOGE("Private runtime directory initialization failed");
+    return result ? JNI_TRUE : JNI_FALSE;
+}
+JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRuntime(JNIEnv* env, jobject obj) {
+    (void)env; (void)obj;
+    /* Real context allocation without connect(), sockets, authentication or a
+     * protocol thread. The instrumentation gate catches platform initialization
+     * regressions that host mocks cannot (notably Android's missing HOME). */
+    pthread_mutex_lock(&g_lifecycle_lock);
+    pthread_mutex_lock(&g_lock);
+    const int active = g_session != NULL;
+    pthread_mutex_unlock(&g_lock);
+    if (active) {
+        pthread_mutex_unlock(&g_lifecycle_lock);
+        return JNI_FALSE; /* Never touch an active session or its trust state. */
+    }
+    const char* failed = "运行目录";
+    int result = 0;
+    freerdp* instance = NULL;
+    if (g_runtime_home[0]) {
+        failed = "FreeRDP 上下文";
+        instance = create_instance(NULL);
+        if (instance) {
+            failed = "安全设置";
+            result = configure_security(instance->context->settings);
+        }
+    }
+    if (instance) freerdp_client_context_free(instance->context);
+    pthread_mutex_lock(&g_lock);
+    if (result) g_startup_error[0] = 0;
+    else snprintf(g_startup_error, sizeof(g_startup_error), "远程桌面运行检查失败（阶段：%s）", failed);
+    pthread_mutex_unlock(&g_lock);
+    if (!result) LOGE("Runtime check failed at stage: %s", failed);
+    pthread_mutex_unlock(&g_lifecycle_lock);
+    return result ? JNI_TRUE : JNI_FALSE;
+}
 JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetLibDir(JNIEnv* env, jobject obj, jstring path) {
     (void)env; (void)obj; (void)path;
     /* FreeRDP uses WinPR's WITH_INTERNAL_MD4 implementation. Do not cast raw
@@ -695,11 +797,14 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
         (jexpected_fingerprint && !expected_pin)) goto release;
     if (!*host || strlen(host) >= 256 || (server_name && strlen(server_name) >= 256)) goto release;
     pthread_mutex_lock(&g_lifecycle_lock);
+    const char* failure_stage = "运行目录";
+    if (!g_runtime_home[0]) goto failure;
     pthread_mutex_lock(&g_lock);
     RdpSession* previous = g_session; g_session = NULL;
     g_startup_error[0] = 0;
     pthread_mutex_unlock(&g_lock);
     session_destroy(previous);
+    failure_stage = "会话内存";
     RdpSession* session = calloc(1, sizeof(RdpSession));
     if (!session) goto failure;
     pthread_mutex_init(&session->mutex, NULL);
@@ -712,11 +817,14 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     session->endpoint_port = port;
     session->expected_pin_state = rdpsync_normalize_pin(expected_pin, session->expected_fingerprint);
     pthread_mutex_lock(&g_lock); session->generation = ++g_next_generation; pthread_mutex_unlock(&g_lock);
+    failure_stage = "唤醒事件";
     session->wake_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!session->wake_event) { session_destroy(session); goto failure; }
+    failure_stage = "FreeRDP 上下文";
     session->instance = create_instance(session);
     if (!session->instance) { session_destroy(session); goto failure; }
     rdpSettings* settings = session->instance->context->settings;
+    failure_stage = "连接与安全设置";
     BOOL ok = freerdp_settings_set_string(settings, FreeRDP_ServerHostname, host) &&
         freerdp_settings_set_uint32(settings, FreeRDP_ServerPort, (UINT32)port) &&
         freerdp_settings_set_string(settings, FreeRDP_Username, user) &&
@@ -759,6 +867,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     s_diag(session, compatibility ? "connection=compatibility-retry" : "display-control=requested");
     s_diag(session, touch && !compatibility ? "rdpei=requested" : "rdpei=disabled");
     s_status(session, "正在连接...");
+    failure_stage = "协议线程";
     if (pthread_create(&session->thread, NULL, thread_fn, session) != 0) {
         session_destroy(session); goto failure;
     }
@@ -768,7 +877,8 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     goto unlock;
 failure:
     pthread_mutex_lock(&g_lock);
-    snprintf(g_startup_error, sizeof(g_startup_error), "无法创建远程桌面会话");
+    snprintf(g_startup_error, sizeof(g_startup_error), "无法创建远程桌面会话（阶段：%s）", failure_stage);
+    LOGE("Session initialization failed at stage: %s", failure_stage);
     pthread_mutex_unlock(&g_lock);
 unlock:
     pthread_mutex_unlock(&g_lifecycle_lock);

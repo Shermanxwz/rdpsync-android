@@ -1,5 +1,7 @@
 package com.rdp.sync.network
 
+import android.content.Context
+import java.io.File
 import android.graphics.Bitmap
 import android.graphics.Rect
 import android.util.Log
@@ -23,6 +25,9 @@ object RdpConnector {
     external fun nativeGetStatus(): String
     external fun nativeGetDiag(): String
     external fun nativeSetLibDir(path: String)
+    external fun nativeInitialize(homePath: String, cachePath: String): Boolean
+    /** Allocates/frees a context without connecting; used by runtime diagnostics and instrumentation. */
+    external fun nativeCheckRuntime(): Boolean
     external fun nativeGetFrameArgb(width: Int, height: Int): IntArray?
     external fun nativeGetFrameId(): Long
     external fun nativeCopyFrameArgb(buffer: IntArray): Long
@@ -44,6 +49,21 @@ object RdpConnector {
 
     private const val TAG = "RdpConnector"
     @Volatile private var lastKotlinError: String = ""
+    @Volatile private var nativeInitialized = false
+
+    /** FreeRDP/WinPR requires a writable HOME even on Android before context creation. */
+    @Synchronized fun initialize(context: Context): Boolean {
+        if (nativeInitialized) return true
+        val app = context.applicationContext
+        nativeInitialized = try {
+            val home = File(app.noBackupFilesDir, "freerdp")
+            val cache = File(app.cacheDir, "freerdp")
+            (home.isDirectory || home.mkdirs()) && (cache.isDirectory || cache.mkdirs()) &&
+                nativeInitialize(home.absolutePath, cache.absolutePath)
+        } catch (_: Exception) { false }
+        if (!nativeInitialized) lastKotlinError = "远程桌面运行目录初始化失败，请检查本机可用存储空间。"
+        return nativeInitialized
+    }
     private var cachedBitmap: Bitmap? = null
     private var cachedFrameId = 0L
     private val dirtyScratch = IntArray(4)
@@ -122,7 +142,7 @@ object RdpConnector {
             resizeCoordinator.failure != null -> "$resolution · ${resizeCoordinator.failure}"
             resizeCoordinator.requested != null -> "$resolution → ${resizeCoordinator.requested!!.width} × ${resizeCoordinator.requested!!.height}（等待服务器）"
             unsupported && desired != actual -> "$resolution · 服务器未启用动态分辨率；重连应用设置"
-            else -> "$resolution · ${quality.title}$network"
+            else -> "$resolution · ${quality.title}$network" + if (displaySettings.adaptive) " · $adaptiveReason" else ""
         }
         lastDisplayStatus = DisplayStatus(summary, (unsupported && desired != actual) || resizeCoordinator.failure != null,
             actual, resizeCoordinator.requested, quality, capability, adaptiveReason)
@@ -134,6 +154,10 @@ object RdpConnector {
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
     fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = ""): Boolean {
+        if (!nativeInitialized) {
+            lastKotlinError = "远程桌面运行目录未初始化，请重新打开应用并检查本机存储空间。"
+            return false
+        }
         return try {
             lastKotlinError = ""
             resetFrameCache()

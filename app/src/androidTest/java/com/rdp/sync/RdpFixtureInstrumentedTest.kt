@@ -46,6 +46,8 @@ class RdpFixtureInstrumentedTest {
     @Test fun realDesktopDisplayInputResizeAndWeakLink() {
         val enabled = InstrumentationRegistry.getArguments().getString("rdpFixture")
         assertEquals("This test requires the isolated CI fixture, never a user's host", "true", enabled)
+        val nativeInitialized = RdpConnector.initialize(instrumentation.targetContext)
+        assertTrue("app-private native runtime initialization: ${RdpConnector.getDiag()}", nativeInitialized)
         val expectedFingerprint = requireNotNull(InstrumentationRegistry.getArguments().getString("fixtureFingerprint"))
         assertTrue(expectedFingerprint.matches(Regex("[a-f0-9]{64}")))
         instrumentation.targetContext.getSharedPreferences("certificate_trust_v1", Context.MODE_PRIVATE).edit().clear().commit()
@@ -214,13 +216,20 @@ class RdpFixtureInstrumentedTest {
             File(evidence, "measurements.json").writeText(measurements.toString(2))
             File(evidence, "diagnostics.txt").writeText(RdpConnector.getDiag())
             // AGP/UTP uninstalls the app after tests. Shell-owned shared test output survives it.
-            val copy = instrumentation.uiAutomation.executeShellCommand("mkdir -p /sdcard/Download/rdpsync-evidence; cp -R '${evidence.absolutePath}/.' /sdcard/Download/rdpsync-evidence/")
-            ParcelFileDescriptor.AutoCloseInputStream(copy).use { it.readBytes() }
+            // UiAutomation executes argv, not a shell script: do not use ; or shell quoting.
+            shellOutput("mkdir -p /sdcard/Download/rdpsync-evidence")
+            shellOutput("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-evidence/")
+            assertTrue("test evidence must survive UTP uninstall",
+                shellOutput("ls /sdcard/Download/rdpsync-evidence").contains("measurements.json"))
             compose.runOnUiThread { showing.value = false }
             RdpConnector.disconnect()
             waitFor("final teardown", 20_000) { !RdpConnector.isConnected() }
         }
     }
+
+    private fun shellOutput(command: String): String =
+        ParcelFileDescriptor.AutoCloseInputStream(instrumentation.uiAutomation.executeShellCommand(command))
+            .bufferedReader().use { it.readText() }
 
     private fun approveCertificate(fingerprint: String, changed: Boolean, authRequestsBefore: Int) {
         val title = if (changed) "服务器证书已改变" else "确认服务器证书"

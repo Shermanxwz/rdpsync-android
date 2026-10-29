@@ -51,7 +51,11 @@ class AdaptiveQualityControllerTest {
     }
     @Test fun measuredRenderPressureCanDowngradeButIdleCannot() {
         val c = AdaptiveQualityController(DisplayQuality.BALANCED)
-        repeat(3) { c.observe(sample(it * 1000L, null, null, null, 20, 30.0), DisplayQuality.BALANCED) }
+        repeat(3) {
+            val decision = c.observe(sample(it * 1000L, null, null, null, 20, 30.0), DisplayQuality.BALANCED)
+            assertTrue(decision.reason.contains("本机渲染"))
+            assertFalse(decision.reason.contains("网络延迟"))
+        }
         assertEquals(DisplayQuality.ECONOMY, c.quality)
         repeat(100) { c.observe(sample(5000L + it * 1000, null, null, null, 0, 30.0), DisplayQuality.BALANCED) }
         assertEquals(DisplayQuality.ECONOMY, c.quality)

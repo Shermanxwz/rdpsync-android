@@ -3,6 +3,7 @@ package com.rdp.sync.manager
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.SyncFile
 import com.rdp.sync.network.WebDavSyncService
+import com.rdp.sync.network.safeOperationMessage
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -102,4 +103,35 @@ class SafeSyncTest {
         assertEquals(3, SyncPolicy.merge(listOf(device), variants).size)
         assertSame(device, SyncPolicy.merge(listOf(device), listOf(device.copy(password="remote"))).single())
     }
+    @Test fun malformedLegacyPayloadCannotEscapeThroughErrorMessagesOrCauseChains() {
+        val secret = "SYNTHETIC-DO-NOT-ECHO-71b4"
+        listOf(
+            "{\"password\":\"$secret\",",
+            JSONObject().put("devices", secret).toString(),
+            JSONObject().put("devices", JSONArray().put(secret)).toString(),
+            JSONObject().put("devices", JSONArray().put(JSONObject().put("host", "fixture.invalid").put("username", JSONObject().put("nested", secret)))).toString(),
+            JSONObject().put("devices", JSONArray().put(JSONObject().put("host", "fixture.invalid").put("username", "fixture").put("password", JSONObject().put("nested", secret)))).toString()
+        ).forEach { body ->
+            getResponse = MockResponse().setBody(body)
+            val failure = SyncManager.mergeDevices(listOf(device), includePasswords = true).exceptionOrNull()
+            assertNotNull("malformed input must fail closed", failure)
+            assertFalse(failure!!.stackTraceToString().contains(secret))
+            assertFalse(safeOperationMessage(failure).contains(secret))
+            assertTrue(safeOperationMessage(failure).contains("格式"))
+            assertNull(failure.cause)
+            assertEquals(0, failure.suppressed.size)
+        }
+        assertFalse(paths.any { it.startsWith("PUT") })
+    }
+
+    @Test fun untrustedHttpReasonAndUnknownUiExceptionAreNotEchoed() {
+        val secret = "SYNTHETIC-HTTP-REASON-SECRET"
+        getResponse = MockResponse().setStatus("HTTP/1.1 500 $secret")
+        val failure = SyncManager.downloadDevices(true).exceptionOrNull()!!
+        assertTrue(failure.message!!.contains("500"))
+        assertFalse(failure.stackTraceToString().contains(secret))
+        assertFalse(safeOperationMessage(IllegalStateException(secret)).contains(secret))
+        assertNull(failure.cause)
+    }
+
 }

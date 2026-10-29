@@ -6,6 +6,7 @@ The runner installs xrdp + xorgxrdp and creates a disposable `rdpfixture` accoun
 
 ## Assertions
 
+- A separate `NativeRuntimeInstrumentedTest` initializes app-private WinPR/FreeRDP runtime paths idempotently and allocates/frees a genuine native client context without any network connection.
 - Native libraries load, the real desktop connects, and the saved profile dimensions are honored.
 - Red, green, and blue probe blocks appear with the correct colors in **Android screen captures**, covering native decode → JNI bitmap → Android rendering.
 - Injected Android touchscreen events pass through `RdpDesktopView`, the ordered input dispatcher, FreeRDP, and the server. The test waits for the server's response color to appear on the Android screen.
@@ -47,4 +48,4 @@ The same emulator invocation also executes `CredentialStorageInstrumentedTest`, 
 
 The instrumentation pumps Compose's test frame clock while waiting for real-time network work. It copies screenshots/JSON to shell-owned `/sdcard/Download/rdpsync-evidence` before AGP/UTP uninstalls the test app, so evidence survives test cleanup.
 
-Session teardown allows up to 90 seconds: xorgxrdp0.9.x clamps disconnected-session cleanup to a60-second minimum and checks on a timer. The test waits for the old desktop to exit rather than accepting stale session state.
+Session teardown allows up to 90 seconds: xorgxrdp 0.9.x clamps disconnected-session cleanup to a 60-second minimum and checks on a timer. The test waits for the old desktop to exit rather than accepting stale session state.

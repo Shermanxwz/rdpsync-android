@@ -29,3 +29,12 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
     "$ROOT/app/src/test/cpp/certificate_test.c" -o "$OUT/certificate_test" -lcrypto
 "$OUT/certificate_test"
+
+# Execute the actual JNI private HOME/XDG bootstrap without creating a network
+# context. Android instrumentation exercises the resulting FreeRDP allocation.
+"$HOST_CC" "${FLAGS[@]}" -pthread -Wno-deprecated-declarations \
+    -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
+    "$ROOT/app/src/test/cpp/runtime_test.c" -o "$OUT/runtime_test"
+"$OUT/runtime_test"

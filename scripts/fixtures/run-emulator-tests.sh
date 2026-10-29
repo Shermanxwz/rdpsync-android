@@ -17,5 +17,5 @@ trap cleanup EXIT
 ./gradlew --no-daemon -PnativeAbis=x86_64 \
   -Pandroid.testInstrumentationRunnerArguments.rdpFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.fixtureFingerprint="$RDP_FIXTURE_FINGERPRINT" \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.RdpFixtureInstrumentedTest,com.rdp.sync.security.CredentialStorageInstrumentedTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.RdpFixtureInstrumentedTest,com.rdp.sync.security.CredentialStorageInstrumentedTest \
   :app:connectedDebugAndroidTest

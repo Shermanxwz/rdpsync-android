@@ -1,6 +1,5 @@
 package com.rdp.sync.network
 
-import android.util.Log
 import okhttp3.Credentials
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -17,7 +16,6 @@ enum class SyncFile(val fileName: String) {
 }
 
 object WebDavSyncService {
-    private const val TAG = "WebDavSyncService"
     private const val MEDIA_TYPE = "application/json; charset=utf-8"
 
     private val client = OkHttpClient.Builder()
@@ -26,7 +24,10 @@ object WebDavSyncService {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    fun syncToCloud(devices: JSONArray, baseUrl: String, username: String, password: String, file: SyncFile = SyncFile.PROFILES): Result<String> {
+    fun syncToCloud(devices: JSONArray, baseUrl: String, username: String, password: String, file: SyncFile = SyncFile.PROFILES): Result<String> =
+        safeSync { syncToCloudUnsafe(devices, baseUrl, username, password, file).getOrThrow() }
+
+    private fun syncToCloudUnsafe(devices: JSONArray, baseUrl: String, username: String, password: String, file: SyncFile): Result<String> {
         val cleanBaseUrl = normalizeCollectionUrl(baseUrl)
         ensureCollectionExists(cleanBaseUrl, username, password).getOrElse { return Result.failure(it) }
         val targetUrl = buildFileUrl(cleanBaseUrl, file)
@@ -47,7 +48,10 @@ object WebDavSyncService {
         return executeUnit(request, "Synced ${devices.length()} devices")
     }
 
-    fun syncFromCloud(baseUrl: String, username: String, password: String, file: SyncFile = SyncFile.PROFILES, missingIsEmpty: Boolean = false): Result<List<JSONObject>> {
+    fun syncFromCloud(baseUrl: String, username: String, password: String, file: SyncFile = SyncFile.PROFILES, missingIsEmpty: Boolean = false): Result<List<JSONObject>> =
+        safeSync { syncFromCloudUnsafe(baseUrl, username, password, file, missingIsEmpty).getOrThrow() }
+
+    private fun syncFromCloudUnsafe(baseUrl: String, username: String, password: String, file: SyncFile, missingIsEmpty: Boolean): Result<List<JSONObject>> {
         val cleanBaseUrl = normalizeCollectionUrl(baseUrl)
         ensureCollectionExists(cleanBaseUrl, username, password).getOrElse { return Result.failure(it) }
         val request = Request.Builder()
@@ -59,8 +63,8 @@ object WebDavSyncService {
         return try {
             client.newCall(request).execute().use { response ->
                 if (response.code == 404) return if (missingIsEmpty) Result.success(emptyList()) else
-                    Result.failure(IOException("云端没有 ${file.fileName}。旧版备份请明确选择「旧版含密码文件」；本机设备未改动。"))
-                if (!response.isSuccessful) return Result.failure(IOException(readableHttpError(response.code, response.message)))
+                    Result.failure(SyncFailure.missing(file))
+                if (!response.isSuccessful) return Result.failure(SyncFailure.http(response.code))
                 val jsonStr = response.body?.string().orEmpty()
                 val devicesArray = parseDevicesArray(jsonStr)
                 val devices = mutableListOf<JSONObject>()
@@ -72,13 +76,16 @@ object WebDavSyncService {
         }
     }
 
-    fun testConnection(baseUrl: String, username: String, password: String): Result<String> {
+    fun testConnection(baseUrl: String, username: String, password: String): Result<String> =
+        safeSync { testConnectionUnsafe(baseUrl, username, password).getOrThrow() }
+
+    private fun testConnectionUnsafe(baseUrl: String, username: String, password: String): Result<String> {
         val cleanBaseUrl = normalizeCollectionUrl(baseUrl)
         val directoryResult = ensureCollectionExists(cleanBaseUrl, username, password)
         if (directoryResult.isFailure) return Result.failure(directoryResult.exceptionOrNull() ?: IOException("WebDAV 目录检查失败"))
         val readWriteResult = verifyReadWrite(cleanBaseUrl, username, password)
         if (readWriteResult.isFailure) return Result.failure(readWriteResult.exceptionOrNull() ?: IOException("WebDAV 读写测试失败"))
-        return Result.success("WebDAV 连接正常，目录可读写：$cleanBaseUrl")
+        return Result.success("WebDAV 连接正常，目录可读写。")
     }
 
     private fun verifyReadWrite(baseUrl: String, username: String, password: String): Result<Unit> {
@@ -98,7 +105,7 @@ object WebDavSyncService {
             .build()
         try {
             client.newCall(getRequest).execute().use { response ->
-                if (!response.isSuccessful) return Result.failure(IOException("WebDAV 测试文件读取失败：${readableHttpError(response.code, response.message)}"))
+                if (!response.isSuccessful) return Result.failure(SyncFailure.http(response.code))
             }
         } catch (e: Exception) {
             return Result.failure(e)
@@ -111,7 +118,7 @@ object WebDavSyncService {
             try {
                 client.newCall(deleteRequest).execute().close()
             } catch (e: Exception) {
-                Log.w(TAG, "Failed to delete WebDAV test file", e)
+                // Best-effort cleanup; exception messages can contain URLs or credentials.
             }
         }
         return Result.success(Unit)
@@ -138,7 +145,7 @@ object WebDavSyncService {
                 client.newCall(mkcol).execute().use { response ->
                     when (response.code) {
                         201, 204, 405 -> Unit
-                        else -> return Result.failure(IOException("创建 WebDAV 目录失败 ${readableHttpError(response.code, response.message)}，目录：$currentUri"))
+                        else -> return Result.failure(SyncFailure.http(response.code))
                     }
                 }
             }
@@ -166,20 +173,19 @@ object WebDavSyncService {
             if (response.isSuccessful || response.code == 207 || response.code == 201 || response.code == 204) {
                 Result.success(successMessage)
             } else {
-                Result.failure(IOException(readableHttpError(response.code, response.message)))
+                Result.failure(SyncFailure.http(response.code))
             }
         }
     } catch (e: Exception) {
         Result.failure(e)
     }
 
-    private fun parseDevicesArray(jsonStr: String): JSONArray {
+    private fun parseDevicesArray(jsonStr: String): JSONArray = try {
         val trimmed = jsonStr.trim()
-        return if (trimmed.startsWith("{")) {
-            JSONObject(trimmed).getJSONArray("devices")
-        } else {
-            JSONArray(trimmed)
-        }
+        if (trimmed.startsWith("{")) JSONObject(trimmed).getJSONArray("devices") else JSONArray(trimmed)
+    } catch (_: Exception) {
+        // org.json messages may quote the entire password-bearing source document.
+        throw SyncFailure.invalidFormat()
     }
 
     private fun normalizeCollectionUrl(baseUrl: String): String {
@@ -191,11 +197,4 @@ object WebDavSyncService {
 
     internal fun buildFileUrl(baseUrl: String, file: SyncFile): String = normalizeCollectionUrl(baseUrl) + file.fileName
 
-    private fun readableHttpError(code: Int, message: String): String = when (code) {
-        401, 403 -> "HTTP $code: 认证失败或无权限，请检查用户名/密码/目录权限"
-        404 -> "HTTP 404: WebDAV 路径不存在"
-        405 -> "HTTP 405: 服务端不允许当前方法；请确认填写的是 WebDAV 目录地址，不是网页/文件地址"
-        409 -> "HTTP 409: 父目录不存在；RdpSync 已尝试自动创建目录，仍失败请检查上级路径权限"
-        else -> "HTTP $code: $message"
-    }
 }
