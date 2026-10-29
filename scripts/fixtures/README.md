@@ -31,3 +31,20 @@ Run the workflow manually on a branch or open a pull request. Locally, instrumen
 ```
 
 The integration test itself intentionally fails without `rdpFixture=true`; a missing real server must not produce a misleading skipped/green integration result. `run-emulator-tests.sh` supplies the argument in the isolated hosted job.
+
+## Certificate trust and local credential acceptance
+
+The fixture generates a new one-day self-signed certificate solely for this ephemeral xrdp service. The runner independently derives its DER SHA-256 via OpenSSL and supplies it as a test argument. A loopback-only controller (`8766`) exposes public certificate fingerprints and counts xrdp's DEBUG-level `sending login info to session manager` markers. The test requires:
+
+- First trust shows the complete expected fingerprint; confirmation is disabled until the independent-verification checkbox is selected.
+- No session-manager authentication request or authenticated desktop exists before the explicit test approval. A real login afterward must increment the same observed counter, preventing a silently ineffective logging assertion.
+- Reentry with the same profile/authority and pin does not prompt again.
+- Rotating only the disposable fixture certificate after disconnect creates a changed-certificate prompt, without a new authentication request. Cancel does not authenticate or replace the pin; a later explicit verified replacement permits connection.
+
+The controller accepts no command, path, user, certificate, or key material from clients. Its only mutation is a fixed certificate rotation/restart action for this one ephemeral fixture. It refuses to start outside GitHub Actions. No private keys or passwords are included in evidence artifacts. These checks validate this TLS fixture; they do not prove Windows CredSSP/NLA interoperability.
+
+The same emulator invocation also executes `CredentialStorageInstrumentedTest`, which uses isolated UUID databases/preferences and test-only Android Keystore aliases to verify storage, migration/rollback, restart, corruption/key-loss handling, and password-free imports.
+
+The instrumentation pumps Compose's test frame clock while waiting for real-time network work. It copies screenshots/JSON to shell-owned `/sdcard/Download/rdpsync-evidence` before AGP/UTP uninstalls the test app, so evidence survives test cleanup.
+
+Session teardown allows up to 90 seconds: xorgxrdp0.9.x clamps disconnected-session cleanup to a60-second minimum and checks on a timer. The test waits for the old desktop to exit rather than accepting stale session state.

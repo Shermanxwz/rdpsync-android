@@ -35,7 +35,8 @@ jobs:
         run: |
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;28.0.13004108' 'cmake;3.22.1'
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
+        id: native-cache
         with:
           path: |
             build/freerdp-android
@@ -49,6 +50,14 @@ jobs:
           bash scripts/build-native.sh > native-build.log 2>&1
           ./gradlew --no-daemon -PnativeAbis=x86_64 :app:assembleDebug :app:assembleDebugAndroidTest
           unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'lib/x86_64/librdpsync.so'
+      - name: Preserve successful native build independently of runtime tests
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/freerdp-android
+            app/src/main/jniLibs/x86_64
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh', 'app/src/main/cpp/**') }}
       - name: Start disposable isolated xrdp desktop and weak-link proxy
         run: |
           bash scripts/fixtures/start-rdp-fixture.sh
@@ -80,6 +89,7 @@ jobs:
           sudo cp /home/rdpfixture/.xorgxrdp.*.log build/emulator-evidence/ 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" build/emulator-evidence
           if test -f build/emulator-evidence/proxy.pid; then kill "$(cat build/emulator-evidence/proxy.pid)" || true; fi
+          if test -f build/emulator-evidence/control.pid; then sudo kill "$(cat build/emulator-evidence/control.pid)" || true; fi
           sudo systemctl stop xrdp xrdp-sesman || true
       - name: Upload test reports and synthetic screenshots
         if: always()

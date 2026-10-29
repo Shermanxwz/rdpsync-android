@@ -1,14 +1,16 @@
 ## Unreleased — 1.1.0 preview
 
-- Touch-first sessions with an explicit temporary touchpad toggle; preserved device profiles and credentials without schema migration.
+- Touch-first sessions with an explicit temporary touchpad toggle; preserved device profiles with transactional credential encryption migration.
 - Real Display Control negotiation with requested/actual resolution tracking, aspect-preserving window sizing, profile/HD/FHD choices, timeout/unsupported fallback and deliberate reconnect.
 - Optional measured adaptive quality with hysteresis, freshness checks and no idle/no-sample downgrade; local vsync presentation without Compose frame churn.
 - Dirty-region union/stride/pixel correctness, safe same-area resize, owner-thread native input and teardown, bounded ordered input, held mouse/extended keys and IME composition.
 - Pinned FreeRDP 3.32.2 (includes reachable DRDYNVC allocation security fix) and OpenSSL 3.5.9 LTS; removed invalid legacy OpenSSL MD4 callback casts.
 - Reproducible native APK CI, native production-source sanitizer fixtures, Kotlin regressions, and standard hosted Android emulator plus isolated xrdp fixture.
+- Mandatory TLS certificate pinning with explicit first-use/changed-certificate approval before login; stale trust decisions rejected.
+- Android Keystore AES-GCM local password storage, non-destructive legacy migration and visible key-loss recovery. Default password-free WebDAV file separate from explicit legacy/password-inclusive sync.
 - Side-by-side development-signed `com.rdp.sync.preview` package. No production signing key, GitHub release, merge or store deployment.
 
-Known limitations: existing certificate-ignore and plaintext credential storage/WebDAV remain; no H.264/RDPGFX acceleration or physical-device parity claim. See docs/VERIFICATION.md.
+Known limitations: first-use fingerprints need independent verification; explicitly selected legacy WebDAV sync contains plaintext passwords (not end-to-end encryption); no H.264/RDPGFX acceleration or physical-device parity claim. See docs/VERIFICATION.md.
 
 # Changelog
 

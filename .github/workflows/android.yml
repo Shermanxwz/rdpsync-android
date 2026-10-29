@@ -44,7 +44,10 @@ jobs:
       - name: Build real FreeRDP/OpenSSL/JNI runtime
         run: bash scripts/build-native.sh
       - name: Native production-source regression tests
-        run: bash scripts/test-native.sh
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libssl-dev
+          bash scripts/test-native.sh
       - name: Unit tests, lint, and side-by-side preview APK
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Verify JNI exports, dependency closure, signature and 16 KiB alignment

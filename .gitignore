@@ -33,3 +33,7 @@ freerdp_test2
 freerdp_test
 freerdp_test2
 freerdp_test3
+
+# Python fixture syntax-check outputs
+__pycache__/
+*.pyc

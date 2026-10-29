@@ -20,12 +20,19 @@ SESSION
 sudo chmod 755 /home/rdpfixture/.xsession
 sudo chown -R rdpfixture:rdpfixture /home/rdpfixture
 sudo adduser xrdp ssl-cert
+FINGERPRINT=$(sudo env GITHUB_ACTIONS=true python3 "$ROOT/scripts/fixtures/rdp_fixture_control.py" --prepare)
+mkdir -p "$ROOT/build/emulator-evidence"
+printf '%s\n' "$FINGERPRINT" >"$ROOT/build/emulator-evidence/fixture-initial-cert.sha256"
+printf 'RDP_FIXTURE_FINGERPRINT=%s\n' "$FINGERPRINT" >>"$GITHUB_ENV"
+sudo sed -i 's|^certificate=.*|certificate=/etc/xrdp/rdpsync-fixture-cert.pem|; s|^key_file=.*|key_file=/etc/xrdp/rdpsync-fixture-key.pem|; s/^LogLevel=.*/LogLevel=DEBUG/' /etc/xrdp/xrdp.ini
+nohup sudo env GITHUB_ACTIONS=true python3 -u "$ROOT/scripts/fixtures/rdp_fixture_control.py" >"$ROOT/build/emulator-evidence/fixture-control.log" 2>&1 &
+echo $! >"$ROOT/build/emulator-evidence/control.pid"
 # Bind only the listener on the ephemeral runner's loopback; 10.0.2.2 maps here in emulator.
 sudo sed -i 's/^port=3389$/port=tcp:\/\/127.0.0.1:3389/' /etc/xrdp/xrdp.ini
 sudo sed -i 's/^autorun=$/autorun=Xorg/' /etc/xrdp/xrdp.ini
 sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini
 sudo sed -i 's/^X11DisplayOffset=.*/X11DisplayOffset=10/' /etc/xrdp/sesman.ini
-sudo sed -i 's/^KillDisconnected=.*/KillDisconnected=true/; s/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=1/' /etc/xrdp/sesman.ini
+sudo sed -i 's/^KillDisconnected=.*/KillDisconnected=true/; s/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=60/' /etc/xrdp/sesman.ini
 sudo systemctl start xrdp-sesman xrdp
 for i in $(seq 1 50); do
   if (echo >/dev/tcp/127.0.0.1/3389) 2>/dev/null; then break; fi

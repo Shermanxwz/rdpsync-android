@@ -30,6 +30,7 @@
 #include <freerdp/autodetect.h>
 #include <winpr/synch.h>
 #include "rdpsync_geometry.h"
+#include "rdpsync_certificate.h"
 
 #define TAG "FreeRDP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -64,6 +65,10 @@ struct RdpSession {
     uint64_t max_monitor_area;
     int resize_pending, resize_width, resize_height, resize_scale;
     int touch_available;
+    char expected_fingerprint[65], endpoint_host[256], endpoint_name[256];
+    int endpoint_port, expected_pin_state, certificate_verified, certificate_challenge, certificate_superseded;
+    RdpCertificateInfo certificate;
+    char certificate_reason[32];
     uint8_t held_keys[3][256], held_buttons[3], held_touches[256];
     int touch_x[256], touch_y[256], mouse_x, mouse_y;
 };
@@ -270,6 +275,12 @@ static BOOL pre_connect(freerdp* instance) {
     return freerdp_client_load_channels(instance);
 }
 static BOOL post_connect(freerdp* instance) {
+    RdpSession* session = s_from_ctx(instance->context);
+    if (!session) return FALSE;
+    pthread_mutex_lock(&session->mutex);
+    const int verified = session->certificate_verified && !session->certificate_superseded;
+    pthread_mutex_unlock(&session->mutex);
+    if (!verified) return FALSE;
     /* Reject a server override before GDI allocates its primary surface. */
     const UINT32 width = freerdp_settings_get_uint32(instance->context->settings, FreeRDP_DesktopWidth);
     const UINT32 height = freerdp_settings_get_uint32(instance->context->settings, FreeRDP_DesktopHeight);
@@ -285,7 +296,7 @@ static void post_disconnect(freerdp* instance) { gdi_free(instance); }
 
 // ====== Authentication callbacks ======
 static BOOL authenticate_ex(freerdp* instance, char** username, char** password, char** domain, rdp_auth_reason reason) {
-    LOGI("authenticate_ex: reason=%d", reason);
+    if (reason == AUTH_RDP) return FALSE; /* Defense in depth: no certificate-less login. */
     if (!instance || !instance->context || !instance->context->settings) return FALSE;
     rdpSettings* settings = instance->context->settings;
     const char* user = freerdp_settings_get_string(settings, FreeRDP_Username);
@@ -303,29 +314,85 @@ static BOOL authenticate_ex(freerdp* instance, char** username, char** password,
     return TRUE;
 }
 
-static DWORD verify_certificate_ex(freerdp* instance, const char* host, UINT16 port,
-    const char* common_name, const char* subject, const char* issuer,
-    const char* fingerprint, DWORD flags) {
-    LOGI("verify_certificate_ex: ignoring (cert:ignore mode)");
-    return 1; // Accept certificate
+static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t length,
+    const char* hostname, UINT16 port, DWORD flags) {
+    RdpSession* s = instance && instance->context ? s_from_ctx(instance->context) : NULL;
+    if (!s || atomic_load(&s->terminating)) return 0;
+    pthread_mutex_lock(&s->mutex);
+    if (s->certificate_superseded) { pthread_mutex_unlock(&s->mutex); return 0; }
+    s->certificate_verified = 0; s->certificate_challenge = 0;
+    pthread_mutex_unlock(&s->mutex);
+    /* Pins never authorize a gateway, redirect or a different endpoint. Those
+     * need their own explicit product flow; this app supports direct hosts. */
+    if (!hostname || strcmp(hostname, s->endpoint_name) != 0 || port != s->endpoint_port ||
+        (flags & (VERIFY_CERT_FLAG_GATEWAY | VERIFY_CERT_FLAG_REDIRECT | VERIFY_CERT_FLAG_LEGACY))) {
+        s_error(s, "证书验证失败：连接目标已改变");
+        return 0;
+    }
+    RdpCertificateInfo info;
+    if (!rdpsync_certificate_info(pem, length, &info)) {
+        s_error(s, "证书验证失败：无法读取服务器证书");
+        return 0;
+    }
+    pthread_mutex_lock(&s->mutex);
+    if (s->certificate_superseded || atomic_load(&s->terminating)) {
+        pthread_mutex_unlock(&s->mutex); return 0;
+    }
+    const int trusted = s->expected_pin_state == 1 &&
+        CRYPTO_memcmp(s->expected_fingerprint, info.fingerprint, 64) == 0;
+    if (trusted) {
+        s->certificate_verified = 1;
+        s->certificate_challenge = 0;
+    } else {
+        s->certificate_verified = 0;
+        s->certificate_challenge = 1;
+        s->certificate = info;
+        snprintf(s->certificate_reason, sizeof(s->certificate_reason), "%s",
+            s->expected_pin_state < 0 ? "invalid-pin" : s->expected_pin_state ? "changed" : "untrusted");
+        snprintf(s->last_error, sizeof(s->last_error), "%s", s->expected_pin_state ?
+            "服务器证书已改变，已阻止连接，请核对 SHA-256 指纹" :
+            "首次连接需核对服务器证书 SHA-256 指纹");
+    }
+    pthread_mutex_unlock(&s->mutex);
+    /* Do not block a native thread waiting for UI. Reject now; explicit approval
+     * may start a NEW connection with a new immutable expected-pin snapshot. */
+    return trusted ? 2 : 0;
 }
-
-static DWORD verify_changed_certificate_ex(freerdp* instance, const char* host, UINT16 port,
-    const char* common_name, const char* subject, const char* issuer,
-    const char* new_fingerprint, const char* old_subject, const char* old_issuer,
-    const char* old_fingerprint, DWORD flags) {
-    LOGI("verify_changed_certificate_ex: accepting changed cert");
-    return 1;
+static BOOL reject_redirect(freerdp* instance) {
+    RdpSession* s = instance && instance->context ? s_from_ctx(instance->context) : NULL;
+    if (s) s_error(s, "已阻止服务器重定向；请为新目标创建独立连接并验证证书");
+    return FALSE;
 }
-
+static BOOL configure_security(rdpSettings* settings) {
+    /* Mandatory for every mode, including compatibility retries. A legacy RDP
+     * connection has no TLS certificate callback and must never be negotiated. */
+    return freerdp_settings_set_bool(settings, FreeRDP_ExternalCertificateManagement, TRUE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, FALSE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_AutoAcceptCertificate, FALSE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_AutoDenyCertificate, FALSE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, FALSE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE) &&
+        freerdp_settings_set_bool(settings, FreeRDP_NegotiateSecurityLayer, TRUE) &&
+        /* X.224 precedes TLS. Suppress its optional plaintext username cookie. */
+        freerdp_settings_set_bool(settings, FreeRDP_MstscCookieMode, FALSE) &&
+        freerdp_settings_set_uint32(settings, FreeRDP_CookieMaxLength, 0) &&
+        freerdp_settings_set_bool(settings, FreeRDP_SendPreconnectionPdu, FALSE) &&
+        freerdp_settings_set_uint32(settings, FreeRDP_AuthenticationLevel, 2) &&
+        freerdp_settings_set_string(settings, FreeRDP_CertificateAcceptedFingerprints, NULL) &&
+        freerdp_settings_set_uint32(settings, FreeRDP_AcceptedCertLength, 0) &&
+        freerdp_settings_set_uint32(settings, FreeRDP_GatewayAcceptedCertLength, 0) &&
+        freerdp_settings_set_uint32(settings, FreeRDP_RedirectionAcceptedCertLength, 0);
+}
 static BOOL client_ctx_new(freerdp* instance, rdpContext* context) {
     (void)context;
     instance->PreConnect = pre_connect;
     instance->PostConnect = post_connect;
     instance->PostDisconnect = post_disconnect;
     instance->AuthenticateEx = authenticate_ex;
-    instance->VerifyCertificateEx = verify_certificate_ex;
-    instance->VerifyChangedCertificateEx = verify_changed_certificate_ex;
+    instance->VerifyX509Certificate = verify_x509_certificate;
+    instance->Redirect = reject_redirect;
     return TRUE;
 }
 static freerdp* create_instance(RdpSession* session) {
@@ -511,7 +578,10 @@ static void* thread_fn(void* arg) {
     s_status(s, "正在连接...");
     if (!freerdp_connect(instance)) {
         const UINT32 error = freerdp_get_last_error(instance->context);
-        if (!atomic_load(&s->terminating))
+        pthread_mutex_lock(&s->mutex);
+        const int certificate_denial = s->certificate_challenge || s->last_error[0];
+        pthread_mutex_unlock(&s->mutex);
+        if (!atomic_load(&s->terminating) && !certificate_denial)
             s_error(s, "FreeRDP 连接失败 [0x%08x]: %s", error, freerdp_get_last_error_string(error));
         goto done;
     }
@@ -593,23 +663,37 @@ unlock:
     return result;
 }
 
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean);
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean,jstring);
 JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetLibDir(JNIEnv* env, jobject obj, jstring path) {
     (void)env; (void)obj; (void)path;
     /* FreeRDP uses WinPR's WITH_INTERNAL_MD4 implementation. Do not cast raw
      * MD4_CTX functions to EVP_MD_CTX callbacks: those structures are unrelated. */
 }
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     JNIEnv* env, jobject obj, jstring jhost, jint port, jstring juser, jstring jpassword,
-    jstring jdomain, jstring jserver_name, jint width, jint height, jboolean touch, jboolean compatibility) {
-    (void)obj; (void)jserver_name;
+    jstring jdomain, jstring jserver_name, jint width, jint height, jboolean touch, jboolean compatibility,
+    jstring jexpected_fingerprint) {
+    (void)obj;
+    /* Even a rejected new request invalidates an earlier UI trust challenge. */
+    pthread_mutex_lock(&g_lock);
+    if (g_session) {
+        pthread_mutex_lock(&g_session->mutex);
+        g_session->certificate_challenge = 0; g_session->certificate_verified = 0;
+        g_session->certificate_superseded = 1;
+        pthread_mutex_unlock(&g_session->mutex);
+    }
+    pthread_mutex_unlock(&g_lock);
     if (!rdpsync_valid_size(width, height) || port < 1 || port > 65535) return 0;
     const char* host = (*env)->GetStringUTFChars(env, jhost, NULL);
     const char* user = (*env)->GetStringUTFChars(env, juser, NULL);
     const char* password = (*env)->GetStringUTFChars(env, jpassword, NULL);
     const char* domain = (*env)->GetStringUTFChars(env, jdomain, NULL);
+    const char* server_name = jserver_name ? (*env)->GetStringUTFChars(env, jserver_name, NULL) : NULL;
+    const char* expected_pin = jexpected_fingerprint ? (*env)->GetStringUTFChars(env, jexpected_fingerprint, NULL) : NULL;
     int result = 0;
-    if (!host || !user || !password || !domain) goto release;
+    if (!host || !user || !password || !domain || (jserver_name && !server_name) ||
+        (jexpected_fingerprint && !expected_pin)) goto release;
+    if (!*host || strlen(host) >= 256 || (server_name && strlen(server_name) >= 256)) goto release;
     pthread_mutex_lock(&g_lifecycle_lock);
     pthread_mutex_lock(&g_lock);
     RdpSession* previous = g_session; g_session = NULL;
@@ -623,6 +707,11 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
     atomic_init(&session->connected, 0); atomic_init(&session->terminating, 0);
     session->rtt_ms = -1; session->bandwidth_kbps = -1;
     session->disp_state = compatibility ? -1 : 0;
+    snprintf(session->endpoint_host, sizeof(session->endpoint_host), "%s", host);
+    snprintf(session->endpoint_name, sizeof(session->endpoint_name), "%s", server_name && *server_name ? server_name : host);
+    session->endpoint_port = port;
+    session->expected_pin_state = rdpsync_normalize_pin(expected_pin, session->expected_fingerprint);
+    pthread_mutex_lock(&g_lock); session->generation = ++g_next_generation; pthread_mutex_unlock(&g_lock);
     session->wake_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!session->wake_event) { session_destroy(session); goto failure; }
     session->instance = create_instance(session);
@@ -632,7 +721,9 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
         freerdp_settings_set_uint32(settings, FreeRDP_ServerPort, (UINT32)port) &&
         freerdp_settings_set_string(settings, FreeRDP_Username, user) &&
         freerdp_settings_set_string(settings, FreeRDP_Password, password) &&
-        freerdp_settings_set_string(settings, FreeRDP_Domain, domain);
+        freerdp_settings_set_string(settings, FreeRDP_Domain, domain) &&
+        freerdp_settings_set_string(settings, FreeRDP_UserSpecifiedServerName,
+            server_name && *server_name ? server_name : NULL) && configure_security(settings);
     if (!ok) { session_destroy(session); goto failure; }
     freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, TRUE);
     freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, width);
@@ -663,7 +754,6 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
     freerdp_settings_set_bool(settings, FreeRDP_RedirectParallelPorts, FALSE);
     freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
     freerdp_settings_set_uint32(settings, FreeRDP_RequestedProtocols, 0x0000000b);
-    freerdp_settings_set_bool(settings, FreeRDP_IgnoreCertificate, TRUE);
     freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE);
     snprintf(session->diag, sizeof(session->diag), "engine=FreeRDP %s\ncodec=GDI (no H.264)\n", FREERDP_VERSION_FULL);
     s_diag(session, compatibility ? "connection=compatibility-retry" : "display-control=requested");
@@ -673,7 +763,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(
         session_destroy(session); goto failure;
     }
     session->thread_started = 1;
-    pthread_mutex_lock(&g_lock); session->generation = ++g_next_generation; g_session = session; pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_lock); g_session = session; pthread_mutex_unlock(&g_lock);
     result = 1;
     goto unlock;
 failure:
@@ -687,7 +777,13 @@ release:
     if (user) (*env)->ReleaseStringUTFChars(env, juser, user);
     if (password) (*env)->ReleaseStringUTFChars(env, jpassword, password);
     if (domain) (*env)->ReleaseStringUTFChars(env, jdomain, domain);
+    if (server_name) (*env)->ReleaseStringUTFChars(env, jserver_name, server_name);
+    if (expected_pin) (*env)->ReleaseStringUTFChars(env, jexpected_fingerprint, expected_pin);
     return result;
+}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(JNIEnv* e,jobject o,jstring h,jint p,jstring u,jstring pw,jstring d,jstring n,jint w,jint hh,jboolean t,jboolean compat) {
+    /* Legacy API is intentionally untrusted, never a certificate-ignore escape. */
+    return Java_com_rdp_sync_network_RdpConnector_nativeConnect5(e,o,h,p,u,pw,d,n,w,hh,t,compat,NULL);
 }
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect3(JNIEnv* e,jobject o,jstring h,jint p,jstring u,jstring pw,jstring d,jstring n,jint w,jint hh,jboolean t) {
     return Java_com_rdp_sync_network_RdpConnector_nativeConnect4(e,o,h,p,u,pw,d,n,w,hh,t,JNI_FALSE);
@@ -707,6 +803,43 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeDisconnect(J
     session_destroy(old);
     pthread_mutex_unlock(&g_lifecycle_lock);
     return 0;
+}
+JNIEXPORT jobjectArray JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetCertificateChallenge(JNIEnv* env,jobject obj) {
+    (void)obj;
+    char generation[32], port[16], host[256], name[256], reason[32];
+    RdpCertificateInfo info;
+    int available = 0;
+    pthread_mutex_lock(&g_lock);
+    RdpSession* s = g_session;
+    if (s) {
+        pthread_mutex_lock(&s->mutex);
+        if (s->certificate_challenge && !atomic_load(&s->terminating)) {
+            available = 1;
+            info = s->certificate;
+            snprintf(generation, sizeof(generation), "%lld", (long long)s->generation);
+            snprintf(port, sizeof(port), "%d", s->endpoint_port);
+            snprintf(host, sizeof(host), "%s", s->endpoint_host);
+            snprintf(name, sizeof(name), "%s", s->endpoint_name);
+            snprintf(reason, sizeof(reason), "%s", s->certificate_reason);
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (!available) return NULL;
+    jclass string_class = (*env)->FindClass(env, "java/lang/String");
+    if (!string_class) return NULL;
+    jobjectArray result = (*env)->NewObjectArray(env, 8, string_class, NULL);
+    (*env)->DeleteLocalRef(env, string_class);
+    if (!result) return NULL;
+    const char* values[8] = {generation, info.fingerprint, info.subject, info.issuer, host, port, name, reason};
+    for (int i = 0; i < 8; ++i) {
+        jstring value = (*env)->NewStringUTF(env, values[i]);
+        if (!value) { (*env)->DeleteLocalRef(env, result); return NULL; }
+        (*env)->SetObjectArrayElement(env, result, i, value);
+        (*env)->DeleteLocalRef(env, value);
+        if ((*env)->ExceptionCheck(env)) { (*env)->DeleteLocalRef(env, result); return NULL; }
+    }
+    return result;
 }
 JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeIsConnected(JNIEnv* e,jobject o) {
     (void)e; (void)o;

@@ -2,7 +2,7 @@
 
 Android RDP remote desktop client with WebDAV device synchronization and mobile-first touch controls.
 
-RdpSync focuses on a very specific gap: an open Android RDP client that can keep RDP device profiles in sync through a generic WebDAV endpoint. In practice, it is one of the few, and currently known to be the only open mobile RDP app in this niche that combines RDP connectivity, WebDAV profile sync, and touch/scrolling optimizations in one project.
+RdpSync is an open Android RDP client that combines remote desktop connections, WebDAV profile portability and mobile touch controls.
 
 [![Android](https://img.shields.io/badge/Android-8.0%2B-green)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-blue)](https://kotlinlang.org)
@@ -19,10 +19,12 @@ The preview starts every session in **direct-touch mode**. Touchpad mode remains
 - Quality changes adjust **remote pixel count and local presentation FPS**, not an invented live codec/colour-depth setting. Fixed manual resolutions remain exact when adaptive mode is off.
 - Native rendering unions all damage until consumed, respects both row strides, and removes redundant channel conversions. A lifecycle-bound Android View polls on vsync without per-frame Compose recomposition.
 - Input is an ordered, bounded worker stream with held mouse buttons, extended keys, IME composition and cancellation/release handling.
+- New/changed TLS certificates stop before login and require explicit fingerprint trust. Saved passwords migrate to device-bound Android Keystore AES-GCM; unavailable credentials remain visible and require deliberate re-entry.
+- Default WebDAV sync uses password-free `rdpsync_profiles.json`; explicit legacy sync uses the separate secret-bearing `rdpsync_devices.json`, without silently overwriting old backups.
 
 **Install safely:** CI produces `RdpSync Preview` (`com.rdp.sync.preview`), signed with a development key. It installs alongside the existing app; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged; no release/store publishing is performed.
 
-**Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/RDPGFX video acceleration is not enabled; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. Existing certificate-ignore behaviour and plaintext saved/WebDAV credentials remain security limitations: use only trusted lab endpoints and avoid high-value credentials. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
+**Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/RDPGFX video acceleration is not enabled; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. First-use certificate trust requires independent fingerprint verification; local passwords use Android Keystore encryption, while explicitly selected legacy WebDAV sync still contains plaintext passwords and is not end-to-end encrypted. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
 
 ## Highlights
 
@@ -50,7 +52,7 @@ The preview starts every session in **direct-touch mode**. Touchpad mode remains
 
 - Host, port, username, password, domain, server name, and resolution fields.
 - CredSSP/NLA oriented connection path through FreeRDP.
-- Certificate acceptance mode suitable for lab/self-hosted RDP endpoints.
+- Mandatory TLS with explicit per-profile endpoint-bound SHA-256 certificate trust; changed certificates are rejected until deliberately approved.
 - Screen keep-awake behavior during an active remote desktop session.
 - Hardware accelerated Android activity rendering.
 
@@ -74,11 +76,11 @@ The preview starts every session in **direct-touch mode**. Touchpad mode remains
 
 ### WebDAV Sync
 
-- The app serializes saved device profiles into `rdpsync_devices.json`.
+- Default profile-only sync uses `rdpsync_profiles.json`; explicit legacy/password-inclusive sync uses `rdpsync_devices.json`. These are independent files; the safe default never erases the legacy backup.
 - WebDAV upload, download, merge, and connection-test flows are implemented with OkHttp.
 - The connection test validates collection creation and read/write/delete behavior.
 - URLs are normalized so a mistakenly entered file URL can be treated as its parent collection.
-- Merge uses a stable device key based on host, port, username, and domain.
+- Merge uses a stable connection/account key including host, port, username, domain and server name. Omitted passwords preserve matching local secrets; imports retain unmatched local profiles.
 
 ## Architecture
 
@@ -100,7 +102,7 @@ Compose screens
   -> DeviceViewModel
   -> Room / SharedPreferences / SyncManager
   -> WebDavSyncService
-  -> WebDAV collection / rdpsync_devices.json
+  -> WebDAV collection / rdpsync_profiles.json (or explicit legacy rdpsync_devices.json)
 ```
 
 ```text
@@ -134,11 +136,11 @@ RdpSync is designed to avoid project-owned cloud services.
 
 - No analytics SDK or uploaded telemetry is included. Local session counters are used for diagnostics and optional adaptive quality.
 - No advertising SDK is included.
-- RDP credentials are stored locally because they are required to connect.
-- WebDAV credentials are stored locally because they are required to sync.
+- RDP passwords are stored locally using device-bound Android Keystore authenticated encryption.
+- The saved WebDAV password uses the same encrypted storage; endpoint and account metadata are not encrypted.
 - When WebDAV sync is used, device profiles are uploaded to the WebDAV server selected by the user.
-- The WebDAV JSON currently includes device connection fields, including RDP username and password.
-- Use HTTPS WebDAV endpoints and avoid syncing high-value production credentials until an encrypted credential store is implemented.
+- Default WebDAV JSON includes connection metadata but omits passwords. Explicit legacy sync includes plaintext passwords.
+- Use trusted HTTPS WebDAV endpoints. Password-inclusive sync is not end-to-end encrypted; old secret-bearing files are not automatically removed.
 
 For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
@@ -206,13 +208,10 @@ bash scripts/build-apk.sh
 
 ## Roadmap
 
-- Encrypted credential storage using Android Keystore backed keys.
-- Optional redaction or exclusion of RDP passwords from WebDAV sync payloads.
 - Multi-ABI release builds.
 - Dedicated non-debug release signing key.
-- Better certificate verification and trust-on-first-use UX.
 - Import/export format documentation.
-- More automated tests around sync merge behavior and WebDAV edge cases.
+- Broader physical-device, Windows-server, codec and enterprise identity validation.
 
 ## Contributing
 

@@ -18,8 +18,10 @@ target_include_directories(rdpsync PRIVATE
     "${RDPSYNC_DEPS_DIR}/freerdp-src/include"
     "${RDPSYNC_DEPS_DIR}/freerdp-src/winpr/include"
     "${RDPSYNC_DEPS_DIR}/build-${RDPSYNC_ARCH}/include"
-    "${RDPSYNC_DEPS_DIR}/build-${RDPSYNC_ARCH}/winpr/include")
-target_link_directories(rdpsync PRIVATE "${RDPSYNC_ROOT}/app/src/main/jniLibs/${ANDROID_ABI}")
-target_link_libraries(rdpsync freerdp-client3 freerdp3 winpr3 jnigraphics log android)
-# The bundled shared libraries contain their statically linked OpenSSL dependencies.
+    "${RDPSYNC_DEPS_DIR}/build-${RDPSYNC_ARCH}/winpr/include"
+    "${RDPSYNC_DEPS_DIR}/openssl-${RDPSYNC_ARCH}/include")
+target_link_directories(rdpsync PRIVATE "${RDPSYNC_ROOT}/app/src/main/jniLibs/${ANDROID_ABI}"
+    "${RDPSYNC_DEPS_DIR}/openssl-${RDPSYNC_ARCH}/lib")
+target_link_libraries(rdpsync freerdp-client3 freerdp3 winpr3 crypto jnigraphics log android z)
+# OpenSSL is statically linked; no device-global provider or private credentials.
 target_link_options(rdpsync PRIVATE "-Wl,-z,max-page-size=16384")

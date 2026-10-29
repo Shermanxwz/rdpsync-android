@@ -16,6 +16,8 @@ object RdpConnector {
     external fun nativeConnect2(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int): Int
     external fun nativeConnect3(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean): Int
     external fun nativeConnect4(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean): Int
+    external fun nativeConnect5(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String): Int
+    external fun nativeGetCertificateChallenge(): Array<String>?
     external fun nativeDisconnect(): Int
     external fun nativeIsConnected(): Boolean
     external fun nativeGetStatus(): String
@@ -131,7 +133,7 @@ object RdpConnector {
 
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
-    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false): Boolean {
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = ""): Boolean {
         return try {
             lastKotlinError = ""
             resetFrameCache()
@@ -146,9 +148,9 @@ object RdpConnector {
             rdpeiConnected = false
             rdpeiDisabled = !enableTouchInput
             touchFailedCode = 0
-            val result = nativeConnect4(
+            val result = nativeConnect5(
                 host.trim(), port, username.trim(), password, domain.trim(), rdpServerName.trim(),
-                width, height, enableTouchInput, compatibilityMode
+                width, height, enableTouchInput, compatibilityMode, expectedFingerprint
             )
             Log.d(TAG, "Connect result: $result")
             result == 1
@@ -158,6 +160,9 @@ object RdpConnector {
             false
         }
     }
+
+    fun certificateChallenge(): CertificateChallenge? =
+        CertificateChallenge.fromNative(safeNative("certificateChallenge", null) { nativeGetCertificateChallenge() })
 
     fun disconnect(): Int {
         rdpeiConnected = false

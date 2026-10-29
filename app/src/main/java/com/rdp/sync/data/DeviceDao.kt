@@ -11,6 +11,9 @@ interface DeviceDao {
     @Query("SELECT * FROM devices ORDER BY name ASC")
     fun getAllDevices(): Flow<List<Device>>
     
+    @Query("SELECT * FROM devices ORDER BY id")
+    suspend fun getSnapshot(): List<Device>
+
     @Query("SELECT * FROM devices WHERE id = :deviceId")
     suspend fun getDeviceById(deviceId: Long): Device?
     

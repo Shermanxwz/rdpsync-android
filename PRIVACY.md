@@ -1,38 +1,23 @@
 # Privacy
 
-RdpSync is built around local storage and user-selected infrastructure. It does not include a project-operated cloud service.
+RdpSync uses local storage and user-selected infrastructure. There is no project-operated cloud service, analytics, advertising or crash-reporting SDK.
 
-## What The App Stores Locally
+## Local Data
 
-- Device profile name.
-- RDP host and port.
-- RDP username, password, optional domain, and optional server name.
-- Preferred remote desktop width and height.
-- WebDAV base URL, username, and password.
+The app stores profile names, RDP host/port, username/domain/server name, preferred dimensions, display settings and per-profile certificate fingerprints. RDP and saved WebDAV passwords use Android Keystore-backed authenticated encryption; profile metadata and WebDAV URL/username remain readable within the app's private storage. Passwords exist in memory while needed. Details and migration/key-loss limitations are in [SECURITY.md](SECURITY.md).
 
-RDP profiles are stored in the app's Room database. WebDAV settings are currently stored in Android SharedPreferences. The current implementation does not yet use app-level encrypted credential storage.
+App backup and data transfer are disabled. The side-by-side preview has its own storage and does not automatically inherit the original app's profiles or credentials.
 
-## What The App Sends
+## Network Data
 
-RdpSync sends data only for user-triggered connection and sync flows:
+Only user-selected RDP connections and WebDAV operations send application data:
 
-- RDP connection data is sent to the RDP server selected by the user.
-- WebDAV credentials are sent to the WebDAV endpoint selected by the user.
-- WebDAV sync uploads a JSON file named `rdpsync_devices.json` to the selected WebDAV collection.
+- RDP authenticates to the selected server only after its certificate fingerprint is explicitly trusted and matches on subsequent connections.
+- WebDAV authentication goes to the configured endpoint. Use HTTPS.
+- Default profile-only sync uses `rdpsync_profiles.json`, including connection metadata but **omitting passwords**. Its download/import preserves matching local passwords.
+- Explicit legacy/password-inclusive sync uses `rdpsync_devices.json` and includes plaintext RDP passwords. It is not end-to-end encrypted. The default mode does not delete or modify an existing legacy file; old copies may still contain passwords.
+- WebDAV connection testing creates, reads and deletes a small `.rdpsync_webdav_test` file in the selected collection.
 
-The WebDAV JSON currently includes device profile fields needed to recreate connections on another device, including RDP username and password. Use a trusted HTTPS WebDAV server and disposable/test credentials when evaluating the app.
+Local render/network statistics support optional adaptive display quality; they are not uploaded to a project telemetry endpoint. Automated CI screenshots and logs use an isolated synthetic test desktop, not user servers.
 
-## What The App Does Not Include
-
-- No analytics SDK.
-- No advertising SDK.
-- No crash reporting SDK.
-- No project-owned telemetry endpoint.
-- No hardcoded personal server, account, token, or API key.
-
-## Recommendations
-
-- Prefer HTTPS WebDAV URLs.
-- Use test credentials for public bug reports and screenshots.
-- Do not publish `rdpsync_devices.json`.
-- Avoid syncing high-value production credentials until encrypted storage and optional password redaction are implemented.
+Do not publish sync files, credentials, private hostnames or screenshots of private desktops in bug reports.

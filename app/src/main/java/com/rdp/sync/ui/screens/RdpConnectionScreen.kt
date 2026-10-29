@@ -32,7 +32,15 @@ import com.rdp.sync.data.Device
 import com.rdp.sync.display.DisplayQuality
 import com.rdp.sync.display.ResolutionMode
 import com.rdp.sync.display.SessionDisplaySettings
+import com.rdp.sync.network.CertificateChallenge
 import com.rdp.sync.network.RdpConnector
+import com.rdp.sync.security.AndroidCertificatePinStorage
+import com.rdp.sync.security.CertificateAttemptGuard
+import com.rdp.sync.security.CertificateChallengeSnapshot
+import com.rdp.sync.security.CertificateEndpoint
+import com.rdp.sync.security.CertificateTrustPolicy
+import com.rdp.sync.security.CertificateTrustStore
+import com.rdp.sync.security.PendingCertificateTrust
 import com.rdp.sync.network.RdpInputDispatcher
 import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.rdp.SessionUiDefaults
@@ -40,6 +48,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.util.UUID
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -59,24 +69,36 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     // A temporary trackpad toggle never overrides touch-first on the next session.
     var pointerMode by remember(device.id) { mutableStateOf(SessionUiDefaults.POINTER_MODE) }
     var attempt by remember(device.id) { mutableIntStateOf(0) }
-    var status by remember(device.id, attempt) { mutableStateOf("正在测量屏幕…") }
-    var isConnected by remember(device.id, attempt) { mutableStateOf(false) }
-    var connecting by remember(device.id, attempt) { mutableStateOf(true) }
+    val endpoint = remember(device.id, device.host, device.port, device.rdpServerName) {
+        CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName)
+    }
+    val credentialsUnavailable = device.credentialUnavailable
+    val attemptNonce = remember(endpoint, attempt, credentialsUnavailable) { UUID.randomUUID().toString() }
+    val trustGuard = remember(endpoint, attempt, credentialsUnavailable) { CertificateAttemptGuard() }
+    val trustStore = remember(context.applicationContext) { CertificateTrustStore(AndroidCertificatePinStorage(context.applicationContext)) }
+    var pendingTrust by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf<PendingCertificateTrust?>(null) }
+    var dismissedCertificateGeneration by remember(endpoint, attempt, credentialsUnavailable) { mutableLongStateOf(-1L) }
+    var savingTrust by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
+    var trustError by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
+    val uiScope = rememberCoroutineScope()
+    var status by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("正在测量屏幕…") }
+    var isConnected by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
+    var connecting by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(true) }
     var viewportSize by remember(device.id) { mutableStateOf(IntSize.Zero) }
-    var inputWarning by remember(device.id, attempt) { mutableStateOf("") }
-    var displaySummary by remember(device.id, attempt) { mutableStateOf("") }
-    var reconnectRequired by remember(device.id, attempt) { mutableStateOf(false) }
+    var inputWarning by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
+    var displaySummary by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
+    var reconnectRequired by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showPaste by remember { mutableStateOf(false) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var diagnostics by remember { mutableStateOf("") }
     var showReconnect by remember { mutableStateOf(false) }
-    var desktopView by remember(device.id, attempt) { mutableStateOf<RdpDesktopView?>(null) }
+    var desktopView by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf<RdpDesktopView?>(null) }
     val clipboard = LocalClipboardManager.current
     val density = LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
     val latestSettings by rememberUpdatedState(settings)
-    val input = remember(device.id, attempt) { RdpInputDispatcher(
+    val input = remember(endpoint, attempt, credentialsUnavailable) { RdpInputDispatcher(
         touchSender = RdpConnector::sendTouchEvent,
         wheelSender = RdpConnector::sendWheelEvent,
         hwheelSender = RdpConnector::sendHWheelEvent,
@@ -87,30 +109,54 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     ) }
 
     LaunchedEffect(settings) { RdpConnector.configureDisplay(settings) }
-    LaunchedEffect(device.id, attempt) {
+    LaunchedEffect(endpoint, attempt, credentialsUnavailable) {
+        if (credentialsUnavailable) {
+            status = if (device.passwordFormat == 2) "此配置未包含密码。请返回编辑设备，输入密码后再连接。"
+                else "保存的凭据无法解密。请返回编辑设备，重新输入密码后再连接。"
+            connecting = false
+            return@LaunchedEffect
+        }
+        val connectionEndpoint = endpoint
+        if (connectionEndpoint == null) {
+            status = "连接地址或服务器名称无效，无法安全验证证书。"
+            connecting = false
+            return@LaunchedEffect
+        }
         while (viewportSize.width <= 0 || viewportSize.height <= 0) delay(50)
         sessionOwnership.withLock {
             try {
                 RdpConnector.configureDisplay(latestSettings)
                 val size = RdpConnector.resolveDisplay(viewportSize.width, viewportSize.height, device.width, device.height)
                 status = "正在连接（${size.width} × ${size.height}）…"
+                val expectedFingerprint = withContext(Dispatchers.IO) { trustStore.fingerprint(connectionEndpoint) }
+                val connectionUsername = device.username
+                val connectionPassword = device.password
+                val connectionDomain = device.domain
                 suspend fun connect(touch: Boolean, compatibility: Boolean) = withContext(Dispatchers.IO) {
-                    RdpConnector.connectDevice(device.host, device.port, device.username, device.password,
-                        device.domain, device.rdpServerName, size.width, size.height, touch, compatibility)
+                    RdpConnector.connectDevice(connectionEndpoint.host, connectionEndpoint.port, connectionUsername, connectionPassword,
+                        connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height, touch, compatibility, expectedFingerprint.orEmpty())
                 }
                 if (!connect(true, false)) {
                     status = withContext(Dispatchers.IO) { RdpConnector.getStatus() }
                     connecting = false
-                    return@withLock
+                    // A rejected TLS handshake may carry a certificate challenge.
+                    // Keep its generation alive until an explicit decision/retry.
                 }
                 var compatibilityRetried = false
                 var previouslyConnected = false
                 while (isActive) {
-                    val snapshot = withContext(Dispatchers.IO) { RdpConnector.getStatus() to RdpConnector.isConnected() }
+                    val snapshot = withContext(Dispatchers.IO) { Triple(RdpConnector.getStatus(), RdpConnector.isConnected(), RdpConnector.certificateChallenge()) }
                     status = snapshot.first
                     if (input.overloadCount > 0) inputWarning = "输入队列繁忙，已安全释放按键。请重新操作。"
                     if (input.failedTextSends > 0) inputWarning = "文字发送中断，可能只发送了部分内容，请检查远程文本。"
                     isConnected = snapshot.second
+                    val challenge = snapshot.third
+                    if (challenge != null) {
+                        connecting = false
+                        val proposal = CertificateTrustPolicy.propose(connectionEndpoint, attemptNonce, challenge.snapshot(), expectedFingerprint)
+                        if (proposal == null) status = "证书响应与当前连接不匹配，已拒绝连接。"
+                        else if (pendingTrust == null && challenge.generation != dismissedCertificateGeneration && trustGuard.isActive()) pendingTrust = proposal
+                    }
                     if (isConnected) {
                         previouslyConnected = true
                         connecting = false
@@ -121,7 +167,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                         reconnectRequired = display.reconnectRequired
                     } else if (previouslyConnected || status.contains("失败")) connecting = false
                     // Retain the existing, narrowly scoped RDPEI activation compatibility retry.
-                    if (!isConnected && !previouslyConnected && !compatibilityRetried &&
+                    if (challenge == null && !isConnected && !previouslyConnected && !compatibilityRetried &&
                         (status.contains("0x0002001c", ignoreCase = true) || status.contains("Timeout waiting for activation", ignoreCase = true))) {
                         compatibilityRetried = true
                         status = "触摸通道协商失败，尝试兼容连接…"
@@ -139,7 +185,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             }
         }
     }
-    DisposableEffect(input) { onDispose { input.shutdown() } }
+    DisposableEffect(input, trustGuard) { onDispose { trustGuard.invalidate(); input.shutdown() } }
 
     fun saveSettings(value: SessionDisplaySettings) {
         settings = value
@@ -147,19 +193,35 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             .putString("resolution_mode", value.resolution.name).putBoolean("adaptive_quality", value.adaptive).apply()
     }
     fun reconnect() {
+        trustGuard.invalidate()
+        pendingTrust = null
         desktopView?.hideKeyboard()
         input.shutdown()
         isConnected = false
         attempt++
     }
 
+    fun exitSession() {
+        trustGuard.invalidate()
+        pendingTrust = null
+        input.shutdown()
+        onBack()
+    }
+    fun dismissCertificate() {
+        dismissedCertificateGeneration = pendingTrust?.challenge?.generation ?: -1L
+        trustGuard.invalidate()
+        pendingTrust = null
+        status = "已取消证书信任；未发送登录凭据。"
+        connecting = false
+    }
+
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         TopAppBar(
             title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) "已连接" else status, style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
-            navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+            navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
             actions = {
                 IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
-                IconButton(onClick = onBack) { Icon(Icons.Default.Stop, "断开") }
+                IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
             }
         )
         Box(Modifier.weight(1f).fillMaxWidth().background(Color(0xFF020617)).onSizeChanged {
@@ -212,6 +274,26 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             }
         }
     }
+    pendingTrust?.let { pending ->
+        CertificateTrustDialog(pending, savingTrust, trustError, onCancel = ::dismissCertificate, onTrust = {
+            if (!savingTrust && pendingTrust == pending && endpoint == pending.endpoint && trustGuard.isActive()) {
+                savingTrust = true
+                trustError = ""
+                uiScope.launch {
+                    val saved = withContext(Dispatchers.IO) {
+                        trustGuard.approveIfActive {
+                            trustStore.approve(pending, pending.endpoint, attemptNonce, RdpConnector.certificateChallenge()?.snapshot())
+                        }
+                    }
+                    if (pendingTrust == pending && trustGuard.isActive()) {
+                        savingTrust = false
+                        if (saved) reconnect()
+                        else trustError = "无法保存信任，或证书请求已变化。未重新连接，请取消后重试并重新核对。"
+                    }
+                }
+            }
+        })
+    }
     if (showSettings) DisplaySettingsDialog(settings, device, onChange = ::saveSettings, onDismiss = { showSettings = false }, onDiagnostics = {
         diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true
     })
@@ -250,8 +332,49 @@ private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Devi
             Spacer(Modifier.height(8.dp))
             Text("双指缩放/平移只改变本地视图；分辨率设置通过服务器显示控制通道协商，不拉伸画面。旧服务器需手动重连。", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            Text("安全提示：当前项目仍跳过服务器证书验证，保存/同步的凭据未加密；仅连接你信任的测试主机。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text("安全提示：首次连接或证书变化时，必须通过独立渠道核对指纹后授权。这是手动指纹固定（TOFU），不是 CA 身份验证。同步数据可能含凭据，请仅使用受信任的 HTTPS WebDAV。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onDiagnostics) { Text("查看诊断信息") }
         }
     }, confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } })
+}
+
+
+private fun CertificateChallenge.snapshot() = CertificateChallengeSnapshot(
+    generation, fingerprint, subject, issuer, host, port, effectiveServerName, reason
+)
+
+@Composable
+private fun CertificateTrustDialog(pending: PendingCertificateTrust, saving: Boolean, error: String, onCancel: () -> Unit, onTrust: () -> Unit) {
+    var independentlyChecked by remember(pending) { mutableStateOf(false) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(if (pending.changed) "服务器证书已改变" else "确认服务器证书") },
+        text = {
+            Column(Modifier.verticalScroll(rememberScrollState())) {
+                Text(if (pending.changed) "证书与原信任指纹不一致。可能是合法更新，也可能是中间人攻击；未经独立核对，不要继续。" else "尚未信任此服务器。连接已在发送登录凭据前停止。请向服务器管理员或通过其他可信渠道核对完整 SHA-256 指纹。",
+                    color = if (pending.changed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+                Spacer(Modifier.height(8.dp))
+                Text("地址：${pending.endpoint.host}:${pending.endpoint.port}")
+                Text("证书服务器名称：${pending.endpoint.effectiveServerName}")
+                Text("主体：${pending.challenge.subject.take(512)}", style = MaterialTheme.typography.bodySmall)
+                Text("签发者：${pending.challenge.issuer.take(512)}", style = MaterialTheme.typography.bodySmall)
+                pending.previousFingerprint?.let { old ->
+                    Spacer(Modifier.height(8.dp))
+                    Text("原信任 SHA-256", style = MaterialTheme.typography.labelMedium)
+                    Text(old, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                }
+                Spacer(Modifier.height(8.dp))
+                Text("新证书 SHA-256", style = MaterialTheme.typography.labelMedium)
+                Text(pending.challenge.fingerprint, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.fillMaxWidth().clickable(enabled = !saving) { independentlyChecked = !independentlyChecked }, verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(independentlyChecked, onCheckedChange = { independentlyChecked = it }, enabled = !saving)
+                    Text("我已通过独立渠道核对 SHA-256 指纹", style = MaterialTheme.typography.bodySmall)
+                }
+                Text("仅为此设备配置、地址、端口和服务器名称保存指纹；不会为其他主机自动授权。", style = MaterialTheme.typography.bodySmall)
+                if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = onTrust, enabled = independentlyChecked && !saving) { Text(if (saving) "正在保存…" else if (pending.changed) "替换指纹并重连" else "保存指纹并重连") } },
+        dismissButton = { TextButton(onClick = onCancel, enabled = !saving) { Text("取消连接") } }
+    )
 }

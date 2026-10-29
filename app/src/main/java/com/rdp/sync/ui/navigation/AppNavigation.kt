@@ -40,6 +40,8 @@ fun AppNavigation() {
         composable("device_edit") {
             DeviceEditScreen(
                 device = null,
+                errorMessage = uiState.error,
+                isSaving = uiState.isSaving,
                 onSave = { device ->
                     viewModel.addDevice(
                         name = device.name,
@@ -50,9 +52,9 @@ fun AppNavigation() {
                         domain = device.domain,
                         rdpServerName = device.rdpServerName,
                         width = device.width,
-                        height = device.height
+                        height = device.height,
+                        onSaved = { navController.popBackStack() }
                     )
-                    navController.popBackStack()
                 },
                 onCancel = { navController.popBackStack() }
             )
@@ -67,9 +69,10 @@ fun AppNavigation() {
             if (device != null) {
                 DeviceEditScreen(
                     device = device,
+                    errorMessage = uiState.error,
+                    isSaving = uiState.isSaving,
                     onSave = { updatedDevice ->
-                        viewModel.updateDevice(updatedDevice)
-                        navController.popBackStack()
+                        viewModel.updateDevice(updatedDevice, onSaved = { navController.popBackStack() })
                     },
                     onCancel = { navController.popBackStack() }
                 )

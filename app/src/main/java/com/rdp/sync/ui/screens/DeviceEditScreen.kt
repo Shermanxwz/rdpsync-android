@@ -1,5 +1,8 @@
 package com.rdp.sync.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -27,7 +30,9 @@ import com.rdp.sync.data.Device
 fun DeviceEditScreen(
     device: Device?,
     onSave: (Device) -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    errorMessage: String? = null,
+    isSaving: Boolean = false
 ) {
     var name by remember { mutableStateOf(device?.name ?: "") }
     var host by remember { mutableStateOf(device?.host ?: "") }
@@ -38,22 +43,25 @@ fun DeviceEditScreen(
     var rdpServerName by remember { mutableStateOf(device?.rdpServerName ?: "") }
     var showPassword by remember { mutableStateOf(false) }
 
+    BackHandler(enabled = isSaving) { /* Wait for the atomic credential write before leaving. */ }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = { Text(if (device != null) "编辑设备" else "添加设备") },
                 navigationIcon = {
-                    IconButton(onClick = onCancel) {
+                    IconButton(enabled = !isSaving, onClick = onCancel) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
                     }
                 },
                 actions = {
-                    IconButton(onClick = {
+                    IconButton(enabled = !isSaving && (device?.credentialUnavailable != true || password.isNotEmpty()), onClick = {
                         val d = Device(
                             id = device?.id ?: 0,
                             name = name, host = host, port = port,
                             username = username, password = password,
-                            domain = domain, rdpServerName = rdpServerName
+                            domain = domain, rdpServerName = rdpServerName,
+                            width = device?.width ?: 1280, height = device?.height ?: 720
                         )
                         onSave(d)
                     }) {
@@ -67,9 +75,16 @@ fun DeviceEditScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(paddingValues)
+                .imePadding()
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
+            if (!errorMessage.isNullOrBlank()) Text(errorMessage, color = MaterialTheme.colorScheme.error)
+            if (device?.credentialUnavailable == true) Text(
+                if (device.passwordFormat == 2) "此配置未包含密码。请明确输入密码后保存，才能连接。"
+                else "此设备密码无法解密。原加密数据仍保留；输入新密码并保存将明确替换此设备的凭据。留空不能保存。",
+                color = MaterialTheme.colorScheme.error)
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },

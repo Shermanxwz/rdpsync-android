@@ -22,6 +22,7 @@ import androidx.compose.material.icons.filled.Hub
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -43,7 +44,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,7 +53,6 @@ import androidx.compose.ui.unit.dp
 import com.rdp.sync.data.Device
 import com.rdp.sync.manager.SyncDirection
 import com.rdp.sync.viewmodel.UiState
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -69,7 +68,7 @@ fun DeviceListScreen(
     var showSettings by remember { mutableStateOf(false) }
     var showSyncMenu by remember { mutableStateOf(false) }
     val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
+    var pendingSync by remember { mutableStateOf<SyncDirection?>(null) }
 
     LaunchedEffect(uiState.error, uiState.message) {
         val text = uiState.error ?: uiState.message
@@ -88,28 +87,28 @@ fun DeviceListScreen(
                     if (uiState.isSyncing) {
                         CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
                     } else {
-                        IconButton(onClick = { showSyncMenu = true }) {
+                        IconButton(enabled = uiState.webDavSettingsLoaded, onClick = { showSyncMenu = true }) {
                             Icon(Icons.Default.CloudSync, contentDescription = "同步")
                         }
                         DropdownMenu(expanded = showSyncMenu, onDismissRequest = { showSyncMenu = false }) {
                             DropdownMenuItem(
                                 text = { Text("智能合并（推荐）") },
                                 leadingIcon = { Icon(Icons.Default.CloudSync, null) },
-                                onClick = { showSyncMenu = false; onSync(SyncDirection.MERGE) }
+                                onClick = { showSyncMenu = false; pendingSync = SyncDirection.MERGE }
                             )
                             DropdownMenuItem(
                                 text = { Text("上传本机列表") },
                                 leadingIcon = { Icon(Icons.Default.CloudUpload, null) },
-                                onClick = { showSyncMenu = false; onSync(SyncDirection.UPLOAD) }
+                                onClick = { showSyncMenu = false; pendingSync = SyncDirection.UPLOAD }
                             )
                             DropdownMenuItem(
                                 text = { Text("下载云端列表") },
                                 leadingIcon = { Icon(Icons.Default.CloudDownload, null) },
-                                onClick = { showSyncMenu = false; onSync(SyncDirection.DOWNLOAD) }
+                                onClick = { showSyncMenu = false; pendingSync = SyncDirection.DOWNLOAD }
                             )
                         }
                     }
-                    IconButton(onClick = { showSettings = true }) {
+                    IconButton(enabled = uiState.webDavSettingsLoaded, onClick = { showSettings = true }) {
                         Icon(Icons.Default.Settings, contentDescription = "设置")
                     }
                 }
@@ -151,16 +150,23 @@ fun DeviceListScreen(
         }
     }
 
+    pendingSync?.let { direction ->
+        SyncModeDialog(direction, onDismiss = { pendingSync = null }, onConfirm = { selected ->
+            pendingSync = null
+            onSync(selected)
+        })
+    }
+
     if (showSettings) {
         WebDavSettingsDialog(
             initialUrl = uiState.webDavUrl,
             initialUsername = uiState.webDavUsername,
             initialPassword = uiState.webDavPassword,
+            passwordUnavailable = uiState.webDavCredentialUnavailable,
             onDismiss = { showSettings = false },
             onSave = { url, username, password ->
                 onSaveWebDavSettings(url, username, password)
                 showSettings = false
-                scope.launch { snackbarHostState.showSnackbar("WebDAV 设置已保存") }
             },
             onTest = { url, username, password ->
                 onTestWebDavSettings(url, username, password)
@@ -174,6 +180,7 @@ private fun WebDavSettingsDialog(
     initialUrl: String,
     initialUsername: String,
     initialPassword: String,
+    passwordUnavailable: Boolean,
     onDismiss: () -> Unit,
     onSave: (String, String, String) -> Unit,
     onTest: (String, String, String) -> Unit
@@ -215,12 +222,13 @@ private fun WebDavSettingsDialog(
                     },
                     modifier = Modifier.fillMaxWidth()
                 )
-                Text("同步文件：rdpsync_devices.json。智能合并按 host/port/user/domain 去重。", style = MaterialTheme.typography.bodySmall)
+                if (passwordUnavailable) Text("已保存的密码无法解密。请明确重新输入；留空不会覆盖旧数据。", color = MaterialTheme.colorScheme.error)
+                Text("默认仅同步设备配置（rdpsync_profiles.json），不发送 RDP 密码。旧客户端只识别旧版含密码文件。WebDAV 备份并非端到端加密；请使用 HTTPS。", style = MaterialTheme.typography.bodySmall)
             }
         },
         confirmButton = {
             TextButton(
-                enabled = url.isNotBlank() && username.isNotBlank(),
+                enabled = url.isNotBlank() && username.isNotBlank() && (!passwordUnavailable || password.isNotEmpty()),
                 onClick = { onSave(url, username, password) }
             ) { Text("保存") }
         },
@@ -255,8 +263,31 @@ fun DeviceCard(device: Device, onClick: () -> Unit) {
                 Text(device.name, style = MaterialTheme.typography.titleMedium)
                 Text("${device.host}:${device.port}", style = MaterialTheme.typography.bodyMedium)
                 Text("用户: ${device.username}", style = MaterialTheme.typography.bodySmall)
+                if (device.credentialUnavailable) Text(if (device.passwordFormat == 2) "未保存密码 · 编辑后输入" else "密码无法解密 · 编辑后重新输入，原数据保留", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
             Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = "连接", modifier = Modifier.size(20.dp))
         }
     }
+}
+
+@Composable
+private fun SyncModeDialog(direction: SyncDirection, onDismiss: () -> Unit, onConfirm: (SyncDirection) -> Unit) {
+    var includePasswords by remember(direction) { mutableStateOf(false) }
+    val download = direction == SyncDirection.DOWNLOAD
+    AlertDialog(onDismissRequest = onDismiss, title = { Text("选择同步文件") }, text = {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("默认：仅设备配置 · rdpsync_profiles.json\n不发送 RDP 密码，不改动旧版云端文件；导入时保留已有本机密码和设备。")
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = includePasswords, onCheckedChange = { includePasswords = it })
+                Text("使用旧版含密码文件 rdpsync_devices.json")
+            }
+            if (includePasswords) Text(if (download)
+                "读取旧客户端的备份。文件中的密码将导入本机加密存储；明确的空密码会更新本机密码。"
+                else "警告：继续会将 RDP 密码以可读明文上传到旧版文件！仅 HTTPS 传输加密，不是端到端加密。服务器和有文件权限的人可读取密码。",
+                color = MaterialTheme.colorScheme.error)
+            Text("合并时同一设备以本机为准；要获取旧客户端更新，请选下载并勾选旧版文件。", style = MaterialTheme.typography.bodySmall)
+        }
+    }, confirmButton = { TextButton(onClick = { onConfirm(if (includePasswords) direction.withPasswords() else direction) }) {
+        Text(if (includePasswords && !download) "确认上传明文密码" else "继续")
+    } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
 }

@@ -12,10 +12,13 @@ import java.io.IOException
 import java.net.URI
 import java.util.concurrent.TimeUnit
 
+enum class SyncFile(val fileName: String) {
+    PROFILES("rdpsync_profiles.json"), LEGACY_WITH_PASSWORDS("rdpsync_devices.json")
+}
+
 object WebDavSyncService {
     private const val TAG = "WebDavSyncService"
     private const val MEDIA_TYPE = "application/json; charset=utf-8"
-    private const val FILE_NAME = "rdpsync_devices.json"
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -23,10 +26,10 @@ object WebDavSyncService {
         .writeTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    fun syncToCloud(devices: JSONArray, baseUrl: String, username: String, password: String): Result<String> {
+    fun syncToCloud(devices: JSONArray, baseUrl: String, username: String, password: String, file: SyncFile = SyncFile.PROFILES): Result<String> {
         val cleanBaseUrl = normalizeCollectionUrl(baseUrl)
         ensureCollectionExists(cleanBaseUrl, username, password).getOrElse { return Result.failure(it) }
-        val targetUrl = buildFileUrl(cleanBaseUrl)
+        val targetUrl = buildFileUrl(cleanBaseUrl, file)
         val payload = JSONObject()
             .put("schema", 1)
             .put("app", "RdpSync")
@@ -44,27 +47,27 @@ object WebDavSyncService {
         return executeUnit(request, "Synced ${devices.length()} devices")
     }
 
-    fun syncFromCloud(baseUrl: String, username: String, password: String): Result<List<JSONObject>> {
+    fun syncFromCloud(baseUrl: String, username: String, password: String, file: SyncFile = SyncFile.PROFILES, missingIsEmpty: Boolean = false): Result<List<JSONObject>> {
         val cleanBaseUrl = normalizeCollectionUrl(baseUrl)
         ensureCollectionExists(cleanBaseUrl, username, password).getOrElse { return Result.failure(it) }
         val request = Request.Builder()
-            .url(buildFileUrl(cleanBaseUrl))
+            .url(buildFileUrl(cleanBaseUrl, file))
             .get()
             .header("Authorization", Credentials.basic(username, password))
             .build()
 
         return try {
             client.newCall(request).execute().use { response ->
-                if (response.code == 404) return Result.success(emptyList())
+                if (response.code == 404) return if (missingIsEmpty) Result.success(emptyList()) else
+                    Result.failure(IOException("云端没有 ${file.fileName}。旧版备份请明确选择「旧版含密码文件」；本机设备未改动。"))
                 if (!response.isSuccessful) return Result.failure(IOException(readableHttpError(response.code, response.message)))
-                val jsonStr = response.body?.string().orEmpty().ifBlank { "[]" }
+                val jsonStr = response.body?.string().orEmpty()
                 val devicesArray = parseDevicesArray(jsonStr)
                 val devices = mutableListOf<JSONObject>()
                 for (i in 0 until devicesArray.length()) devices.add(devicesArray.getJSONObject(i))
                 Result.success(devices)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Sync from cloud failed", e)
             Result.failure(e)
         }
     }
@@ -167,14 +170,13 @@ object WebDavSyncService {
             }
         }
     } catch (e: Exception) {
-        Log.e(TAG, "WebDAV request failed", e)
         Result.failure(e)
     }
 
     private fun parseDevicesArray(jsonStr: String): JSONArray {
         val trimmed = jsonStr.trim()
         return if (trimmed.startsWith("{")) {
-            JSONObject(trimmed).optJSONArray("devices") ?: JSONArray()
+            JSONObject(trimmed).getJSONArray("devices")
         } else {
             JSONArray(trimmed)
         }
@@ -182,15 +184,12 @@ object WebDavSyncService {
 
     private fun normalizeCollectionUrl(baseUrl: String): String {
         val trimmed = baseUrl.trim().trimEnd('/')
-        val directory = if (trimmed.endsWith("/$FILE_NAME", ignoreCase = true)) {
-            trimmed.removeSuffix("/$FILE_NAME")
-        } else {
-            trimmed
-        }
+        val suffix = SyncFile.entries.firstOrNull { trimmed.endsWith("/${it.fileName}", ignoreCase = true) }
+        val directory = if (suffix == null) trimmed else trimmed.dropLast(suffix.fileName.length + 1)
         return directory.trimEnd('/') + "/"
     }
 
-    private fun buildFileUrl(baseUrl: String): String = normalizeCollectionUrl(baseUrl) + FILE_NAME
+    internal fun buildFileUrl(baseUrl: String, file: SyncFile): String = normalizeCollectionUrl(baseUrl) + file.fileName
 
     private fun readableHttpError(code: Int, message: String): String = when (code) {
         401, 403 -> "HTTP $code: 认证失败或无权限，请检查用户名/密码/目录权限"

@@ -5,6 +5,7 @@ import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.SystemClock
+import android.os.ParcelFileDescriptor
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
@@ -45,6 +46,10 @@ class RdpFixtureInstrumentedTest {
     @Test fun realDesktopDisplayInputResizeAndWeakLink() {
         val enabled = InstrumentationRegistry.getArguments().getString("rdpFixture")
         assertEquals("This test requires the isolated CI fixture, never a user's host", "true", enabled)
+        val expectedFingerprint = requireNotNull(InstrumentationRegistry.getArguments().getString("fixtureFingerprint"))
+        assertTrue(expectedFingerprint.matches(Regex("[a-f0-9]{64}")))
+        instrumentation.targetContext.getSharedPreferences("certificate_trust_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        val authBeforeFirstTrust = controlState().getInt("auth_requests")
         val preferences = instrumentation.targetContext.getSharedPreferences("session_preferences", Context.MODE_PRIVATE)
         preferences.edit().clear().putString("display_quality", "SHARP").putString("resolution_mode", "PROFILE").commit()
         val showing = mutableStateOf(true)
@@ -53,7 +58,10 @@ class RdpFixtureInstrumentedTest {
         val connectStarted = SystemClock.elapsedRealtime()
         compose.runOnUiThread { compose.activity.setContent { MaterialTheme { if (showing.value) RdpConnectionScreen(device.value) { showing.value = false } } } }
         try {
+            approveCertificate(expectedFingerprint, changed = false, authRequestsBefore = authBeforeFirstTrust)
             waitFor("first real RDP frame", 60_000) { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && fixtureReady() }
+            assertTrue("auth counter must observe a real login after explicit trust", controlState().getInt("auth_requests") > authBeforeFirstTrust)
+            measurements.put("no_auth_before_first_trust", true)
             measurements.put("connect_to_first_frame_ms", SystemClock.elapsedRealtime() - connectStarted)
             measurements.put("latency_method", "Android injected touch (40ms hold) to matching synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
@@ -126,9 +134,21 @@ class RdpFixtureInstrumentedTest {
             compose.onNodeWithContentDescription("切换到直接触摸").assertExists()
             compose.runOnUiThread { showing.value = false }
             waitFor("clean teardown") { !RdpConnector.isConnected() }
-            waitFor("disposable X session terminated", 20_000) { !fixtureReady() }
+            waitFor("disposable X session terminated", 90_000) { !fixtureReady() }
             preferences.edit().putString("resolution_mode", "PROFILE").commit()
+            // Reenter the same profile/authority: the explicitly approved pin must be reused.
+            compose.runOnUiThread { showing.value = true }
+            waitFor("same-pin reconnect without a new trust prompt", 60_000) { RdpConnector.isConnected() && fixtureReady() }
+            compose.onNodeWithText("确认服务器证书").assertDoesNotExist()
+            compose.onNodeWithText("服务器证书已改变").assertDoesNotExist()
+            compose.onNodeWithContentDescription("切换到触控板").assertExists()
+            measurements.put("same_pin_reconnect_without_prompt", true)
+            compose.runOnUiThread { showing.value = false }
+            waitFor("same-pin teardown") { !RdpConnector.isConnected() }
+            waitFor("same-pin X session terminated", 90_000) { !fixtureReady() }
+            val beforeWeakTrust = controlState().getInt("auth_requests")
             compose.runOnUiThread { device.value = device.value.copy(id = 900002, port = 3390); showing.value = true }
+            approveCertificate(expectedFingerprint, changed = false, authRequestsBefore = beforeWeakTrust)
             waitFor("weak-link session frame", 90_000) { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && fixtureReady() }
             compose.onNodeWithContentDescription("切换到触控板").assertExists()
             assertNotEquals("explicit new session gets a new native generation", beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
@@ -150,9 +170,37 @@ class RdpFixtureInstrumentedTest {
             // A server/session without DISP must keep working at its negotiated size.
             compose.runOnUiThread { showing.value = false }
             waitFor("weak-link teardown") { !RdpConnector.isConnected() }
-            waitFor("weak-link X session terminated", 20_000) { !fixtureReady() }
+            waitFor("weak-link X session terminated", 90_000) { !fixtureReady() }
+            // Rotate only this disposable runner's synthetic certificate, with no live session.
+            val beforeChangedTrust = controlState().getInt("auth_requests")
+            val changedFingerprint = controlRequest("/rotate-certificate", "POST").getString("fingerprint")
+            assertNotEquals(expectedFingerprint, changedFingerprint)
+            compose.runOnUiThread { device.value = device.value.copy(id = 900001, port = 3389); showing.value = true }
+            waitFor("changed-certificate challenge", 30_000) { RdpConnector.certificateChallenge()?.reason == "changed" && dialogExists("服务器证书已改变") }
+            compose.onNodeWithText("服务器证书已改变").assertExists()
+            compose.onNodeWithText(expectedFingerprint).assertExists()
+            compose.onNodeWithText(changedFingerprint).assertExists()
+            assertEquals(beforeChangedTrust, controlState().getInt("auth_requests"))
+            assertFalse("changed certificate must not authenticate", fixtureReady())
+            screenshot("06-changed-certificate-blocked")
+            compose.onNodeWithText("取消连接").performClick()
+            compose.mainClock.advanceTimeBy(1500)
+            SystemClock.sleep(500)
+            assertEquals("cancel must not submit credentials", beforeChangedTrust, controlState().getInt("auth_requests"))
+            assertFalse(RdpConnector.isConnected())
+            compose.runOnUiThread { showing.value = false }
+            waitFor("cancelled challenge teardown") { !RdpConnector.isConnected() }
+            compose.runOnUiThread { showing.value = true }
+            approveCertificate(changedFingerprint, changed = true, authRequestsBefore = beforeChangedTrust)
+            waitFor("explicitly approved rotated certificate frame", 60_000) { RdpConnector.isConnected() && fixtureReady() }
+            assertTrue(controlState().getInt("auth_requests") > beforeChangedTrust)
+            measurements.put("changed_certificate_blocked_until_explicit_reapproval", true)
+            screenshot("07-rotated-certificate-approved")
+            compose.runOnUiThread { showing.value = false }
+            waitFor("rotated-certificate teardown") { !RdpConnector.isConnected() }
+            waitFor("rotated-certificate X session terminated", 90_000) { !fixtureReady() }
             assertTrue(RdpConnector.connectDevice("10.0.2.2", 3389, "rdpfixture", "rdpsync-fixture-only", "",
-                width = 800, height = 600, enableTouchInput = false, compatibilityMode = true))
+                width = 800, height = 600, enableTouchInput = false, compatibilityMode = true, expectedFingerprint = changedFingerprint))
             waitFor("compatibility framebuffer", 60_000) { RdpConnector.isConnected() && actualSize(800, 600) && RdpConnector.nativeGetFrameId() > 0 }
             assertEquals(-1, RdpConnector.nativeGetDisplayControlState())
             assertEquals(-2, RdpConnector.nativeRequestResize(1024, 768, 100))
@@ -165,10 +213,36 @@ class RdpFixtureInstrumentedTest {
             runCatching { screenshot("99-before-final-teardown") }
             File(evidence, "measurements.json").writeText(measurements.toString(2))
             File(evidence, "diagnostics.txt").writeText(RdpConnector.getDiag())
+            // AGP/UTP uninstalls the app after tests. Shell-owned shared test output survives it.
+            val copy = instrumentation.uiAutomation.executeShellCommand("mkdir -p /sdcard/Download/rdpsync-evidence; cp -R '${evidence.absolutePath}/.' /sdcard/Download/rdpsync-evidence/")
+            ParcelFileDescriptor.AutoCloseInputStream(copy).use { it.readBytes() }
             compose.runOnUiThread { showing.value = false }
             RdpConnector.disconnect()
             waitFor("final teardown", 20_000) { !RdpConnector.isConnected() }
         }
+    }
+
+    private fun approveCertificate(fingerprint: String, changed: Boolean, authRequestsBefore: Int) {
+        val title = if (changed) "服务器证书已改变" else "确认服务器证书"
+        waitFor("certificate challenge before authentication", 45_000) { RdpConnector.certificateChallenge()?.fingerprint == fingerprint && dialogExists(title) }
+        compose.onNodeWithText(title).assertExists()
+        compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
+        assertEquals("credentials must not reach the session manager before approval", authRequestsBefore, controlState().getInt("auth_requests"))
+        assertFalse("no authenticated desktop may exist before approval", fixtureReady())
+        val button = if (changed) "替换指纹并重连" else "保存指纹并重连"
+        compose.onNodeWithText(button).assertIsNotEnabled()
+        compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹").performScrollTo().performClick()
+        compose.onNodeWithText(button).assertIsEnabled().performClick()
+    }
+
+    private fun dialogExists(title: String): Boolean = compose.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty()
+
+    private fun controlState(): JSONObject = controlRequest("/state")
+    private fun controlRequest(path: String, method: String = "GET"): JSONObject = Socket().use { socket ->
+        socket.connect(InetSocketAddress("10.0.2.2", 8766), 2000)
+        socket.soTimeout = 10_000
+        socket.getOutputStream().write("$method $path HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n".toByteArray())
+        JSONObject(socket.getInputStream().bufferedReader().readText().substringAfter("\r\n\r\n"))
     }
 
     private fun selectResolution(label: String) {
@@ -245,6 +319,10 @@ class RdpFixtureInstrumentedTest {
         val deadline = SystemClock.elapsedRealtime() + timeout
         var lastError: Throwable? = null
         while (SystemClock.elapsedRealtime() < deadline) {
+            // Compose's test frame clock is independent of Thread.sleep/real network time.
+            // Pump recomposition/effects and then let Android perform the measured layout.
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
             try { if (predicate()) return } catch (error: Throwable) { lastError = error }
             SystemClock.sleep(100)
         }
