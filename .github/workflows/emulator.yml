@@ -63,6 +63,7 @@ jobs:
       - name: Start disposable isolated xrdp desktop and weak-link proxy
         run: |
           bash scripts/fixtures/start-rdp-fixture.sh
+          bash scripts/fixtures/start-tls-fixture.sh
           nohup python3 -u scripts/fixtures/rdp_network_proxy.py >build/emulator-evidence/network-proxy.log 2>&1 &
           echo $! >build/emulator-evidence/proxy.pid
       - name: Enable KVM for hosted Android virtualization
@@ -90,6 +91,10 @@ jobs:
           sudo cp /home/rdpfixture/fixture.log /home/rdpfixture/rdpsync-fixture-state.json build/emulator-evidence/ 2>/dev/null || true
           sudo cp /home/rdpfixture/.xorgxrdp.*.log build/emulator-evidence/ 2>/dev/null || true
           sudo chown -R "$(id -u):$(id -g)" build/emulator-evidence
+          if test -f build/emulator-evidence/tls-fixture.pid; then
+            python3 -c 'import urllib.request; print(urllib.request.urlopen("http://127.0.0.1:8767/state", timeout=2).read().decode())' >build/emulator-evidence/tls-fixture-final-state.json || true
+            kill "$(cat build/emulator-evidence/tls-fixture.pid)" || true
+          fi
           if test -f build/emulator-evidence/proxy.pid; then kill "$(cat build/emulator-evidence/proxy.pid)" || true; fi
           if test -f build/emulator-evidence/control.pid; then sudo kill "$(cat build/emulator-evidence/control.pid)" || true; fi
           sudo systemctl stop xrdp xrdp-sesman || true

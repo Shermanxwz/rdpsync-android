@@ -22,6 +22,9 @@ static const struct JNINativeInterface_ challenge_jni = {
 };
 static int boolean_settings[8192];
 static UINT32 authentication_level;
+BOOL freerdp_settings_get_bool(const rdpSettings* settings, FreeRDP_Settings_Keys_Bool key) {
+    (void)settings; assert(key < 8192); return boolean_settings[key];
+}
 BOOL freerdp_settings_set_bool(rdpSettings* settings, FreeRDP_Settings_Keys_Bool key, BOOL value) {
     (void)settings; assert(key < 8192); boolean_settings[key] = value; return TRUE;
 }
@@ -81,6 +84,13 @@ int main(void) {
     session.generation = 42; strcpy(session.endpoint_host, "127.0.0.1"); strcpy(session.endpoint_name, "disposable.example"); session.endpoint_port = 3389;
     RdpSyncContext context = {0}; freerdp instance = {0};
     context.session = &session; instance.context = &context.common.context;
+    assert(!strcmp(certificate_context_failure(&instance, &session, 0), "证书回调绑定"));
+    instance.VerifyX509Certificate = verify_x509_certificate;
+    assert(certificate_context_failure(&instance, &session, 0) == NULL);
+    assert(!strcmp(certificate_context_failure(&instance, &session, 1), "外部证书管理设置"));
+    boolean_settings[FreeRDP_ExternalCertificateManagement] = TRUE;
+    assert(certificate_context_failure(&instance, &session, 1) == NULL);
+    assert(!strcmp(certificate_context_failure(&instance, NULL, 1), "证书会话绑定"));
     expect_pin(&session, "");
     assert(verify_x509_certificate(&instance, (const BYTE*)pem1, size1, "disposable.example", 3389, 0) == 0);
     assert(session.certificate_challenge && !session.certificate_verified && !strcmp(session.certificate_reason, "untrusted"));

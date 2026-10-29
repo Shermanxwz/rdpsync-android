@@ -27,7 +27,7 @@ class NativeRuntimeInstrumentedTest {
         assertFalse("smoke test must not connect to any server", RdpConnector.isConnected())
         assertNull(RdpConnector.certificateChallenge())
         val contextCreated = RdpConnector.nativeCheckRuntime()
-        assertTrue("actual FreeRDP context allocation/free: ${RdpConnector.getDiag()}", contextCreated)
+        assertTrue("actual FreeRDP context allocation/free: ${RdpConnector.getStatus()} / ${RdpConnector.getDiag()}", contextCreated)
         assertFalse(RdpConnector.isConnected())
         assertNull(RdpConnector.certificateChallenge())
     }

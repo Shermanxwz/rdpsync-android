@@ -78,8 +78,29 @@ OWNED_EMULATOR=true
 "${ADB_CMD[@]}" -s "$SERIAL" logcat -c
 timeout 90 "${ADB_CMD[@]}" -s "$SERIAL" install -t "$APP_APK" >"$OUT/install-app.log" 2>&1
 timeout 60 "${ADB_CMD[@]}" -s "$SERIAL" install -t "$TEST_APK" >"$OUT/install-test.log" 2>&1
-timeout 180 "${ADB_CMD[@]}" -s "$SERIAL" shell am instrument -w -r -e class "$CLASSES" \
+# Optional fixed-purpose Android PEM export probe, only for the synthetic TLS harness.
+if [[ "${RDP_SMOKE_TLS_FIXTURE:-false}" == true && -n "${RDP_TLS_PEM_PROBE:-}" ]]; then
+    : "${RDP_TLS_FIXTURE_CERT:?public fixture certificate required for PEM probe}"
+    grep -q -- '-----BEGIN CERTIFICATE-----' "$RDP_TLS_FIXTURE_CERT"
+    if grep -q 'PRIVATE KEY' "$RDP_TLS_FIXTURE_CERT"; then echo 'Refusing private-key transfer' >&2; exit 4; fi
+    "${ADB_CMD[@]}" -s "$SERIAL" shell mkdir -p /data/local/tmp/rdpsync-pem-probe
+    "${ADB_CMD[@]}" -s "$SERIAL" push "$RDP_TLS_PEM_PROBE" /data/local/tmp/rdpsync-pem-probe/probe >"$OUT/probe-push.log" 2>&1
+    "${ADB_CMD[@]}" -s "$SERIAL" push "$RDP_TLS_FIXTURE_CERT" /data/local/tmp/rdpsync-pem-probe/cert.pem >>"$OUT/probe-push.log" 2>&1
+    "${ADB_CMD[@]}" -s "$SERIAL" push "$ROOT"/app/src/main/jniLibs/x86_64/*.so /data/local/tmp/rdpsync-pem-probe/ >>"$OUT/probe-push.log" 2>&1
+    "${ADB_CMD[@]}" -s "$SERIAL" shell chmod 755 /data/local/tmp/rdpsync-pem-probe/probe
+    if timeout 60 "${ADB_CMD[@]}" -s "$SERIAL" shell 'LD_LIBRARY_PATH=/data/local/tmp/rdpsync-pem-probe /data/local/tmp/rdpsync-pem-probe/probe /data/local/tmp/rdpsync-pem-probe/cert.pem' >"$OUT/pem-probe.log" 2>&1; then
+        echo 0 >"$OUT/pem-probe-exit-code.txt"
+    else
+        echo $? >"$OUT/pem-probe-exit-code.txt"
+    fi
+fi
+TEST_ARGS=()
+if [[ "${RDP_SMOKE_TLS_FIXTURE:-false}" == true ]]; then TEST_ARGS+=(-e rdpTlsFixture true); fi
+timeout 180 "${ADB_CMD[@]}" -s "$SERIAL" shell am instrument -w -r -e class "$CLASSES" "${TEST_ARGS[@]}" \
     com.rdp.sync.preview.test/androidx.test.runner.AndroidJUnitRunner >"$OUT/instrumentation.log" 2>&1
 cat "$OUT/instrumentation.log"
 # adb/am can return exit0 when JUnit failed. Require the actual runner result.
 grep -Eq '^OK \([1-9][0-9]* tests?\)' "$OUT/instrumentation.log"
+
+# Assumptions/ignored tests must not masquerade as explicit smoke coverage.
+! grep -q '^INSTRUMENTATION_STATUS_CODE: -' "$OUT/instrumentation.log"

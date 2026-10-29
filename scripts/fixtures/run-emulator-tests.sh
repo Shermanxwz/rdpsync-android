@@ -14,8 +14,14 @@ cleanup() {
   adb exec-out screencap -p >build/emulator-evidence/final-emulator.png || true
 }
 trap cleanup EXIT
+touch build/emulator-evidence/instrumentation-start.marker
 ./gradlew --no-daemon -PnativeAbis=x86_64 \
   -Pandroid.testInstrumentationRunnerArguments.rdpFixture=true \
+  -Pandroid.testInstrumentationRunnerArguments.rdpTlsFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.fixtureFingerprint="$RDP_FIXTURE_FINGERPRINT" \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.RdpFixtureInstrumentedTest,com.rdp.sync.security.CredentialStorageInstrumentedTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.NativeTlsInstrumentedTest,com.rdp.sync.RdpFixtureInstrumentedTest,com.rdp.sync.security.CredentialStorageInstrumentedTest \
   :app:connectedDebugAndroidTest
+python3 scripts/fixtures/verify_android_results.py \
+  app/build/outputs/androidTest-results/connected/debug \
+  build/emulator-evidence/instrumentation-start.marker \
+  build/emulator-evidence/verified-android-test-counts.json

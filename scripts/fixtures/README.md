@@ -62,3 +62,34 @@ APKs, change signing, create OS users, or modify host network policy. Set `JAVA_
 and `ANDROID_HOME` as needed. `RDP_SMOKE_CLASSES` can also include
 `com.rdp.sync.security.CredentialStorageInstrumentedTest` for genuine Android
 Keystore regression coverage. Software-emulation timings are not performance data.
+
+### Optional real-TLS callback isolation
+
+`bash scripts/fixtures/run-local-tls-smoke.sh APP_X86_64_APK TEST_APK [OUTPUT_DIRECTORY]`
+starts a workspace-owned Python X.224/TLS peer on loopback ports 33890/8767 and uses
+the same isolated software emulator. It generates two disposable self-signed
+certificates and exercises production JNI connect/challenge handling: unknown and
+changed pins must close with zero TLS application bytes; a matching pin may reach
+only the parsed MCS Connect-Initial boundary, where this synthetic peer deliberately
+closes. Each negative assertion waits for the native disconnect and server-side
+settled connection counter. It never implements authentication or a desktop, and
+**must not be reported as full RDP acceptance**. Hosted xrdp rendering/input/resize
+remains mandatory. This optional Android test skips unless explicitly enabled; the
+local runner rejects skipped/error statuses for an explicit run.
+
+The hosted emulator workflow explicitly enables and executes this TLS class before
+the full desktop test (14 Android tests total: runtime, TLS, desktop and 11 credential
+tests). It starts a separate loopback fixture with keys under `RUNNER_TEMP`, retains
+only public counters/logs, and stops its owned process during unconditional cleanup.
+Direct test pins are not saved to profile preferences, and the TLS test always
+disconnects before the production-screen desktop scenario begins.
+An additional fresh-XML gate requires exactly those 14 distinct test cases and
+class counts with zero failures, errors or skips; a missing optional TLS class
+or assumption skip cannot silently make the hosted gate green.
+
+The output `private/` directory contains synthetic fixture keys: do not upload it.
+Retain only logs, fingerprints, counters, source/APK hashes and test output. An
+optional `RDP_TLS_PEM_PROBE` executable can diagnose the exact Android FreeRDP/OpenSSL
+PEM export path; only the public leaf certificate and native libraries are copied
+to the isolated emulator, never private keys. These test certificates authorize no
+real RDP host.

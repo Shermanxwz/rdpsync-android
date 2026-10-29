@@ -38,3 +38,21 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
     "$ROOT/app/src/test/cpp/runtime_test.c" -o "$OUT/runtime_test"
 "$OUT/runtime_test"
+
+# Clang -O2 once removed the session-tail store when the factory returned only
+# ctx->instance: upstream marks its initialized cyclic-context allocator malloc.
+# Keep allocator and caller separate (no LTO), and test the production factory.
+# Prefer the same Clang toolchain that produced the Android libraries. Its plain
+# clang driver targets the host, unlike the Android-target wrapper executable.
+NATIVE_AR="$(sed -n 's/^CMAKE_C_COMPILER_AR:FILEPATH=//p' "$GENERATED/CMakeCache.txt" | head -1)"
+DEFAULT_CLANG="$(dirname "$NATIVE_AR")/clang"
+[[ -x "$DEFAULT_CLANG" ]] || DEFAULT_CLANG=clang
+HOST_CLANG="${HOST_CLANG:-$DEFAULT_CLANG}"
+command -v "$HOST_CLANG" >/dev/null || { echo 'Clang is required for the optimized context-binding regression.' >&2; exit 1; }
+BINDING_FLAGS=(-std=c11 -D_GNU_SOURCE -O2 -g -Wno-deprecated-declarations
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include"
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include")
+"$HOST_CLANG" "${BINDING_FLAGS[@]}" -c "$ROOT/app/src/test/cpp/context_binding_allocator.c" -o "$OUT/context_binding_allocator.o"
+"$HOST_CLANG" "${BINDING_FLAGS[@]}" -c "$ROOT/app/src/test/cpp/context_binding_test.c" -o "$OUT/context_binding_test.o"
+"$HOST_CLANG" "$OUT/context_binding_test.o" "$OUT/context_binding_allocator.o" -o "$OUT/context_binding_test"
+"$OUT/context_binding_test"

@@ -34,6 +34,7 @@
 #include <winpr/synch.h>
 #include "rdpsync_geometry.h"
 #include "rdpsync_certificate.h"
+#include "rdpsync_context.h"
 
 #define TAG "FreeRDP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -43,8 +44,7 @@
 typedef enum { INPUT_MOVE, INPUT_CLICK, INPUT_BUTTON, INPUT_WHEEL, INPUT_HWHEEL,
                INPUT_TOUCH, INPUT_KEY, INPUT_UNICODE } InputKind;
 typedef struct { InputKind kind; int x, y, code, action; } InputCommand;
-typedef struct RdpSession RdpSession;
-typedef struct { rdpClientContext common; RdpSession* session; } RdpSyncContext;
+
 struct RdpSession {
     pthread_mutex_t mutex;
     pthread_mutex_t channel_mutex;
@@ -363,9 +363,16 @@ static BOOL authenticate_ex(freerdp* instance, char** username, char** password,
 static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t length,
     const char* hostname, UINT16 port, DWORD flags) {
     RdpSession* s = instance && instance->context ? s_from_ctx(instance->context) : NULL;
-    if (!s || atomic_load(&s->terminating)) return 0;
+    if (!s) { LOGE("Certificate callback rejected: missing session"); return 0; }
+    s_diag(s, "certificate=callback-entered");
+    if (atomic_load(&s->terminating)) {
+        s_diag(s, "certificate=rejected-canceled"); return 0;
+    }
     pthread_mutex_lock(&s->mutex);
-    if (s->certificate_superseded) { pthread_mutex_unlock(&s->mutex); return 0; }
+    if (s->certificate_superseded) {
+        pthread_mutex_unlock(&s->mutex);
+        s_diag(s, "certificate=rejected-superseded"); return 0;
+    }
     s->certificate_verified = 0; s->certificate_challenge = 0;
     pthread_mutex_unlock(&s->mutex);
     /* Pins never authorize a gateway, redirect or a different endpoint. Those
@@ -373,16 +380,19 @@ static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t le
     if (!hostname || strcmp(hostname, s->endpoint_name) != 0 || port != s->endpoint_port ||
         (flags & (VERIFY_CERT_FLAG_GATEWAY | VERIFY_CERT_FLAG_REDIRECT | VERIFY_CERT_FLAG_LEGACY))) {
         s_error(s, "证书验证失败：连接目标已改变");
+        s_diag(s, "certificate=rejected-endpoint");
         return 0;
     }
     RdpCertificateInfo info;
     if (!rdpsync_certificate_info(pem, length, &info)) {
         s_error(s, "证书验证失败：无法读取服务器证书");
+        s_diag(s, "certificate=rejected-pem");
         return 0;
     }
     pthread_mutex_lock(&s->mutex);
     if (s->certificate_superseded || atomic_load(&s->terminating)) {
-        pthread_mutex_unlock(&s->mutex); return 0;
+        pthread_mutex_unlock(&s->mutex);
+        s_diag(s, "certificate=rejected-stale-result"); return 0;
     }
     const int trusted = s->expected_pin_state == 1 &&
         CRYPTO_memcmp(s->expected_fingerprint, info.fingerprint, 64) == 0;
@@ -400,6 +410,7 @@ static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t le
             "首次连接需核对服务器证书 SHA-256 指纹");
     }
     pthread_mutex_unlock(&s->mutex);
+    s_diag(s, trusted ? "certificate=pin-matched" : "certificate=challenge-published");
     /* Do not block a native thread waiting for UI. Reject now; explicit approval
      * may start a NEW connection with a new immutable expected-pin snapshot. */
     return trusted ? 2 : 0;
@@ -515,16 +526,14 @@ static BOOL client_ctx_new(freerdp* instance, rdpContext* context) {
     instance->Redirect = reject_redirect;
     return TRUE;
 }
-static freerdp* create_instance(RdpSession* session) {
-    RDP_CLIENT_ENTRY_POINTS entry = {0};
-    entry.Version = RDP_CLIENT_INTERFACE_VERSION;
-    entry.Size = sizeof(RDP_CLIENT_ENTRY_POINTS_V1);
-    entry.ContextSize = sizeof(RdpSyncContext);
-    entry.ClientNew = client_ctx_new;
-    rdpContext* ctx = freerdp_client_context_new(&entry);
-    if (!ctx) return NULL;
-    ((RdpSyncContext*)ctx)->session = session;
-    return ctx->instance;
+static const char* certificate_context_failure(freerdp* instance, RdpSession* expected, int check_external) {
+    if (!instance || !instance->context || s_from_ctx(instance->context) != expected)
+        return "证书会话绑定";
+    if (instance->VerifyX509Certificate != verify_x509_certificate)
+        return "证书回调绑定";
+    if (check_external && !freerdp_settings_get_bool(instance->context->settings, FreeRDP_ExternalCertificateManagement))
+        return "外部证书管理设置";
+    return NULL;
 }
 static int coordinate(int value, int limit) {
     if (value < 0) return 0;
@@ -696,6 +705,18 @@ static void* thread_fn(void* arg) {
     RdpSession* s = arg;
     freerdp* instance = s->instance;
     s_status(s, "正在连接...");
+    const BOOL session_ready = s_from_ctx(instance->context) == s;
+    const BOOL callback_ready = instance->VerifyX509Certificate == verify_x509_certificate;
+    const BOOL external_ready = freerdp_settings_get_bool(instance->context->settings, FreeRDP_ExternalCertificateManagement);
+    s_diag(s, session_ready ? "certificate=session-bound" : "certificate=session-mismatch");
+    s_diag(s, callback_ready ? "certificate=callback-bound" : "certificate=callback-mismatch");
+    s_diag(s, external_ready ? "certificate=external-management" : "certificate=external-disabled");
+    if (!session_ready || !callback_ready || !external_ready) {
+        s_error(s, "证书验证上下文未就绪，已阻止连接");
+        s_diag(s, "certificate=context-invariant-failed");
+        goto done;
+    }
+    s_diag(s, "certificate=context-ready");
     if (!freerdp_connect(instance)) {
         const UINT32 error = freerdp_get_last_error(instance->context);
         pthread_mutex_lock(&s->mutex);
@@ -823,21 +844,44 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
         /* Test normal (DISP/RDPEI/autodetect/RDPDR) and compatibility profiles.
          * No connect() call or credentials: addins are loaded but not connected. */
         for (int compatibility = 0; compatibility < 2 && result; ++compatibility) {
+            failed = "诊断会话内存";
+            RdpSession* probe = calloc(1, sizeof(RdpSession));
+            if (!probe) { result = 0; break; }
+            pthread_mutex_init(&probe->mutex, NULL);
+            pthread_mutex_init(&probe->channel_mutex, NULL);
+            atomic_init(&probe->connected, 0); atomic_init(&probe->terminating, 0);
             failed = "FreeRDP 上下文";
-            freerdp* instance = create_instance(NULL);
-            if (!instance) { result = 0; break; }
-            failed = "安全与通道设置";
-            result = configure_security(instance->context->settings) &&
-                configure_session_profile(instance->context->settings, 1280, 720, TRUE, compatibility);
+            freerdp* instance = rdpsync_create_instance(probe, client_ctx_new);
+            probe->instance = instance;
+            result = instance != NULL;
+            const char* invariant = instance ? certificate_context_failure(instance, probe, 0) : NULL;
+            if (invariant) { failed = invariant; result = 0; }
+            if (result) {
+                failed = "安全设置";
+                result = configure_security(instance->context->settings);
+                invariant = certificate_context_failure(instance, probe, 1);
+                if (invariant) { failed = invariant; result = 0; }
+            }
+            if (result) {
+                failed = "通道设置";
+                result = configure_session_profile(instance->context->settings, 1280, 720, TRUE, compatibility);
+                invariant = certificate_context_failure(instance, probe, 1);
+                if (invariant) { failed = invariant; result = 0; }
+            }
             if (result) {
                 failed = compatibility ? "兼容模式通道加载" : "完整模式通道加载";
                 result = instance->LoadChannels && instance->LoadChannels(instance);
+                invariant = certificate_context_failure(instance, probe, 1);
+                if (invariant) { failed = invariant; result = 0; }
             }
-            /* ContextFree only frees the channel container; Disconnect sends
-             * CHANNEL_EVENT_TERMINATED to free loaded addins. There is no socket
-             * or canceled-connect error here, so this cannot send network data. */
-            (void)freerdp_disconnect(instance);
-            freerdp_client_context_free(instance->context);
+            if (instance) {
+                /* Terminate loaded addins; no socket or authentication exists. */
+                (void)freerdp_disconnect(instance);
+                freerdp_client_context_free(instance->context);
+            }
+            pthread_mutex_destroy(&probe->channel_mutex);
+            pthread_mutex_destroy(&probe->mutex);
+            free(probe);
         }
     }
     pthread_mutex_lock(&g_lock);
@@ -903,8 +947,11 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     session->wake_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!session->wake_event) { session_destroy(session); goto failure; }
     failure_stage = "FreeRDP 上下文";
-    session->instance = create_instance(session);
+    session->instance = rdpsync_create_instance(session, client_ctx_new);
     if (!session->instance) { session_destroy(session); goto failure; }
+    const char* invariant = certificate_context_failure(session->instance, session, 0);
+    if (invariant) { failure_stage = invariant; session_destroy(session); goto failure; }
+    s_diag(session, "certificate=allocation-binding-ready");
     rdpSettings* settings = session->instance->context->settings;
     failure_stage = "连接与安全设置";
     BOOL ok = freerdp_settings_set_string(settings, FreeRDP_ServerHostname, host) &&
@@ -915,11 +962,19 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
         freerdp_settings_set_string(settings, FreeRDP_UserSpecifiedServerName,
             server_name && *server_name ? server_name : NULL) && configure_security(settings);
     if (!ok) { session_destroy(session); goto failure; }
+    invariant = certificate_context_failure(session->instance, session, 1);
+    if (invariant) { failure_stage = invariant; session_destroy(session); goto failure; }
+    s_diag(session, "certificate=security-settings-ready");
     failure_stage = "显示与通道设置";
     if (!configure_session_profile(settings, width, height, touch, compatibility)) {
         session_destroy(session); goto failure;
     }
-    snprintf(session->diag, sizeof(session->diag), "engine=FreeRDP %s\ncodec=GDI (no H.264)\n", FREERDP_VERSION_FULL);
+    invariant = certificate_context_failure(session->instance, session, 1);
+    if (invariant) { failure_stage = invariant; session_destroy(session); goto failure; }
+    /* Preserve earlier initialization milestones instead of overwriting them. */
+    s_diag(session, "engine=FreeRDP " FREERDP_VERSION_FULL);
+    s_diag(session, "codec=GDI (no H.264)");
+    s_diag(session, "certificate=profile-settings-ready");
     s_diag(session, compatibility ? "connection=compatibility-retry" : "display-control=requested");
     s_diag(session, touch && !compatibility ? "rdpei=requested" : "rdpei=disabled");
     s_status(session, "正在连接...");
