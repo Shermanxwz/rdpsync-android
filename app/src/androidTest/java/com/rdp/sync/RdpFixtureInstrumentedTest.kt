@@ -107,6 +107,9 @@ class RdpFixtureInstrumentedTest {
             // This gate MUST fail if the test server/build cannot negotiate DISP. A request
             // return value is not evidence that the actual decoded desktop changed.
             waitFor("real display-control caps", 20_000) { RdpConnector.nativeGetDisplayControlState() == 2 }
+            selectQuality("均衡")
+            assertTrue("manual profile resolution remains exact when adaptive is off", actualSize(1024, 768))
+            selectQuality("清晰")
             selectResolution("1280 × 720")
             waitFor("server-applied 1280x720 frame", 20_000) { actualSize(1280, 720) && fixtureSize(1280, 720) }
             assertColor(40, 40, Color.RED)
@@ -158,7 +161,9 @@ class RdpFixtureInstrumentedTest {
             compose.onNodeWithContentDescription("切换到触控板").assertExists()
             assertNotEquals("explicit new session gets a new native generation", beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
             compose.onNodeWithContentDescription("显示与网络设置").performClick()
-            compose.onNode(hasAnySibling(hasText("自适应网络与渲染负载")) and hasClickAction()).performScrollTo().performClick()
+            val adaptive = hasText("自适应网络与渲染负载") and hasClickAction()
+            compose.onAllNodes(adaptive).assertCountEquals(1)
+            compose.onNode(adaptive).performScrollTo().assertIsOff().performClick().assertIsOn()
             compose.onNodeWithText("完成").performClick()
             assertTrue(preferences.getBoolean("adaptive_quality", false))
             measurements.put("adaptive_opt_in", true)
@@ -259,7 +264,17 @@ class RdpFixtureInstrumentedTest {
 
     private fun selectResolution(label: String) {
         compose.onNodeWithContentDescription("显示与网络设置").performClick()
-        compose.onNode(hasAnySibling(hasText(label)) and hasClickAction()).performScrollTo().performClick()
+        val control = hasText(label) and hasClickAction()
+        compose.onAllNodes(control).assertCountEquals(1)
+        compose.onNode(control).performScrollTo().performClick().assertIsSelected()
+        compose.onNodeWithText("完成").performClick()
+    }
+
+    private fun selectQuality(label: String) {
+        compose.onNodeWithContentDescription("显示与网络设置").performClick()
+        val control = hasText(label) and hasClickAction()
+        compose.onAllNodes(control).assertCountEquals(1)
+        compose.onNode(control).performScrollTo().performClick().assertIsSelected()
         compose.onNodeWithText("完成").performClick()
     }
 

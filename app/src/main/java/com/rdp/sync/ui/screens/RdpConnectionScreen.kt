@@ -5,6 +5,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -23,6 +25,9 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
@@ -315,18 +320,31 @@ private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Devi
         Column(Modifier.verticalScroll(rememberScrollState())) {
             Text("远程分辨率", style = MaterialTheme.typography.titleSmall)
             ResolutionMode.entries.forEach { mode ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = settings.resolution == mode, onClick = { onChange(settings.copy(resolution = mode)) })
-                    Text(if (mode == ResolutionMode.PROFILE) "设备配置（${device.width} × ${device.height}）" else mode.title)
+                val label = if (mode == ResolutionMode.PROFILE) "设备配置（${device.width} × ${device.height}）" else mode.title
+                Row(Modifier.fillMaxWidth().selectable(
+                    selected = settings.resolution == mode, role = Role.RadioButton,
+                    onClick = { onChange(settings.copy(resolution = mode)) }
+                ).semantics { contentDescription = "远程分辨率：$label" }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = settings.resolution == mode, onClick = null)
+                    Text(label)
                 }
             }
             Text("画质上限", style = MaterialTheme.typography.titleSmall)
             Text("固定分辨率且关闭自适应时，画质仅改变本地帧率上限，不会暗中降低远程分辨率。", style = MaterialTheme.typography.bodySmall)
             DisplayQuality.entries.forEach { quality ->
-                Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(settings.quality == quality, { onChange(settings.copy(quality = quality)) }); Text(quality.title) }
+                Row(Modifier.fillMaxWidth().selectable(
+                    selected = settings.quality == quality, role = Role.RadioButton,
+                    onClick = { onChange(settings.copy(quality = quality)) }
+                ).semantics { contentDescription = "画质上限：${quality.title}" }, verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(settings.quality == quality, onClick = null)
+                    Text(quality.title)
+                }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Switch(settings.adaptive, { onChange(settings.copy(adaptive = it)) })
+            Row(Modifier.fillMaxWidth().toggleable(
+                value = settings.adaptive, role = Role.Switch,
+                onValueChange = { onChange(settings.copy(adaptive = it)) }
+            ).semantics { contentDescription = "自适应网络与渲染负载" }, verticalAlignment = Alignment.CenterVertically) {
+                Switch(settings.adaptive, onCheckedChange = null)
                 Text("自适应网络与渲染负载", modifier = Modifier.padding(start = 8.dp))
             }
             Text("自适应基于实测延迟、带宽和渲染耗时，持续变差才降级，恢复后缓慢提高。缺少测量时不会猜测网速。", style = MaterialTheme.typography.bodySmall)
