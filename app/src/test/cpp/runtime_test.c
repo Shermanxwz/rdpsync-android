@@ -43,6 +43,10 @@ int main(void) {
     assert(configure_session_profile(NULL, 1280, 720, TRUE, FALSE));
     assert(bool_options[FreeRDP_NetworkAutoDetect] && bool_options[FreeRDP_DeviceRedirection]);
     assert(bool_options[FreeRDP_SupportDisplayControl] && bool_options[FreeRDP_MultiTouchInput]);
+    /* Initial core monitor-layout PDU is not required for the single monitor;
+     * genuine DISP dynamic resize remains enabled independently. */
+    assert(!bool_options[FreeRDP_SupportMonitorLayoutPdu]);
+    assert(bool_options[FreeRDP_DynamicResolutionUpdate]);
     assert(bool_options[FreeRDP_SupportDynamicChannels]);
     assert(!bool_options[FreeRDP_AudioCapture] && !bool_options[FreeRDP_AudioPlayback]);
     assert(!bool_options[FreeRDP_RedirectDrives] && !bool_options[FreeRDP_RedirectHomeDrive]);

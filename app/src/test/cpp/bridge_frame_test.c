@@ -84,7 +84,9 @@ int main(void) {
     gdi.width = test_width; gdi.height = test_height; gdi.stride = 4 * test_width + 64;
     gdi.primary_buffer = calloc((size_t)gdi.stride, 400);
     assert(gdi.primary_buffer);
-    for (int y = 0; y < gdi.height; ++y) for (int x = 0; x < gdi.width; ++x) set_source_pixel(&gdi, x, y, 0xff0000ff);
+    for (int y = 0; y < gdi.height; ++y) for (int x = 0; x < gdi.width; ++x) set_source_pixel(&gdi, x, y, 0x000000ff);
+    set_source_pixel(&gdi, 0, 0, 0x00000000); /* RGB black, unused zero alpha */
+    set_source_pixel(&gdi, 1, 0, 0x00332211); /* desktop fixture color #112233 */
     assert(end_paint(&context.common.context));
     assert(session.frame_id == 1 && session.dirty.width == test_width && session.dirty.height == test_height);
     TestBitmap bitmap = {{test_width, test_height, 4 * test_width + 32, ANDROID_BITMAP_FORMAT_RGBA_8888, 0}, NULL, 0};
@@ -92,11 +94,13 @@ int main(void) {
     TestArray bounds = {4, {0}};
     JNIEnv env = &jni_functions; g_session = &session;
     assert(Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameToBitmap(&env, NULL, (jobject)&bitmap, (jintArray)&bounds, JNI_TRUE) == 1);
-    assert(bitmap_pixel(&bitmap, 17, 299) == 0xff0000ff); /* padded stride */
+    assert(bitmap_pixel(&bitmap, 17, 299) == 0xff0000ff); /* padded stride, forced opaque */
+    assert(bitmap_pixel(&bitmap, 0, 0) == 0xff000000);
+    assert(bitmap_pixel(&bitmap, 1, 0) == 0xff332211); /* no background contribution */
     assert(session.dirty.width == 0);
-    damage(&invalid, 2, 3, 1, 1); set_source_pixel(&gdi, 2, 3, 0xff00ff00);
+    damage(&invalid, 2, 3, 1, 1); set_source_pixel(&gdi, 2, 3, 0x0000ff00);
     assert(end_paint(&context.common.context)); assert(invalid.null);
-    damage(&invalid, 190, 290, 1, 1); set_source_pixel(&gdi, 190, 290, 0xffff0000);
+    damage(&invalid, 190, 290, 1, 1); set_source_pixel(&gdi, 190, 290, 0x40ff0000);
     assert(end_paint(&context.common.context));
     assert(session.frame_id == 3);
     assert(Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameToBitmap(&env, NULL, (jobject)&bitmap, (jintArray)&bounds, JNI_FALSE) == 3);
@@ -105,7 +109,7 @@ int main(void) {
     assert(end_paint(&context.common.context)); assert(session.frame_id == 3); /* no dirty = no copy */
     /* Same-area portrait -> landscape must invalidate ALL rows despite same allocation size. */
     gdi.width = 300; gdi.height = 200; gdi.stride = 4 * 300 + 64;
-    for (int y = 0; y < gdi.height; ++y) for (int x = 0; x < gdi.width; ++x) set_source_pixel(&gdi, x, y, 0xffc0ffee);
+    for (int y = 0; y < gdi.height; ++y) for (int x = 0; x < gdi.width; ++x) set_source_pixel(&gdi, x, y, 0x00c0ffee);
     assert(end_paint(&context.common.context)); assert(session.frame_id == 4 && session.dirty.width == 300 && session.dirty.height == 200);
     assert(Java_com_rdp_sync_network_RdpConnector_nativeCopyFrameToBitmap(&env, NULL, (jobject)&bitmap, (jintArray)&bounds, JNI_FALSE) == 0);
     assert(session.dirty.width == 300); /* stale Java bitmap must not consume damage */

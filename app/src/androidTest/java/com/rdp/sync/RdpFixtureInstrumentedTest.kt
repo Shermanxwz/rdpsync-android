@@ -65,6 +65,9 @@ class RdpFixtureInstrumentedTest {
             assertTrue("auth counter must observe a real login after explicit trust", controlState().getInt("auth_requests") > authBeforeFirstTrust)
             measurements.put("no_auth_before_first_trust", true)
             measurements.put("connect_to_first_frame_ms", SystemClock.elapsedRealtime() - connectStarted)
+            measurements.put("initial_display_control_state", RdpConnector.nativeGetDisplayControlState())
+            assertFalse("normal fixture session must not silently downgrade to compatibility mode: ${RdpConnector.getDiag()}",
+                RdpConnector.getDiag().contains("connection=compatibility-retry"))
             measurements.put("latency_method", "Android injected touch (40ms hold) to matching synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
             compose.onNodeWithContentDescription("切换到触控板").assertExists()

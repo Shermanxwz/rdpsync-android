@@ -33,14 +33,18 @@ class NativeTlsInstrumentedTest {
             RdpConnector.disconnect()
             settled(initial.getInt("connections") + 1)
             assertEquals("untrusted TLS must not send MCS or login data", applicationBefore, state().getInt("application_bytes"))
+            recordAttempts("unknown")
             val mcsBefore = state().getInt("mcs_boundaries")
             connect(firstPin)
-            await("matching pin reaches the deliberately terminated MCS boundary") { state().getInt("mcs_boundaries") == mcsBefore + 1 }
+            // FreeRDP may retry transport after this peer deliberately closes at
+            // MCS. Require the positive boundary, not exactly one internal try.
+            await("matching pin reaches the deliberately terminated MCS boundary") { state().getInt("mcs_boundaries") >= mcsBefore + 1 }
             assertNull("matching exact pin must not create a new trust challenge", RdpConnector.certificateChallenge())
             assertFalse("fixture never completes MCS or authenticates", RdpConnector.isConnected())
             assertEquals(0, state().getInt("unexpected_messages"))
             RdpConnector.disconnect()
             settled(initial.getInt("connections") + 2)
+            recordAttempts("matching")
             val rotated = state("/rotate", "POST")
             val secondPin = rotated.getString("fingerprint")
             assertNotEquals(firstPin, secondPin)
@@ -53,9 +57,17 @@ class NativeTlsInstrumentedTest {
             RdpConnector.disconnect()
             settled(rotated.getInt("connections") + 1)
             assertEquals("changed cert must not send MCS or login data", bytesBeforeChanged, state().getInt("application_bytes"))
+            recordAttempts("changed")
         } finally {
             RdpConnector.disconnect()
         }
+    }
+
+    private fun recordAttempts(phase: String) {
+        val current = state()
+        android.util.Log.i("RdpTlsFixture", "phase=$phase connections=${current.getInt("connections")} " +
+            "settled=${current.getInt("settled")} application_bytes=${current.getInt("application_bytes")} " +
+            "mcs_boundaries=${current.getInt("mcs_boundaries")}")
     }
 
     private fun settled(minimum: Int) = await("fixture closes rejected connection before byte assertion") {

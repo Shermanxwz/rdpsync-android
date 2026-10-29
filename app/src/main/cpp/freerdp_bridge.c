@@ -186,7 +186,7 @@ static BOOL end_paint(rdpContext* ctx) {
             const uint8_t* src = gdi->primary_buffer +
                 (size_t)(changed.y + row) * gdi->stride + (size_t)changed.x * 4;
             uint32_t* dst = s->fb_pixels + (size_t)(changed.y + row) * width + changed.x;
-            memcpy(dst, src, (size_t)changed.width * 4);
+            rdpsync_copy_opaque_rgba(dst, src, (size_t)changed.width);
         }
         /* Union ALL damage since last bitmap copy, not only the newest frame. */
         rdpsync_union_rect(&s->dirty, changed);
@@ -463,7 +463,11 @@ static BOOL configure_session_profile(rdpSettings* settings, int width, int heig
     PROFILE_SETTING(uint16, FreeRDP_DesktopOrientation, ORIENTATION_LANDSCAPE);
     PROFILE_SETTING(uint32, FreeRDP_DesktopPhysicalWidth, width * 254 / 960);
     PROFILE_SETTING(uint32, FreeRDP_DesktopPhysicalHeight, height * 254 / 960);
-    PROFILE_SETTING(bool, FreeRDP_SupportMonitorLayoutPdu, !compatibility);
+    /* Single-monitor client: do NOT require the server's initial Monitor Layout
+     * PDU. FreeRDP waits for it before activation if this is TRUE, and servers
+     * such as xrdp omit it. DISP dynamic resize below is a separate DVC feature.
+     * Upstream X11 likewise enables the initial PDU only for >1 monitor. */
+    PROFILE_SETTING(bool, FreeRDP_SupportMonitorLayoutPdu, FALSE);
     PROFILE_SETTING(bool, FreeRDP_SupportDisplayControl, !compatibility);
     PROFILE_SETTING(bool, FreeRDP_DynamicResolutionUpdate, !compatibility);
     PROFILE_SETTING(bool, FreeRDP_MultiTouchInput, touch && !compatibility);

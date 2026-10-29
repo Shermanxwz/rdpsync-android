@@ -2,6 +2,7 @@
 #define RDPSYNC_GEOMETRY_H
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 /* Each 32-bit snapshot is bounded to 32 MiB (snapshot + Android bitmap: 64 MiB,
  * plus FreeRDP/GPU buffers). Display Control permits 8192, but mobile clients
@@ -43,6 +44,16 @@ static inline void rdpsync_union_rect(RdpDirtyRect* accumulated, RdpDirtyRect ne
     if (next.y < accumulated->y) accumulated->y = next.y;
     accumulated->width = right - accumulated->x;
     accumulated->height = bottom - accumulated->y;
+}
+/* A remote desktop is opaque; RDP/GDI RGB updates may leave byte 3 at zero.
+ * Android Canvas treats RGBA_8888 as premultiplied alpha, so copying that unused
+ * byte through makes source RGB blend additively with the view background. */
+static inline void rdpsync_copy_opaque_rgba(uint32_t* destination, const uint8_t* source, size_t pixels) {
+    for (size_t x = 0; x < pixels; ++x) {
+        uint32_t rgba;
+        memcpy(&rgba, source + x * 4, sizeof(rgba)); /* accepts padded/unaligned rows */
+        destination[x] = rgba | 0xff000000U;
+    }
 }
 static inline uint32_t rdpsync_rgba_to_argb(uint32_t rgba) {
     return (rgba & 0xff00ff00U) | ((rgba & 0x00ff0000U) >> 16) | ((rgba & 0x000000ffU) << 16);
