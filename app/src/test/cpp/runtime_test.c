@@ -14,7 +14,54 @@ static void JNICALL test_release_utf(JNIEnv* env, jstring text, const char* char
 static const struct JNINativeInterface_ runtime_jni = {
     .GetStringUTFChars = test_utf_chars, .ReleaseStringUTFChars = test_release_utf
 };
+static BOOL bool_options[8192];
+static UINT32 uint_options[8192];
+BOOL freerdp_settings_set_bool(rdpSettings* settings, FreeRDP_Settings_Keys_Bool key, BOOL value) {
+    (void)settings; assert(key < 8192); bool_options[key] = value; return TRUE;
+}
+BOOL freerdp_settings_set_uint32(rdpSettings* settings, FreeRDP_Settings_Keys_UInt32 key, UINT32 value) {
+    (void)settings; assert(key < 8192); uint_options[key] = value; return TRUE;
+}
+BOOL freerdp_settings_set_uint16(rdpSettings* settings, FreeRDP_Settings_Keys_UInt16 key, UINT16 value) {
+    (void)settings; assert(key < 8192); uint_options[key] = value; return TRUE;
+}
+BOOL freerdp_settings_get_bool(const rdpSettings* settings, FreeRDP_Settings_Keys_Bool key) {
+    (void)settings; assert(key < 8192); return bool_options[key];
+}
+UINT32 freerdp_settings_get_uint32(const rdpSettings* settings, FreeRDP_Settings_Keys_UInt32 key) {
+    (void)settings; assert(key < 8192); return uint_options[key];
+}
+static int loader_mutation;
+BOOL freerdp_client_load_channels(freerdp* instance) {
+    (void)instance;
+    if (loader_mutation == 1) bool_options[FreeRDP_AudioPlayback] = TRUE;
+    if (loader_mutation == 2) bool_options[FreeRDP_AudioCapture] = TRUE;
+    if (loader_mutation == 3) uint_options[FreeRDP_DeviceCount] = 1;
+    return loader_mutation != 4;
+}
 int main(void) {
+    assert(configure_session_profile(NULL, 1280, 720, TRUE, FALSE));
+    assert(bool_options[FreeRDP_NetworkAutoDetect] && bool_options[FreeRDP_DeviceRedirection]);
+    assert(bool_options[FreeRDP_SupportDisplayControl] && bool_options[FreeRDP_MultiTouchInput]);
+    assert(bool_options[FreeRDP_SupportDynamicChannels]);
+    assert(!bool_options[FreeRDP_AudioCapture] && !bool_options[FreeRDP_AudioPlayback]);
+    assert(!bool_options[FreeRDP_RedirectDrives] && !bool_options[FreeRDP_RedirectHomeDrive]);
+    assert(!bool_options[FreeRDP_RedirectClipboard] && !bool_options[FreeRDP_SupportGraphicsPipeline]);
+    assert(uint_options[FreeRDP_DesktopWidth] == 1280 && uint_options[FreeRDP_DesktopHeight] == 720);
+    assert(configure_session_profile(NULL, 1280, 720, TRUE, TRUE));
+    assert(!bool_options[FreeRDP_NetworkAutoDetect] && !bool_options[FreeRDP_DeviceRedirection]);
+    assert(!bool_options[FreeRDP_SupportDisplayControl] && !bool_options[FreeRDP_MultiTouchInput]);
+    assert(!bool_options[FreeRDP_SupportDynamicChannels]);
+    RdpSyncContext profile_context = {0}; freerdp profile_instance = {0};
+    profile_instance.context = &profile_context.common.context;
+    assert(load_session_channels(&profile_instance));
+    for (loader_mutation = 1; loader_mutation <= 4; ++loader_mutation) {
+        assert(configure_session_profile(NULL, 1280, 720, TRUE, FALSE));
+        uint_options[FreeRDP_DeviceCount] = 0;
+        assert(!load_session_channels(&profile_instance));
+    }
+    loader_mutation = 0;
+
     char root[] = "/tmp/rdpsync-runtime-test-XXXXXX";
     assert(mkdtemp(root));
     char home[PATH_MAX], cache[PATH_MAX], other[PATH_MAX], missing[PATH_MAX], file[PATH_MAX];
@@ -52,5 +99,5 @@ int main(void) {
     assert(!strcmp(getenv("HOME"), home));
     g_session = NULL;
     assert(unlink(file) == 0 && rmdir(home) == 0 && rmdir(cache) == 0 && rmdir(other) == 0 && rmdir(root) == 0);
-    puts("native runtime: passed actual JNI HOME/private XDG bootstrap, validation, idempotence and active-session protection");
+    puts("native runtime: passed actual JNI HOME/private XDG bootstrap, shared profiles, post-load privacy guards and active-session protection");
 }

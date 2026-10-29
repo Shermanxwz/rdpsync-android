@@ -41,6 +41,9 @@ jobs:
         with:
           path: build/freerdp-android
           key: native-arm64-${{ runner.os }}-${{ hashFiles('scripts/native-env.sh', 'scripts/build-openssl-android.sh', 'scripts/build-freerdp-android.sh') }}
+          # Reuse only intermediates; the pinned source check and CMake/native build always run.
+          restore-keys: |
+            native-arm64-${{ runner.os }}-
       - name: Build real FreeRDP/OpenSSL/JNI runtime
         run: bash scripts/build-native.sh
       - name: Native production-source regression tests

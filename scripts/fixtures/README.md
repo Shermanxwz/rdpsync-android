@@ -49,3 +49,16 @@ The same emulator invocation also executes `CredentialStorageInstrumentedTest`, 
 The instrumentation pumps Compose's test frame clock while waiting for real-time network work. It copies screenshots/JSON to shell-owned `/sdcard/Download/rdpsync-evidence` before AGP/UTP uninstalls the test app, so evidence survives test cleanup.
 
 Session teardown allows up to 90 seconds: xorgxrdp 0.9.x clamps disconnected-session cleanup to a 60-second minimum and checks on a timer. The test waits for the old desktop to exit rather than accepting stale session state.
+
+### Optional offline software-emulator smoke
+
+With an existing Android SDK emulator and `system-images;android-29;default;x86_64`,
+`bash scripts/fixtures/run-local-native-smoke.sh APP_X86_64_APK TEST_APK [OUTPUT_DIRECTORY]` creates an
+isolated workspace AVD, boots without KVM, and runs the real native-context/channel
+smoke without any RDP server or network connection. It bounds boot to 300 seconds
+and instrumentation to 180 seconds, records source SHA/status plus APK hashes and
+logs, and stops only its own emulator. It does not download SDK components, build
+APKs, change signing, create OS users, or modify host network policy. Set `JAVA_HOME`
+and `ANDROID_HOME` as needed. `RDP_SMOKE_CLASSES` can also include
+`com.rdp.sync.security.CredentialStorageInstrumentedTest` for genuine Android
+Keystore regression coverage. Software-emulation timings are not performance data.

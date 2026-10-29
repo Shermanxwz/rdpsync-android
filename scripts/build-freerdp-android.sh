@@ -17,6 +17,8 @@ fi
 # Verify the exact tested upstream commit, rather than silently accepting a moved tag.
 [[ "$(git -C "$FREERDP_DIR" rev-parse HEAD)" == "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc" ]] || { echo "Unexpected FreeRDP source revision" >&2; exit 1; }
 
+# RDPDR requires RDPSND sys:fake even with audio playback disabled. Build that
+# protocol dependency without Android/host audio backends or microphone capture.
 # Build FreeRDP
 BUILD_OUT="$BUILD_DIR/build-$BUILD_ARCH"
 mkdir -p "$BUILD_OUT"
@@ -37,6 +39,10 @@ cmake "$FREERDP_DIR" \
     -DWITH_CUPS=OFF \
     -DWITH_PULSE=OFF \
     -DWITH_ALSA=OFF \
+    -DWITH_OPENSLES=OFF \
+    -DWITH_AAUDIO=OFF \
+    -DWITH_OSS=OFF \
+    -DWITH_SNDIO=OFF \
     -DWITH_FFMPEG=OFF \
     -DWITH_OPENH264=OFF \
     -DWITH_WEBVIEW=OFF \
@@ -83,7 +89,9 @@ cmake "$FREERDP_DIR" \
     -DCHANNEL_RDPECAM=OFF \
     -DCHANNEL_RDPEMSC=OFF \
     -DCHANNEL_RDPGFX=OFF \
-    -DCHANNEL_RDPSND=OFF \
+    -DCHANNEL_RDPSND=ON \
+    -DCHANNEL_RDPSND_CLIENT=ON \
+    -DCHANNEL_RDPSND_SERVER=OFF \
     -DCHANNEL_REMDESK=OFF \
     -DCHANNEL_SERIAL=OFF \
     -DCHANNEL_SMARTCARD=OFF \

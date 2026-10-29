@@ -321,6 +321,7 @@ private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Devi
                 }
             }
             Text("画质上限", style = MaterialTheme.typography.titleSmall)
+            Text("固定分辨率且关闭自适应时，画质仅改变本地帧率上限，不会暗中降低远程分辨率。", style = MaterialTheme.typography.bodySmall)
             DisplayQuality.entries.forEach { quality ->
                 Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(settings.quality == quality, { onChange(settings.copy(quality = quality)) }); Text(quality.title) }
             }

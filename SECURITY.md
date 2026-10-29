@@ -12,6 +12,18 @@ Report the app version, Android version and minimal reproduction steps. Do not i
 - A changed certificate is rejected and requires a new explicit decision with an old/new fingerprint warning. There is no automatic trust of changed certificates or redirected/gateway endpoints.
 - Trust-on-first-use pinning is not an enterprise PKI/revocation-management system. Legitimate certificate renewals require deliberate reapproval.
 
+### Checking the fingerprint independently
+
+Ask the administrator, through an already trusted channel or the server console, for the **leaf certificate actually bound to the direct RDP listener**. Export only its public certificate as a single DER-encoded `.cer` file; do not export or share a private key/PFX. Microsoft documents [public certificate export](https://learn.microsoft.com/en-us/powershell/module/pki/export-certificate) and [RDP listener certificate selection](https://learn.microsoft.com/en-us/troubleshoot/windows-server/remote/remote-desktop-listener-certificate-configurations).
+
+On a trusted Windows computer, hash that DER file using [certutil](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/certutil#-hashfile):
+
+```bat
+certutil -hashfile "rdp-server.cer" SHA256
+```
+
+Compare all 64 hexadecimal characters with the app. Windows' usual 40-character SHA-1 thumbprint is **not** this SHA-256 fingerprint. Hashing PEM text, a root certificate or a PFX file gives a different value. Do not accept a change merely because the displayed host/name looks familiar; investigate and verify it independently first. This procedure does not require changing the server's certificate or policy.
+
 ## Local Credentials
 
 RDP passwords and the saved WebDAV password are encrypted with a device-bound Android Keystore AES-256-GCM key and a fresh random IV. Profile metadata, usernames and certificate fingerprints are not secrets encrypted by this feature. Passwords are necessarily available in process memory while connecting or explicitly exporting them; protection against a compromised/rooted device is not claimed.

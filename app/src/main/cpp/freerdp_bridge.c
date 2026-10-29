@@ -315,7 +315,10 @@ static BOOL pre_connect(freerdp* instance) {
         return FALSE;
     rdpAutoDetect* autodetect = autodetect_get(instance->context);
     if (autodetect) autodetect->NetworkCharacteristicsResult = network_characteristics;
-    return freerdp_client_load_channels(instance);
+    /* FreeRDP 3.32's common ClientNew installs LoadChannels. Core calls it via
+     * utils_reload_channels after settings validation; loading here as well
+     * duplicates/mutates addin arguments and can enable unwanted audio flags. */
+    return TRUE;
 }
 static BOOL post_connect(freerdp* instance) {
     RdpSession* session = s_from_ctx(instance->context);
@@ -435,8 +438,75 @@ static BOOL configure_security(rdpSettings* settings) {
 #undef SECURITY_SETTING
     return TRUE;
 }
+/* The real connect path and Android's offline runtime gate MUST use identical
+ * display/channel options, otherwise a missing addin goes undetected by smoke. */
+static BOOL configure_session_profile(rdpSettings* settings, int width, int height, BOOL touch, BOOL compatibility) {
+#define PROFILE_SETTING(type, key, value) do { \
+    if (!freerdp_settings_set_##type(settings, key, value)) { \
+        LOGE("Session profile initialization failed: %s", #key); return FALSE; \
+    } \
+} while (0)
+    PROFILE_SETTING(bool, FreeRDP_AutoLogonEnabled, TRUE);
+    PROFILE_SETTING(uint32, FreeRDP_DesktopWidth, width);
+    PROFILE_SETTING(uint32, FreeRDP_DesktopHeight, height);
+    PROFILE_SETTING(uint16, FreeRDP_DesktopOrientation, ORIENTATION_LANDSCAPE);
+    PROFILE_SETTING(uint32, FreeRDP_DesktopPhysicalWidth, width * 254 / 960);
+    PROFILE_SETTING(uint32, FreeRDP_DesktopPhysicalHeight, height * 254 / 960);
+    PROFILE_SETTING(bool, FreeRDP_SupportMonitorLayoutPdu, !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_SupportDisplayControl, !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_DynamicResolutionUpdate, !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_MultiTouchInput, touch && !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_SynchronousDynamicChannels, TRUE);
+    /* The established client transport is event-driven/nonblocking. Do not spin
+     * inside each write waiting for a slow/zero-window peer to drain its socket;
+     * FreeRDP's write-ready events flush the ordered buffered BIO instead. */
+    PROFILE_SETTING(bool, FreeRDP_WaitForOutputBufferFlush, FALSE);
+    PROFILE_SETTING(uint32, FreeRDP_DesktopScaleFactor, 100);
+    PROFILE_SETTING(uint32, FreeRDP_DeviceScaleFactor, 100);
+    PROFILE_SETTING(bool, FreeRDP_NetworkAutoDetect, !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_SupportHeartbeatPdu, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_SupportMultitransport, FALSE);
+    /* RDP8 autodetect requires the rdpdr transport, NOT actual redirected devices. */
+    PROFILE_SETTING(bool, FreeRDP_DeviceRedirection, !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_RedirectDrives, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_RedirectHomeDrive, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_RedirectClipboard, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_RedirectSmartCards, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_RedirectPrinters, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_RedirectSerialPorts, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_RedirectParallelPorts, FALSE);
+    PROFILE_SETTING(uint32, FreeRDP_ColorDepth, 32);
+    PROFILE_SETTING(uint32, FreeRDP_RequestedProtocols, 0x0000000b);
+    /* RDPDR pulls in rdpsnd sys:fake for protocol compatibility, not playback.
+     * Both microphone capture and actual playback remain explicitly disabled. */
+    PROFILE_SETTING(bool, FreeRDP_AudioPlayback, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_AudioCapture, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_SupportGraphicsPipeline, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_GfxH264, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_GfxAVC444, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_GfxAVC444v2, FALSE);
+    PROFILE_SETTING(bool, FreeRDP_SupportDynamicChannels, !compatibility);
+#undef PROFILE_SETTING
+    return TRUE;
+}
+static BOOL load_session_channels(freerdp* instance) {
+    if (!freerdp_client_load_channels(instance)) return FALSE;
+    const rdpSettings* settings = instance->context->settings;
+    /* Check AFTER upstream dependency expansion, not only our initial options.
+     * A duplicate load can turn fake rdpsnd into AudioPlayback=TRUE. */
+    if (freerdp_settings_get_bool(settings, FreeRDP_AudioPlayback) ||
+        freerdp_settings_get_bool(settings, FreeRDP_AudioCapture) ||
+        freerdp_settings_get_uint32(settings, FreeRDP_DeviceCount) != 0) {
+        LOGE("Channel loading unexpectedly enabled audio or device redirection");
+        RdpSession* session = s_from_ctx(instance->context);
+        if (session) s_error(session, "通道隐私设置不一致，已阻止连接");
+        return FALSE;
+    }
+    return TRUE;
+}
 static BOOL client_ctx_new(freerdp* instance, rdpContext* context) {
     (void)context;
+    instance->LoadChannels = load_session_channels;
     instance->PreConnect = pre_connect;
     instance->PostConnect = post_connect;
     instance->PostDisconnect = post_disconnect;
@@ -748,16 +818,28 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
     }
     const char* failed = "运行目录";
     int result = 0;
-    freerdp* instance = NULL;
     if (g_runtime_home[0]) {
-        failed = "FreeRDP 上下文";
-        instance = create_instance(NULL);
-        if (instance) {
-            failed = "安全设置";
-            result = configure_security(instance->context->settings);
+        result = 1;
+        /* Test normal (DISP/RDPEI/autodetect/RDPDR) and compatibility profiles.
+         * No connect() call or credentials: addins are loaded but not connected. */
+        for (int compatibility = 0; compatibility < 2 && result; ++compatibility) {
+            failed = "FreeRDP 上下文";
+            freerdp* instance = create_instance(NULL);
+            if (!instance) { result = 0; break; }
+            failed = "安全与通道设置";
+            result = configure_security(instance->context->settings) &&
+                configure_session_profile(instance->context->settings, 1280, 720, TRUE, compatibility);
+            if (result) {
+                failed = compatibility ? "兼容模式通道加载" : "完整模式通道加载";
+                result = instance->LoadChannels && instance->LoadChannels(instance);
+            }
+            /* ContextFree only frees the channel container; Disconnect sends
+             * CHANNEL_EVENT_TERMINATED to free loaded addins. There is no socket
+             * or canceled-connect error here, so this cannot send network data. */
+            (void)freerdp_disconnect(instance);
+            freerdp_client_context_free(instance->context);
         }
     }
-    if (instance) freerdp_client_context_free(instance->context);
     pthread_mutex_lock(&g_lock);
     if (result) g_startup_error[0] = 0;
     else snprintf(g_startup_error, sizeof(g_startup_error), "远程桌面运行检查失败（阶段：%s）", failed);
@@ -833,36 +915,10 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
         freerdp_settings_set_string(settings, FreeRDP_UserSpecifiedServerName,
             server_name && *server_name ? server_name : NULL) && configure_security(settings);
     if (!ok) { session_destroy(session); goto failure; }
-    freerdp_settings_set_bool(settings, FreeRDP_AutoLogonEnabled, TRUE);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, width);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, height);
-    freerdp_settings_set_uint16(settings, FreeRDP_DesktopOrientation, ORIENTATION_LANDSCAPE);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopPhysicalWidth, width * 254 / 960);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopPhysicalHeight, height * 254 / 960);
-    freerdp_settings_set_bool(settings, FreeRDP_SupportMonitorLayoutPdu, !compatibility);
-    freerdp_settings_set_bool(settings, FreeRDP_SupportDisplayControl, !compatibility);
-    freerdp_settings_set_bool(settings, FreeRDP_DynamicResolutionUpdate, !compatibility);
-    freerdp_settings_set_bool(settings, FreeRDP_MultiTouchInput, touch && !compatibility);
-    freerdp_settings_set_bool(settings, FreeRDP_SynchronousDynamicChannels, TRUE);
-    /* The established client transport is event-driven/nonblocking. Do not spin
-     * inside each write waiting for a slow/zero-window peer to drain its socket;
-     * FreeRDP's write-ready events flush the ordered buffered BIO instead. */
-    freerdp_settings_set_bool(settings, FreeRDP_WaitForOutputBufferFlush, FALSE);
-    freerdp_settings_set_uint32(settings, FreeRDP_DesktopScaleFactor, 100);
-    freerdp_settings_set_uint32(settings, FreeRDP_DeviceScaleFactor, 100);
-    freerdp_settings_set_bool(settings, FreeRDP_NetworkAutoDetect, !compatibility);
-    freerdp_settings_set_bool(settings, FreeRDP_SupportHeartbeatPdu, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_SupportMultitransport, FALSE);
-    /* RDP8 autodetect requires the rdpdr transport, NOT actual redirected devices. */
-    freerdp_settings_set_bool(settings, FreeRDP_DeviceRedirection, !compatibility);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectDrives, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectSmartCards, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectPrinters, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectSerialPorts, FALSE);
-    freerdp_settings_set_bool(settings, FreeRDP_RedirectParallelPorts, FALSE);
-    freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32);
-    freerdp_settings_set_uint32(settings, FreeRDP_RequestedProtocols, 0x0000000b);
-    freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE);
+    failure_stage = "显示与通道设置";
+    if (!configure_session_profile(settings, width, height, touch, compatibility)) {
+        session_destroy(session); goto failure;
+    }
     snprintf(session->diag, sizeof(session->diag), "engine=FreeRDP %s\ncodec=GDI (no H.264)\n", FREERDP_VERSION_FULL);
     s_diag(session, compatibility ? "connection=compatibility-retry" : "display-control=requested");
     s_diag(session, touch && !compatibility ? "rdpei=requested" : "rdpei=disabled");
