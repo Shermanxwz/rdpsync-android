@@ -209,7 +209,28 @@ class RdpFixtureInstrumentedTest {
             assertEquals(beforeRotateDesktopPid, fixtureState().getInt("desktop_pid"))
             val fullscreenWidth = RdpConnector.getWidth()
             val fullscreenHeight = RdpConnector.getHeight()
-            assertColor(fullscreenWidth - 80, fullscreenHeight - 80, Color.rgb(17, 34, 51))
+            // The bottom-right now intentionally contains the floating handle.
+            // Prove pixels in the newly exposed bottom strip, not the overlay.
+            val newRegionX = fullscreenWidth / 2
+            val newRegionY = fullscreenHeight - 80
+            assertTrue("Sample must be below the prior compact remote framebuffer", newRegionY >= compactHeight)
+            val newRegionScreen = requireNotNull(remoteScreenPoint(newRegionX.toFloat(), newRegionY.toFloat()))
+            val handle = compose.onNode(hasContentDescription("会话菜单") and hasClickAction())
+                .assertIsDisplayed().fetchSemanticsNode().boundsInWindow
+            val rootScreen = IntArray(2); val rootWindow = IntArray(2)
+            compose.runOnUiThread {
+                compose.activity.window.decorView.getLocationOnScreen(rootScreen)
+                compose.activity.window.decorView.getLocationInWindow(rootWindow)
+            }
+            val handleScreen = android.graphics.RectF(handle.left + rootScreen[0] - rootWindow[0],
+                handle.top + rootScreen[1] - rootWindow[1], handle.right + rootScreen[0] - rootWindow[0],
+                handle.bottom + rootScreen[1] - rootWindow[1])
+            assertFalse("Background pixel must not sample intentional session handle", handleScreen.contains(newRegionScreen.x, newRegionScreen.y))
+            assertColor(newRegionX, newRegionY, Color.rgb(17, 34, 51))
+            measurements.put("fullscreen_new_region_exact_rgb", JSONObject().put("remote_x", newRegionX)
+                .put("remote_y", newRegionY).put("prior_remote_height", compactHeight)
+                .put("screen_x", newRegionScreen.x).put("screen_y", newRegionScreen.y)
+                .put("handle_screen_bounds", handleScreen.toShortString()).put("outside_handle", true))
             screenshot("04f-landscape-true-fullscreen")
             exerciseFullscreenMenuBack(beforeRotateGeneration, beforeRotateSessionId, beforeRotateDesktopPid)
             exerciseTransientSystemBars(fullscreenWidth, fullscreenHeight, beforeRotateGeneration,

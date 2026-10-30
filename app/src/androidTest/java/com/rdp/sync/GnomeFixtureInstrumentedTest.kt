@@ -147,11 +147,24 @@ class GnomeFixtureInstrumentedTest {
                 // virtual desktop. Observe real session-loop polls after the request.
                 var previous = RdpConnector.pollDisplayStatus()
                 var polls = 0
-                waitFor("mirror mode retains its actual monitor after requested resize", 12_000) {
-                    val current = RdpConnector.pollDisplayStatus()
-                    if (current !== previous) { previous = current; polls++ }
-                    assertTrue("mirror geometry must remain actual physical/virtual primary size", actualSize(1024,768) && serverSize(1024,768))
-                    polls >= 3
+                val pollTimeline = JSONArray()
+                val pollEvidence = JSONObject().put("wall_start_ms", SystemClock.elapsedRealtime())
+                    .put("compose_start_ms", compose.mainClock.currentTime).put("fresh_polls", pollTimeline)
+                measurements.put("mirror_poll_observation", pollEvidence)
+                try {
+                    waitFor("mirror mode retains its actual monitor after requested resize", 12_000) {
+                        val current = RdpConnector.pollDisplayStatus()
+                        if (current !== previous) {
+                            previous = current; polls++
+                            pollTimeline.put(JSONObject().put("wall_ms", SystemClock.elapsedRealtime())
+                                .put("compose_ms", compose.mainClock.currentTime).put("status", current.toString()))
+                        }
+                        assertTrue("mirror geometry must remain actual physical/virtual primary size", actualSize(1024,768) && serverSize(1024,768))
+                        polls >= 3
+                    }
+                } finally {
+                    pollEvidence.put("wall_end_ms", SystemClock.elapsedRealtime())
+                        .put("compose_end_ms", compose.mainClock.currentTime).put("observed_fresh_polls", polls)
                 }
                 assertSession(generation, sessionId, desktopPid)
                 assertColor(40,40,Color.RED)
@@ -250,7 +263,10 @@ class GnomeFixtureInstrumentedTest {
         val deadline=SystemClock.elapsedRealtime()+timeout
         var last: Throwable?=null
         while(SystemClock.elapsedRealtime()<deadline) {
-            compose.mainClock.advanceTimeBy(32)
+            // Match the established real-RDP harness: advance Compose's independent
+            // delay clock and drain Android layout, not merely real Thread.sleep.
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
             try { if(predicate()) return } catch(e: java.io.IOException) { last=e }
             SystemClock.sleep(100)
         }

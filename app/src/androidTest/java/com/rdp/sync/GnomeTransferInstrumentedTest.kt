@@ -293,20 +293,61 @@ class GnomeTransferInstrumentedTest {
     }
     private fun tapDocumentLabel(label: String, longPress: Boolean = false) = tapDocumentAction(label, longPress) { it.text?.toString() == label }
     private fun tapDocumentAction(reason: String, longPress: Boolean = false, predicate: (AccessibilityNodeInfo) -> Boolean) {
+        val attempt = JSONObject().put("reason", reason).put("long_press", longPress)
+            .put("readiness_start_ms", SystemClock.elapsedRealtime())
+        pickerEvents.put(attempt)
+        val observations = JSONArray()
+        attempt.put("readiness_observations", observations)
+        val deadline = SystemClock.elapsedRealtime() + 15_000
         var target: AccessibilityNodeInfo? = null
-        waitFor("observed DocumentsUI target: $reason", 15_000) {
-            val nodes = documentNodes(predicate)
-            if (nodes.size == 1) { target = nodes.single(); true }
-            else { nodes.forEach { it.recycle() }; false }
+        while (SystemClock.elapsedRealtime() < deadline && target == null) {
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
+            val candidates = documentNodes(predicate)
+            if (candidates.size != 1) {
+                candidates.forEach { it.recycle() }; SystemClock.sleep(100); continue
+            }
+            val first = candidates.single()
+            try {
+                val before = Rect().also(first::getBoundsInScreen)
+                val observation = JSONObject().put("before_idle_ms", SystemClock.elapsedRealtime())
+                    .put("window_id", first.windowId).put("package", first.packageName)
+                    .put("bounds", before.toShortString())
+                assertTrue("Picker readiness observations must stay bounded", observations.length() < 32)
+                observations.put(observation)
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                assertTrue("Picker readiness deadline expired", remaining > 0)
+                // Wait for actual accessibility-event quiet, then requery the same
+                // live node. Never resend a gesture if navigation does not occur.
+                automation.waitForIdle(500, minOf(5_000, remaining))
+                val freshCandidates = documentNodes(predicate)
+                if (freshCandidates.size == 1) {
+                    val fresh = freshCandidates.single()
+                    val after = Rect().also(fresh::getBoundsInScreen)
+                    val stable = first == fresh && first.windowId == fresh.windowId &&
+                        first.packageName?.toString() == fresh.packageName?.toString() && before == after && !after.isEmpty
+                    observation.put("after_idle_ms", SystemClock.elapsedRealtime())
+                        .put("after_bounds", after.toShortString()).put("same_live_node_and_geometry", stable)
+                    if (stable) target = fresh else fresh.recycle()
+                } else freshCandidates.forEach { it.recycle() }
+            } finally { first.recycle() }
         }
-        val node = requireNotNull(target)
+        val node = requireNotNull(target) { "No stable unique observed DocumentsUI target: $reason" }
         try {
+            assertTrue("Picker readiness exceeded original deadline before gesture", SystemClock.elapsedRealtime() < deadline)
+            val expectedBounds = Rect().also(node::getBoundsInScreen)
+            val expectedWindow = node.windowId
+            val expectedPackage = node.packageName?.toString()
             assertTrue(node.refresh()); assertTrue(node.isVisibleToUser && node.isEnabled); assertTrue(predicate(node))
-            val bounds = Rect(); node.getBoundsInScreen(bounds); assertFalse(bounds.isEmpty)
-            pickerEvents.put(JSONObject().put("reason", reason).put("package", node.packageName)
-                .put("resource_id", node.viewIdResourceName).put("bounds", bounds.toShortString())
-                .put("long_press", longPress).put("uptime", SystemClock.uptimeMillis()))
+            val bounds = Rect(); node.getBoundsInScreen(bounds)
+            assertTrue("Picker target changed before physical gesture", !bounds.isEmpty && bounds == expectedBounds &&
+                node.windowId == expectedWindow && node.packageName?.toString() == expectedPackage)
+            attempt.put("package", node.packageName).put("resource_id", node.viewIdResourceName)
+                .put("window_id", node.windowId).put("bounds", bounds.toShortString())
+                .put("uptime_before_down", SystemClock.uptimeMillis())
             physicalTap(bounds.exactCenterX(), bounds.exactCenterY(), if (longPress) 650 else 40)
+            attempt.put("uptime_after_up", SystemClock.uptimeMillis())
+            screenshot("picker-${pickerEvents.length()}-after-single-gesture")
         } finally { node.recycle() }
     }
     private fun documentNodes(predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
@@ -347,7 +388,8 @@ class GnomeTransferInstrumentedTest {
     private fun waitFor(reason: String, timeout: Long = 30_000, predicate: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + timeout
         while (SystemClock.elapsedRealtime() < deadline) {
-            compose.mainClock.advanceTimeBy(32)
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
             if (predicate()) return
             SystemClock.sleep(100)
         }

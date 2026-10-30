@@ -61,6 +61,19 @@ class TransferStorageInstrumentedTest {
 
     @Test fun realFrameworkProviderImportExportExactSyntheticBytesAndHashes()=runBlocking {
         withContext(Dispatchers.IO) {
+            // A real Binder query launches the manifest provider in the test APK's own
+            // process. The wrapped fixture below shares the target APK class loader and
+            // would otherwise miss a standalone-provider runtime dependency failure.
+            val instrumentation=InstrumentationRegistry.getInstrumentation()
+            instrumentation.uiAutomation.adoptShellPermissionIdentity("android.permission.MANAGE_DOCUMENTS")
+            try {
+                instrumentation.targetContext.contentResolver.query(
+                    DocumentsContract.buildRootsUri(authority),
+                    arrayOf(DocumentsContract.Root.COLUMN_ROOT_ID),null,null,null
+                ).use { roots ->
+                    assertNotNull(roots);assertTrue(roots!!.moveToFirst());assertEquals("root",roots.getString(0))
+                }
+            } finally {instrumentation.uiAutomation.dropShellPermissionIdentity()}
             val bytes=ByteArray(262_149){index->((index * 31 + 7) and 255).toByte()}
             provider.seed("source","synthetic.bin",bytes)
             provider.seed("original","keep.bin",byteArrayOf(9,8,7))
