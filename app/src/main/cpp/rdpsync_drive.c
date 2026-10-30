@@ -194,6 +194,9 @@ static uint32_t process_create(RdpDrive* d, IRP* irp) {
     uint32_t handle = 0, information = 0;
     status = rdp_ws_open(d->workspace, d->owner, path, get32(p), get32(p + 16),
         get32(p + 20), get32(p + 24), d->mode == 1, get64(p + 4), &handle, &information);
+    /* Match stock FreeRDP CREATE: a missing name is NO_SUCH_FILE on wire.
+     * Keep broker/JNI errors and all other broker errors distinct. */
+    if (status == RDP_WS_OBJECT_NAME_NOT_FOUND) return STATUS_NO_SUCH_FILE;
     if (status) return status;
     if (!handle || !output_room(irp, 5)) {
         if (handle) (void)rdp_ws_close(d->workspace, d->owner, handle);

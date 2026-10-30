@@ -221,4 +221,41 @@ static void wire_separator_tests(void) {
     }
 }
 
-int main(void){wire_separator_tests();protocol_owner=pthread_self();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
+
+/* FreeRDP's CREATE error mapping returns NO_SUCH_FILE for a missing name.
+ * xrdp's metadata lookup recognizes this status, not OBJECT_NAME_NOT_FOUND. */
+static void missing_name_wire_status_tests(void) {
+    Fixture f; setup(&f, 1);
+    BYTE body[256] = {0};
+    put32(body, FILE_READ_ATTRIBUTES | SYNCHRONIZE); put32(body + 16, 7);
+    put32(body + 20, FILE_OPEN);
+    size_t n = path_bytes("\\missing-leaf.txt", body + 32) + 2;
+    put32(body + 28, (uint32_t)n);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NO_SUCH_FILE);
+    assert(sent_size == 21 && get32(sent + 16) == 0 && sent[20] == 0);
+    put32(body, FILE_READ_DATA | SYNCHRONIZE); put32(body + 24, FILE_SYNCHRONOUS_IO_NONALERT);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NO_SUCH_FILE);
+    /* Do not translate denial into absence, or alter local broker semantics. */
+    put32(body, FILE_WRITE_DATA | SYNCHRONIZE); put32(body + 20, FILE_CREATE);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_ACCESS_DENIED);
+    uint32_t h = 0, info = 0;
+    assert(rdp_ws_open(f.ws, 0, "missing-leaf.txt", FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        7, FILE_OPEN, 0, false, 0, &h, &info) == RDP_WS_OBJECT_NAME_NOT_FOUND);
+    put32(body, FILE_READ_ATTRIBUTES | SYNCHRONIZE); put32(body + 20, FILE_OPEN); put32(body + 24, 0);
+    memset(body + 32, 0, sizeof(body)-32);
+    n = path_bytes("\\..\\escape", body+32) + 2; put32(body+28, (uint32_t)n);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_OBJECT_NAME_INVALID);
+    memset(body + 32, 0, sizeof(body)-32);
+    n = path_bytes("\\absent-parent\\leaf", body+32) + 2; put32(body+28, (uint32_t)n);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NO_SUCH_FILE);
+    /* An existing regular parent is a distinct structural error, not absence. */
+    assert(!rdp_ws_open(f.ws, 0, "regular-parent", GENERIC_READ | GENERIC_WRITE,
+        7, FILE_CREATE, FILE_NON_DIRECTORY_FILE, false, 0, &h, &info));
+    assert(!rdp_ws_close(f.ws, 0, h));
+    memset(body + 32, 0, sizeof(body)-32);
+    n = path_bytes("regular-parent/leaf", body+32) + 2; put32(body+28, (uint32_t)n);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_A_DIRECTORY);
+    cleanup(&f);
+}
+
+int main(void){protocol_owner=pthread_self();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
