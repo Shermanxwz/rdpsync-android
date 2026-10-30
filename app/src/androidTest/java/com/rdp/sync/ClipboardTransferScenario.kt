@@ -527,6 +527,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             if (observations.length() < 64) observations.put(JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime())
                 .put("nodes", JSONArray().also { values -> ordered.forEach { node ->
                     values.put(JSONObject().put("text", node.text).put("enabled", node.isEnabled)
+                        .put("window_id", node.windowId).put("node_identity_hash", node.hashCode())
                         .put("bounds", Rect().also(node::getBoundsInScreen).toShortString()))
                 } }))
             ordered.map { requireNotNull(it.text).toString() }
@@ -537,15 +538,19 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         // Actual API35 ACTION_OPEN_DOCUMENT_TREE has no roots drawer in this
         // single-volume view. Navigate only its observed internal-storage root
         // or the already selected exact owned destination, never grant the root.
-        var crumbs = emptyList<String>()
-        waitFor("observed tree-picker breadcrumb", 15_000) {
-            crumbs = documentBreadcrumbs()
-            crumbs.isNotEmpty()
-        }
         // Pinned AOSP15 ExternalStorageProvider uses Settings.Global.DEVICE_NAME
         // for the primary volume title; do not guess it from Build.MODEL.
         val rootTitle = shell("settings get global device_name")
         require(rootTitle.isNotBlank() && rootTitle != "null")
+        var crumbs = emptyList<String>()
+        // A newly opened picker may briefly expose duplicate breadcrumb nodes.
+        // They remain raw evidence and NOT ready: never dedupe/choose the first
+        // node or branch on a merely nonempty transition snapshot.
+        val ownedPaths = setOf(listOf("Download", folder, "destination"), listOf(rootTitle, "Download", folder, "destination"))
+        waitFor("observed unambiguous exact tree-picker path", 15_000) {
+            crumbs = documentBreadcrumbs()
+            crumbs == listOf(rootTitle) || crumbs in ownedPaths
+        }
         val navigation = JSONObject().put("initial_breadcrumbs", JSONArray(crumbs))
             .put("expected_internal_root_title", rootTitle)
             .put("expected_owned_folder", folder).put("elapsed_ms", SystemClock.elapsedRealtime())
