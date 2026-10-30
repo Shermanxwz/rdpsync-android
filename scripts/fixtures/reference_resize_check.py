@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Observe official X11 client without changing protocol/security state checks."""
 import json
+import hashlib
 import os
 import pathlib
 import subprocess
@@ -11,7 +12,8 @@ from PIL import Image
 
 out = pathlib.Path(os.environ['RDPSYNC_REFERENCE_OUT'])
 pid = int(os.environ['RDPSYNC_REFERENCE_PID'])
-result = {'passed': False, 'stage': 'initial'}
+result = {'schema_version': 2, 'run_id': os.environ['RDPSYNC_REFERENCE_RUN_ID'],
+          'client_pid': pid, 'passed': False, 'stage': 'initial', 'frames': {}}
 
 
 def alive():
@@ -64,6 +66,8 @@ def screenshot(window, name, width, height, clicks=None):
         actual = image.getpixel(point)
         if actual != expected:
             raise AssertionError(f'Received RGB mismatch at {point}: {actual}')
+    result['frames'][name] = {'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+                            'width': width, 'height': height, 'clicks': clicks}
     return image.size
 
 
@@ -98,6 +102,7 @@ try:
     wait_for_paint(window, 'after.png', 1280, 720, resized['clicks'])
     result['stage'] = 'post-resize-input'
     before_clicks = state()['clicks']
+    result['clicks_before_post_resize'] = before_clicks
     subprocess.run(['xdotool', 'mousemove', '--window', window, '40', '140', 'click', '1'], check=True, timeout=5)
     after = wait_for(lambda: (s if (s := state())['clicks'] > before_clicks else None), 10)
     if after['session_id'] != initial['session_id']:

@@ -17,6 +17,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
@@ -136,6 +138,43 @@ class RdpFixtureInstrumentedTest {
             measurements.put("rotation_preserved_desktop_session_id", beforeRotateSessionId)
             assertColor(232, 40, Color.BLUE)
             screenshot("04-landscape-live-resize")
+            val compactWidth = RdpConnector.getWidth()
+            val compactHeight = RdpConnector.getHeight()
+            val compactBounds = desktopBounds()
+            measurements.put("landscape_compact_viewport", compactBounds)
+            assertTrue("compact landscape desktop must occupy at least 72% of the full window: $compactBounds",
+                compactBounds.getDouble("height_fraction_of_window") >= 0.72)
+            listOf("切换到触控板", "显示或隐藏键盘", "显示与网络设置", "断开", "展开会话工具").forEach { label ->
+                val control = hasContentDescription(label) and hasClickAction()
+                compose.onAllNodes(control).assertCountEquals(1)
+                compose.onNode(control).assertIsDisplayed()
+            }
+            val compactFrame = RdpConnector.nativeGetFrameId()
+            compose.onNodeWithContentDescription("展开会话工具").performClick()
+            waitFor("expanded landscape controls cause a real smaller framebuffer", 20_000) {
+                RdpConnector.isConnected() && RdpConnector.getHeight() < compactHeight &&
+                    RdpConnector.nativeGetFrameId() > compactFrame && fixtureSize(RdpConnector.getWidth(), RdpConnector.getHeight())
+            }
+            assertEquals(beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
+            assertEquals(beforeRotateSessionId, fixtureState().getString("session_id"))
+            assertEquals(beforeRotateDesktopPid, fixtureState().getInt("desktop_pid"))
+            assertColor(40, 40, Color.RED)
+            measurements.put("landscape_expanded_viewport", desktopBounds())
+            screenshot("04b-landscape-expanded-controls")
+            val expandedFrame = RdpConnector.nativeGetFrameId()
+            compose.onNodeWithContentDescription("收起会话工具").performClick()
+            waitFor("compact landscape framebuffer restored without reconnect", 20_000) {
+                RdpConnector.isConnected() && actualSize(compactWidth, compactHeight) && fixtureSize(compactWidth, compactHeight) &&
+                    RdpConnector.nativeGetFrameId() > expandedFrame
+            }
+            assertEquals(beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
+            assertEquals(beforeRotateSessionId, fixtureState().getString("session_id"))
+            assertEquals(beforeRotateDesktopPid, fixtureState().getInt("desktop_pid"))
+            assertColor(compactWidth - 80, compactHeight - 80, Color.rgb(17, 34, 51))
+            measurements.put("landscape_controls_preserved_session", true)
+            screenshot("04c-landscape-compact-restored")
+            exerciseImePreservingRemoteSession(compactWidth, compactHeight, beforeRotateGeneration,
+                beforeRotateSessionId, beforeRotateDesktopPid, desktopBounds().getInt("height"))
             tapAndObserve()
             measurements.put("native_telemetry_normal", RdpConnector.nativeGetTelemetry().joinToString(","))
             measurements.put("display_control_state", RdpConnector.nativeGetDisplayControlState())
@@ -209,6 +248,7 @@ class RdpFixtureInstrumentedTest {
             waitFor("explicitly approved rotated certificate frame", 60_000) { RdpConnector.isConnected() && fixtureReady() }
             assertTrue(controlState().getInt("auth_requests") > beforeChangedTrust)
             measurements.put("changed_certificate_blocked_until_explicit_reapproval", true)
+            assertColor(40, 40, Color.RED)
             screenshot("07-rotated-certificate-approved")
             compose.runOnUiThread { showing.value = false }
             waitFor("rotated-certificate teardown") { !RdpConnector.isConnected() }
@@ -289,6 +329,91 @@ class RdpFixtureInstrumentedTest {
             return null
         }
         return requireNotNull(find(compose.activity.window.decorView)) { "No attached remote desktop View" }
+    }
+
+    private fun desktopBounds(): JSONObject {
+        val result = JSONObject()
+        compose.runOnUiThread {
+            val view = desktop()
+            val location = IntArray(2)
+            view.getLocationOnScreen(location)
+            result.put("left", location[0]).put("top", location[1])
+                .put("width", view.width).put("height", view.height)
+                .put("window_width", view.rootView.width).put("window_height", view.rootView.height)
+                .put("height_fraction_of_window", view.height.toDouble() / view.rootView.height.coerceAtLeast(1))
+        }
+        return result
+    }
+
+    private fun imeVisible(): Boolean {
+        var visible = false
+        compose.runOnUiThread {
+            visible = ViewCompat.getRootWindowInsets(desktop())?.isVisible(WindowInsetsCompat.Type.ime()) == true
+        }
+        return visible
+    }
+
+    private fun exerciseImePreservingRemoteSession(width: Int, height: Int, generation: Long,
+                                                   sessionId: String, desktopPid: Int, fullViewHeight: Int) {
+        // This class runs only with the explicit disposable-fixture argument.
+        // Emulators report a hardware keyboard; still exercise a real software IME.
+        val previousImeSetting = shellOutput("settings get secure show_ime_with_hard_keyboard").trim()
+        require(previousImeSetting in setOf("0", "1", "null"))
+        try {
+            shellOutput("settings put secure show_ime_with_hard_keyboard 1")
+            compose.onNodeWithContentDescription("显示或隐藏键盘").performClick()
+            waitFor("software IME visible and local desktop viewport reduced") {
+                imeVisible() && desktopBounds().getInt("height") < fullViewHeight
+            }
+            measurements.put("landscape_ime_viewport", desktopBounds())
+            val observations = JSONArray()
+            measurements.put("ime_display_poll_observations", observations)
+            var previousStatus = RdpConnector.pollDisplayStatus()
+            var observedPolls = 0
+            var changed = false
+            val started = SystemClock.elapsedRealtime()
+            waitFor("IME preserves remote geometry across three actual display polls", 10_000) {
+                val state = fixtureState()
+                val status = RdpConnector.pollDisplayStatus()
+                val nativeGeneration = RdpConnector.nativeGetTelemetry()[11]
+                changed = changed || !RdpConnector.isConnected() || !actualSize(width, height) ||
+                    state.getInt("width") != width || state.getInt("height") != height ||
+                    nativeGeneration != generation || state.getString("session_id") != sessionId ||
+                    state.getInt("desktop_pid") != desktopPid || !imeVisible() ||
+                    status.requested?.let { it.width != width || it.height != height } == true
+                // updateDisplay publishes a new immutable status on each session-loop
+                // poll. Observe those real polls, rather than calling it from the test.
+                if (status !== previousStatus) {
+                    previousStatus = status
+                    observedPolls++
+                    observations.put(JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime() - started)
+                        .put("client_width", RdpConnector.getWidth()).put("client_height", RdpConnector.getHeight())
+                        .put("server_width", state.getInt("width")).put("server_height", state.getInt("height"))
+                        .put("native_generation", nativeGeneration).put("requested", status.requested?.toString())
+                        .put("ever_changed", changed))
+                }
+                observedPolls >= 3 && SystemClock.elapsedRealtime() - started >= 2_000
+            }
+            assertFalse("IME must not resize/reconnect the remote session, even transiently: $observations", changed)
+            assertColor(40, 40, Color.RED)
+            screenshot("04d-landscape-ime-visible")
+            compose.onNodeWithContentDescription("显示或隐藏键盘").performClick()
+            waitFor("IME hidden and compact local viewport restored") {
+                !imeVisible() && desktopBounds().getInt("height") == fullViewHeight
+            }
+            assertTrue(actualSize(width, height))
+            assertTrue(fixtureSize(width, height))
+            assertEquals(generation, RdpConnector.nativeGetTelemetry()[11])
+            assertEquals(sessionId, fixtureState().getString("session_id"))
+            assertEquals(desktopPid, fixtureState().getInt("desktop_pid"))
+            assertColor(width - 80, height - 80, Color.rgb(17, 34, 51))
+            measurements.put("ime_preserved_remote_geometry_and_session", true)
+            screenshot("04e-landscape-ime-restored")
+        } finally {
+            runCatching { compose.runOnUiThread { desktop().hideKeyboard() } }
+            shellOutput(if (previousImeSetting == "null") "settings delete secure show_ime_with_hard_keyboard"
+                else "settings put secure show_ime_with_hard_keyboard $previousImeSetting")
+        }
     }
 
     private fun tapAndObserve(timeout: Long = 10_000): Long {

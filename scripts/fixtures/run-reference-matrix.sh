@@ -16,7 +16,6 @@ reset_fixture() {
   return 1
 }
 printf 'flush\tsynchronous_dynamic_channels\texit_code\n' >"$OUT/results.tsv"
-failed=0
 for flush in TRUE FALSE; do
   for sync in FALSE TRUE; do
     reset_fixture
@@ -35,9 +34,10 @@ for flush in TRUE FALSE; do
       sudo cp "$xlog" "$profile/xorg-${xlog##*/}"
     done < <(sudo find /home/rdpfixture -maxdepth 1 -type f -name '.xorgxrdp.*.log')
     sudo chown -R "$(id -u):$(id -g)" "$profile"
-    if (( result != 0 )); then failed=1; fi
   done
 done
 reset_fixture
-# Diagnostic failures remain failures. They are not an Android acceptance pass.
-exit "$failed"
+# Raw failures remain in results.tsv/exit-code.txt and actual child status in
+# process-result.json. Only the exact documented old-server failure is a valid
+# negative control; it is never labelled a successful old-server resize.
+python3 "$ROOT/scripts/fixtures/verify_reference_results.py" "$OUT"

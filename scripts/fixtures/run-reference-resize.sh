@@ -17,10 +17,9 @@ FINGERPRINT="$(openssl x509 -in /etc/xrdp/rdpsync-fixture-cert.pem -outform DER 
 export DISPLAY=:98
 export HOME="$OUT/home"
 mkdir -p "$HOME"
-client_pid= xvfb_pid=
+xvfb_pid=
 cleanup() {
   status=$?
-  if [[ -n "$client_pid" ]]; then kill "$client_pid" 2>/dev/null || true; wait "$client_pid" 2>/dev/null || true; fi
   if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null || true; wait "$xvfb_pid" 2>/dev/null || true; fi
   printf '%s\n' "$status" >"$OUT/exit-code.txt"
 }
@@ -54,10 +53,8 @@ TUNE+=",FreeRDP_SupportEchoChannel:FALSE,FreeRDP_SupportGeometryTracking:FALSE,F
 TUNE+=",FreeRDP_RemoteAssistanceMode:FALSE,FreeRDP_LyncRdpMode:FALSE"
 TUNE+=",FreeRDP_RedirectDrives:FALSE,FreeRDP_RedirectHomeDrive:FALSE,FreeRDP_RedirectPrinters:FALSE"
 TUNE+=",FreeRDP_RedirectSmartCards:FALSE,FreeRDP_RedirectSerialPorts:FALSE,FreeRDP_RedirectParallelPorts:FALSE"
-"$CLIENT" /v:127.0.0.1:3389 /u:rdpfixture /p:rdpsync-fixture-only \
+python3 "$ROOT/scripts/fixtures/reference_client_process.py" --out "$OUT" -- \
+  "$CLIENT" /v:127.0.0.1:3389 /u:rdpfixture /p:rdpsync-fixture-only \
   /cert:fingerprint:sha256:"$FINGERPRINT" /sec:tls /size:1024x768 /bpp:32 \
   /gdi:sw /dynamic-resolution /t:rdpsync-reference /log-level:DEBUG \
-  "/tune:$TUNE" >"$OUT/client.log" 2>&1 &
-client_pid=$!
-export RDPSYNC_REFERENCE_PID="$client_pid" RDPSYNC_REFERENCE_OUT="$OUT"
-python3 "$ROOT/scripts/fixtures/reference_resize_check.py"
+  "/tune:$TUNE"

@@ -1,6 +1,7 @@
 package com.rdp.sync.ui.screens
 
 import android.content.Context
+import android.content.res.Configuration
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -12,6 +13,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.FullscreenExit
+import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
@@ -24,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.Role
@@ -66,6 +71,12 @@ private val sessionOwnership = Mutex()
 @Composable
 fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     val context = LocalContext.current
+    // Configuration orientation is stable while the IME animates; viewport height is not.
+    val configuration = LocalConfiguration.current
+    val landscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val wideLandscapeToolbar = configuration.screenWidthDp >= 520
+    var expandedLandscapeTools by remember(device.id) { mutableStateOf(false) }
+    val compactLandscape = landscape && !expandedLandscapeTools
     val preferences = remember(context) { context.getSharedPreferences("session_preferences", Context.MODE_PRIVATE) }
     var settings by remember { mutableStateOf(SessionUiDefaults.displaySettings(
         preferences.getString("display_quality", null), preferences.getString("resolution_mode", null),
@@ -92,6 +103,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     var viewportSize by remember(device.id) { mutableStateOf(IntSize.Zero) }
     var inputWarning by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
     var displaySummary by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
+    var adaptiveReason by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("等待会话测量") }
     var reconnectRequired by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showPaste by remember { mutableStateOf(false) }
@@ -169,6 +181,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                             RdpConnector.updateDisplay(viewportSize.width, viewportSize.height, device.width, device.height)
                         }
                         displaySummary = display.summary
+                        adaptiveReason = display.adaptiveReason
                         reconnectRequired = display.reconnectRequired
                     } else if (previouslyConnected || status.contains("失败")) connecting = false
                     // Retain the existing, narrowly scoped RDPEI activation compatibility retry.
@@ -220,11 +233,14 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
         connecting = false
     }
 
-    Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
-        TopAppBar(
+    Column(Modifier.fillMaxSize()
+        .then(if (compactLandscape) Modifier.statusBarsPadding() else Modifier)
+        .navigationBarsPadding().imePadding()) {
+        if (!compactLandscape) TopAppBar(
             title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) "已连接" else status, style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
             navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
             actions = {
+                if (landscape) IconButton(onClick = { expandedLandscapeTools = false }) { Icon(Icons.Default.Fullscreen, "收起会话工具") }
                 IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
                 IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
             }
@@ -249,32 +265,56 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             }
         }
         Surface(tonalElevation = 6.dp) {
-            Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            if (compactLandscape) Column(Modifier.fillMaxWidth()) {
+                // Reserve only 56dp for tools, not a header plus static hints.
+                // Telemetry text never changes this geometry.
+                Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
+                    if (wideLandscapeToolbar) Column(Modifier.weight(1f)) {
+                        Text(device.name, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                        Text(when {
+                            inputWarning.isNotBlank() -> "输入异常，请查看设置"
+                            reconnectRequired -> "显示设置需重连"
+                            isConnected -> "已连接"
+                            else -> status
+                        }, style = MaterialTheme.typography.labelSmall, maxLines = 1,
+                            color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else LocalContentColor.current)
+                    }
                     IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
                         Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
                     }
                     IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
-                    IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
-                    TextButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Text("复位视图") }
-                    TextButton(onClick = { showSettings = true }) { Text("画质") }
+                    if (wideLandscapeToolbar) {
+                        IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
+                        IconButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Icon(Icons.Default.ZoomOutMap, "复位视图") }
+                    }
+                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
+                    IconButton(onClick = { expandedLandscapeTools = true }) { Icon(Icons.Default.FullscreenExit, "展开会话工具") }
                 }
-                Text(if (pointerMode) "触控板：滑动移指针，轻点单击；长按右键，长按后拖动。" else "直接触摸；双指缩放/平移。兼容模式支持长按右键、长按后拖动。", style = MaterialTheme.typography.labelSmall, minLines = 2, maxLines = 2, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-                // Always reserve exactly two text lines. Status wrapping must not
-                // change our viewport and trigger a resize/ack/resize feedback loop.
-                Text(
-                    text = inputWarning.ifBlank { if (reconnectRequired) "$displaySummary · 点此重连" else displaySummary.ifBlank { "等待显示协商…" } },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                    minLines = 2, maxLines = 2,
-                    modifier = Modifier.fillMaxWidth().clickable(enabled = reconnectRequired) { showReconnect = true }
-                )
-                if (imeVisible) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                    TextButton(onClick = { input.enqueueKeyStroke(0x01) }) { Text("Esc") }
-                    TextButton(onClick = { input.enqueueKeyStroke(0x0F) }) { Text("Tab") }
-                    TextButton(onClick = { input.enqueueShortcut(0x1D, 0x2E) }) { Text("Ctrl+C") }
-                    TextButton(onClick = { input.enqueueShortcut(0x1D, 0x2F) }) { Text("Ctrl+V") }
-                    TextButton(onClick = { input.enqueueShortcut(0x1D, 0x38, 0xE053) }) { Text("Ctrl+Alt+Del") }
+                if (imeVisible) SessionKeyboardShortcuts(input)
+            } else {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
+                            Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
+                        }
+                        IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
+                        IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
+                        TextButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Text("复位视图") }
+                        TextButton(onClick = { showSettings = true }) { Text("画质") }
+                    }
+                    Text(if (pointerMode) "触控板：滑动移指针，轻点单击；长按右键，长按后拖动。" else "直接触摸；双指缩放/平移。兼容模式支持长按右键、长按后拖动。", style = MaterialTheme.typography.labelSmall, minLines = 2, maxLines = 2, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+                    // Always reserve exactly two text lines. Status wrapping must not
+                    // change our viewport and trigger a resize/ack/resize feedback loop.
+                    Text(
+                        text = inputWarning.ifBlank { if (reconnectRequired) "$displaySummary · 点此重连" else displaySummary.ifBlank { "等待显示协商…" } },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                        minLines = 2, maxLines = 2,
+                        modifier = Modifier.fillMaxWidth().clickable(enabled = reconnectRequired) { showReconnect = true }
+                    )
+                    if (imeVisible) SessionKeyboardShortcuts(input)
                 }
             }
         }
@@ -299,7 +339,11 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             }
         })
     }
-    if (showSettings) DisplaySettingsDialog(settings, device, onChange = ::saveSettings, onDismiss = { showSettings = false }, onDiagnostics = {
+    if (showSettings) DisplaySettingsDialog(settings, device,
+        sessionInfo = displaySummary.ifBlank { status }, adaptiveInfo = adaptiveReason,
+        inputWarning = inputWarning, reconnectRequired = reconnectRequired,
+        onReconnect = { showSettings = false; showReconnect = true },
+        onChange = ::saveSettings, onDismiss = { showSettings = false }, onDiagnostics = {
         diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true
     })
     if (showReconnect) AlertDialog(onDismissRequest = { showReconnect = false }, title = { Text("重新连接远程桌面？") }, text = { Text("这会短暂断开当前连接，并用所选分辨率重新连接。不会替你保存远程程序中的工作。") },
@@ -314,10 +358,29 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
         confirmButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(diagnostics)); showDiagnostics = false }) { Text("复制并关闭") } }, dismissButton = { TextButton(onClick = { showDiagnostics = false }) { Text("关闭") } })
 }
 
+
 @Composable
-private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Device, onChange: (SessionDisplaySettings) -> Unit, onDismiss: () -> Unit, onDiagnostics: () -> Unit) {
+private fun SessionKeyboardShortcuts(input: RdpInputDispatcher) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+        TextButton(onClick = { input.enqueueKeyStroke(0x01) }) { Text("Esc") }
+        TextButton(onClick = { input.enqueueKeyStroke(0x0F) }) { Text("Tab") }
+        TextButton(onClick = { input.enqueueShortcut(0x1D, 0x2E) }) { Text("Ctrl+C") }
+        TextButton(onClick = { input.enqueueShortcut(0x1D, 0x2F) }) { Text("Ctrl+V") }
+        TextButton(onClick = { input.enqueueShortcut(0x1D, 0x38, 0xE053) }) { Text("Ctrl+Alt+Del") }
+    }
+}
+
+@Composable
+private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Device, sessionInfo: String, adaptiveInfo: String, inputWarning: String,
+    reconnectRequired: Boolean, onReconnect: () -> Unit, onChange: (SessionDisplaySettings) -> Unit, onDismiss: () -> Unit, onDiagnostics: () -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text("显示与网络") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
+            Text("会话状态", style = MaterialTheme.typography.titleSmall)
+            Text(sessionInfo, style = MaterialTheme.typography.bodySmall)
+            Text(if (settings.adaptive) "自适应状态：$adaptiveInfo" else "自适应已关闭", style = MaterialTheme.typography.bodySmall)
+            if (inputWarning.isNotBlank()) Text(inputWarning, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            if (reconnectRequired) TextButton(onClick = onReconnect) { Text("按当前设置重新连接") }
+            Spacer(Modifier.height(8.dp))
             Text("远程分辨率", style = MaterialTheme.typography.titleSmall)
             ResolutionMode.entries.forEach { mode ->
                 val label = if (mode == ResolutionMode.PROFILE) "设备配置（${device.width} × ${device.height}）" else mode.title
@@ -349,7 +412,7 @@ private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Devi
             }
             Text("自适应基于实测延迟、带宽和渲染耗时，持续变差才降级，恢复后缓慢提高。缺少测量时不会猜测网速。", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            Text("双指缩放/平移只改变本地视图；分辨率设置通过服务器显示控制通道协商，不拉伸画面。旧服务器需手动重连。", style = MaterialTheme.typography.bodySmall)
+            Text("操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移只改变本地视图。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             Text("安全提示：首次连接或证书变化时，必须通过独立渠道核对指纹后授权。这是手动指纹固定（TOFU），不是 CA 身份验证。同步数据可能含凭据，请仅使用受信任的 HTTPS WebDAV。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             TextButton(onClick = onDiagnostics) { Text("查看诊断信息") }

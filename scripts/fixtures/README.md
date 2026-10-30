@@ -8,11 +8,14 @@ The runner builds pinned xrdp **0.10.6.1** (`80c52879fead585d6347df5b3c587718adf
 
 - A separate `NativeRuntimeInstrumentedTest` initializes app-private WinPR/FreeRDP runtime paths idempotently and allocates/frees a genuine native client context without any network connection.
 - Native libraries load, the real desktop connects, and the saved profile dimensions are honored.
-- Red, green, and blue probe blocks appear with the correct colors in **Android screen captures**, covering native decode → JNI bitmap → Android rendering.
+- Red, green, and blue probe blocks match **exact RGB channels** at uniform interior pixels in Android screen captures, covering native decode → JNI bitmap → Android rendering. After HD resize, an additional background pixel lies outside the original framebuffer.
 - Injected Android touchscreen events pass through `RdpDesktopView`, the ordered input dispatcher, FreeRDP, and the server. The test waits for the server's response color to appear on the Android screen.
+- Before each measured single down/up, the actual View must be attached, shown, nonzero-sized, window-focused, and visibly painting the exact RGB probes with the settings dialog absent. This avoids injecting into a closing Android dialog; it does not retry lost clicks or extend the response deadline. Bounds/focus/frame metadata are retained per attempt.
 - IME composing text is committed once; backspace/newline reach the desktop. Held mouse press/move/release and wheel events reach the X server.
 - The server must advertise DISP. Selecting `1280 × 720` must change **both** the actual decoded framebuffer and X server desktop size; a successful request return code alone does not pass.
 - Fit-window + rotation changes real remote orientation while the session remains connected.
+- With the keyboard hidden, compact landscape must dedicate at least 72% of the fixture's full window height to the desktop while its essential controls remain reachable. Expanding/restoring controls must resize the actual remote framebuffer without changing native generation or X desktop UUID/PID.
+- The keyboard toolbar must show and hide a real software IME. The local viewport shrinks/restores, but remote geometry and session identity must stay unchanged over three observed session-loop display polls spanning at least two seconds. The fixture temporarily permits a software IME alongside the emulator's hardware keyboard and restores that setting afterward.
 - A new session starts in direct touch even if the preceding session temporarily used trackpad mode.
 - The weak-link case uses a separate user-space TCP proxy, not `tc`, firewall rules, or runner-wide network changes. It introduces 80 ms per read chunk in each direction plus a 1 MiB/s per-direction transmission budget. These are proxy parameters, not a model of mobile radio behavior or a guaranteed exact throughput/RTT.
 - A compatibility session without DISP rejects resize with the expected unsupported code, keeps its original actual size, and remains connected.
@@ -125,3 +128,19 @@ failure. These old failures are preserved, not relabeled as passes. The mandator
 Android workflow therefore explicitly uses the pinned current pair with the same
 strict 14-test suite; the reference success itself does **not** validate Android,
 Windows/NLA interoperability, physical-phone performance, or older-server support.
+
+The current reference gate runs
+`python3 scripts/fixtures/verify_reference_results.py build/reference-evidence`
+and retains `validated-outcomes.json`. Each original-server case can satisfy only
+the named negative control **“old interoperability failure reproduced”**: it must
+first receive the exact initial pixels and DISP capability, really resize the same
+X desktop UUID/PID, and then fail naturally with the precise
+`FINALIZATION_CLIENT_SYNC` / Synchronize / Update rejection. Build/authentication
+failures, missing images, forced cleanup, signal crashes, stale metadata, or any
+other failure do not qualify. Current-server cases still require all positive
+resize/pixel/input/liveness checks. Raw `results.tsv` and case `exit-code.txt`
+remain unchanged; `process-result.json` separately records the actual child exit
+code and natural-versus-cleanup origin. Fresh run/PID and frame-hash metadata are
+mandatory. A successful negative-control classification is not successful resize
+support on that old server, and it does not retroactively change historical failed
+workflow outcomes.
