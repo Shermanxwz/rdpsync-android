@@ -20,6 +20,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
@@ -38,6 +40,8 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /** Shared strict SAF/CLIPRDR scenario; each concrete class uses a real, fixed peer. */
 abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer) {
@@ -49,6 +53,8 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     private val measurements = JSONObject()
     private val seededMediaUris = linkedMapOf<String, Pair<String, String>>()
     private val pickerEvents = JSONArray()
+    private val routeBackCallbacks = AtomicInteger()
+    private val routeBackCallbackElapsed = AtomicLong()
     private val folder = "rdpsync-transfer-${SystemClock.uptimeMillis()}"
     private val downloads get() = "/sdcard/Download/$folder"
 
@@ -72,7 +78,11 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768)
         compose.runOnUiThread { compose.activity.setContent {
             MaterialTheme {
-                BackHandler(enabled = showing.value) { showing.value = false }
+                BackHandler(enabled = showing.value) {
+                    routeBackCallbacks.incrementAndGet()
+                    routeBackCallbackElapsed.set(SystemClock.elapsedRealtime())
+                    showing.value = false
+                }
                 if (showing.value) RdpConnectionScreen(device) { showing.value = false }
             }
         } }
@@ -251,10 +261,46 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             waitFor("fresh offer") { RdpConnector.nativeFileTransferState()[2] > 0 }
             val routeOffer = RdpConnector.nativeFileTransferState()[2]
             assertEquals("Publishing itself must not reset sending budget", expectedRouteOfferBudget, RdpConnector.nativeFileTransferState()[9])
+            val routeGeneration = RdpConnector.sessionGeneration()
+            var routeView: RdpDesktopView? = null
+            compose.runOnUiThread { routeView = findDesktop(compose.activity.window.decorView) }
+            val expectedView = requireNotNull(routeView)
             compose.onNodeWithText("返回远程桌面").performClick()
             assertTrue(RdpConnector.nativeFileTransferOfferRetained(routeOffer))
-            sendSystemBack()
-            waitFor("route disposal revokes actual native offer", 10_000) { !showing.value && !RdpConnector.nativeFileTransferOfferRetained(routeOffer) }
+            val backEvidence = JSONObject().put("readiness_started_elapsed_ms", SystemClock.elapsedRealtime())
+                .put("expected_generation", routeGeneration).put("expected_view_identity", System.identityHashCode(expectedView))
+            measurements.put("route_back", backEvidence)
+            waitFor("dialog gone and actual same desktop focused before single route Back", 15_000) {
+                val dialogAbsent = compose.onAllNodesWithText("文件传输").fetchSemanticsNodes().isEmpty() &&
+                    compose.onAllNodesWithText("返回远程桌面").fetchSemanticsNodes().isEmpty()
+                var ready = false
+                compose.runOnUiThread {
+                    val current = findDesktop(compose.activity.window.decorView)
+                    val ime = current?.let { ViewCompat.getRootWindowInsets(it)?.isVisible(WindowInsetsCompat.Type.ime()) }
+                    val bounds = Rect(); current?.getGlobalVisibleRect(bounds)
+                    backEvidence.put("dialog_absent", dialogAbsent).put("same_view", current === expectedView)
+                        .put("attached", current?.isAttachedToWindow).put("shown", current?.isShown)
+                        .put("window_focus", current?.hasWindowFocus()).put("ime_visible", ime)
+                        .put("bounds", bounds.toShortString())
+                    ready = current != null && current === expectedView && current.isAttachedToWindow && current.isShown &&
+                        current.hasWindowFocus() && !bounds.isEmpty && ime == false
+                }
+                val sameSession = RdpConnector.isConnected() && RdpConnector.sessionGeneration() == routeGeneration &&
+                    RdpConnector.nativeFileTransferOfferRetained(routeOffer)
+                backEvidence.put("same_live_session_and_offer", sameSession)
+                dialogAbsent && ready && sameSession
+            }
+            assertTrue(showing.value)
+            assertEquals("No route callback before the one Back gesture", 0, routeBackCallbacks.get())
+            backEvidence.put("ready_elapsed_ms", SystemClock.elapsedRealtime())
+            screenshot("06-focused-desktop-before-route-back")
+            sendSystemBack(backEvidence)
+            try { waitFor("route disposal revokes actual native offer", 10_000) {
+                backEvidence.put("callback_count", routeBackCallbacks.get()).put("callback_elapsed_ms", routeBackCallbackElapsed.get())
+                    .put("route_showing", showing.value).put("offer_retained", RdpConnector.nativeFileTransferOfferRetained(routeOffer))
+                !showing.value && !RdpConnector.nativeFileTransferOfferRetained(routeOffer)
+            } } finally { backEvidence.put("revocation_wait_end_ms", SystemClock.elapsedRealtime()) }
+            assertEquals("One actual route Back callback", 1, routeBackCallbacks.get())
             waitFor("route teardown disconnects owned session") { !RdpConnector.isConnected() }
             measurements.put("route_back_revoked_offer", true).put("success", true)
         } finally {
@@ -409,15 +455,15 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         compose.onNodeWithContentDescription("会话菜单").performTouchInput { click() }
         compose.onNodeWithText(label).performScrollTo().performClick()
     }
+    private fun findDesktop(view: View): RdpDesktopView? {
+        if (view is RdpDesktopView) return view
+        if (view is ViewGroup) for (i in 0 until view.childCount) findDesktop(view.getChildAt(i))?.let { return it }
+        return null
+    }
     private fun focusRealPeerSurface() {
-        fun find(view: View): RdpDesktopView? {
-            if (view is RdpDesktopView) return view
-            if (view is ViewGroup) for (i in 0 until view.childCount) find(view.getChildAt(i))?.let { return it }
-            return null
-        }
         var desktop: RdpDesktopView? = null
         waitFor("attached focused desktop before real clipboard owner input") {
-            compose.runOnUiThread { desktop = find(compose.activity.window.decorView) }
+            compose.runOnUiThread { desktop = findDesktop(compose.activity.window.decorView) }
             var ready = false
             compose.runOnUiThread { ready = desktop?.let { it.isShown && it.hasWindowFocus() && it.width > 0 } == true }
             ready
@@ -631,10 +677,23 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         }
         try { inject(MotionEvent.ACTION_DOWN); SystemClock.sleep(holdMs) } finally { inject(MotionEvent.ACTION_UP) }
     }
-    private fun sendSystemBack() {
+    private fun sendSystemBack(evidence: JSONObject) {
+        val events = JSONArray(); evidence.put("events", events)
         val time = SystemClock.uptimeMillis()
-        for (action in listOf(KeyEvent.ACTION_DOWN, KeyEvent.ACTION_UP))
-            assertTrue(automation.injectInputEvent(KeyEvent(time, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_BACK, 0), true))
+        fun inject(action: Int) {
+            val event = KeyEvent(time, SystemClock.uptimeMillis(), action, KeyEvent.KEYCODE_BACK, 0)
+            val record = JSONObject().put("action", action).put("wall_ms", System.currentTimeMillis())
+                .put("elapsed_ms", SystemClock.elapsedRealtime()).put("event_time_ms", event.eventTime)
+                .put("down_time_ms", event.downTime).put("source", event.source).put("flags", event.flags)
+            events.put(record)
+            try {
+                val accepted = automation.injectInputEvent(event, true)
+                record.put("accepted", accepted).put("completed_elapsed_ms", SystemClock.elapsedRealtime())
+                assertTrue("Single actual route Back injection accepted", accepted)
+            } catch (failure: Throwable) { record.put("exception", failure.javaClass.name); throw failure }
+        }
+        try { inject(KeyEvent.ACTION_DOWN) } finally { inject(KeyEvent.ACTION_UP) }
+        evidence.put("up_completed_elapsed_ms", SystemClock.elapsedRealtime())
     }
     private fun transferState() = request("GET", "/transfer")
     private fun action(action: String) = request("POST", "/transfer/$action")
