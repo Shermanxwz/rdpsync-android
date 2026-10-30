@@ -8,24 +8,34 @@ adb logcat -c
 adb shell settings put system accelerometer_rotation 0
 adb shell settings put system user_rotation 0
 adb shell getprop ro.build.fingerprint >"$OUT/emulator-fingerprint.txt"
+evidence_collection_attempted=false
 cleanup() {
-  adb logcat -d >"$OUT/android-logcat.txt" || true
-  adb pull /sdcard/Download/rdpsync-xrdp-transfer-evidence "$OUT/" || true
-  adb pull /sdcard/Download/rdpsync-xrdp-transport-diagnostic "$OUT/" || true
-  adb exec-out screencap -p >"$OUT/final-emulator.png" || true
+  local result=$?
+  trap - EXIT
+  set +e
+  # Failed instrumentation keeps its original nonzero result. No test/action is retried.
+  if [[ "$evidence_collection_attempted" != true ]]; then
+    python3 scripts/fixtures/collect_android_evidence.py xrdp "$OUT" --best-effort
+  fi
+  timeout 10 adb logcat -d >"$OUT/android-logcat.txt"
+  exit "$result"
 }
 trap cleanup EXIT
-adb shell rm -rf /sdcard/Download/rdpsync-xrdp-transport-diagnostic
-adb shell test ! -e /sdcard/Download/rdpsync-xrdp-transport-diagnostic
-adb shell date +%s >"$OUT/diagnostic-start-device-seconds.txt"
+# Only these fixture-owned exports are reset; no old ledger can satisfy this attempt.
+for directory in rdpsync-xrdp-transfer-evidence rdpsync-xrdp-transport-diagnostic; do
+  adb shell rm -rf "/sdcard/Download/$directory"
+  adb shell test ! -e "/sdcard/Download/$directory"
+  rm -rf "$OUT/$directory"
+done
+adb shell date +%s >"$OUT/evidence-start-device-seconds.txt"
 touch "$OUT/instrumentation-start.marker"
 ./gradlew --no-daemon -PnativeAbis=x86_64 \
   -Pandroid.testInstrumentationRunnerArguments.xrdpFileFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.fixtureFingerprint="$RDP_FIXTURE_FINGERPRINT" \
   -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.transfer.TransferStorageInstrumentedTest,com.rdp.sync.transfer.XrdpNativeClipboardDiagnosticTest,com.rdp.sync.XrdpTransferInstrumentedTest \
   :app:connectedDebugAndroidTest
-adb shell stat -c %Y /sdcard/Download/rdpsync-xrdp-transport-diagnostic/measurements.json >"$OUT/diagnostic-device-mtime.txt"
-adb pull /sdcard/Download/rdpsync-xrdp-transport-diagnostic "$OUT/"
+evidence_collection_attempted=true
+python3 scripts/fixtures/collect_android_evidence.py xrdp "$OUT"
 python3 - <<'PY'
 import collections,json,pathlib,xml.etree.ElementTree as ET
 out=pathlib.Path('build/xrdp-file-evidence'); base=pathlib.Path('app/build/outputs/androidTest-results/connected/debug')
@@ -42,7 +52,8 @@ for p in reports:
         identities.add(identity);classes[identity[0]]+=1
 assert classes=={'com.rdp.sync.NativeRuntimeInstrumentedTest':1,
                 'com.rdp.sync.XrdpTransferInstrumentedTest':1,'com.rdp.sync.transfer.XrdpNativeClipboardDiagnosticTest':1,'com.rdp.sync.transfer.TransferStorageInstrumentedTest':3},classes
-assert int((out/'diagnostic-device-mtime.txt').read_text().strip()) >= int((out/'diagnostic-start-device-seconds.txt').read_text().strip()), 'Stale transport diagnostic'
+collection=json.loads((out/'evidence-collection.json').read_text())
+assert collection['complete'] is True and collection['best_effort'] is False, 'Missing fresh mandatory evidence'
 diagnostic=json.loads((out/'rdpsync-xrdp-transport-diagnostic/measurements.json').read_text())
 assert diagnostic['diagnostic_only'] is True and diagnostic['saf_ui_covered'] is False
 assert diagnostic['success'] is True and diagnostic['no_retained_native_offer'] is True
