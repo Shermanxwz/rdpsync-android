@@ -21,7 +21,8 @@ CLASSIC_FRAMES = ['01-direct-touch-fullscreen-profile.png', '03-negotiated-hd.pn
                   '04-landscape-live-resize.png', '04f-landscape-true-fullscreen.png',
                   '04g-before-system-edge.png', '04g-system-edge-observation-0.png',
                   '04h-system-bars-hidden-restored.png', '04d-landscape-ime-visible.png',
-                  '04d1-ime-tools-popup.png', '04d3-ime-after-enter.png',
+                  '04d1-ime-tools-popup.png', '04d0-ime-declared-layout.png',
+                  '04d2-ime-before-newline-enter.png', '04d3-ime-after-enter.png',
                   '04e-landscape-ime-restored.png', '05-weak-link-live-session.png',
                   '06-changed-certificate-blocked.png', '07-rotated-certificate-approved.png',
                   '08-exit-restored-system-bars.png', '99-before-final-teardown.png']
@@ -30,6 +31,22 @@ DRIVE_FRAMES = ['01-real-saf-imported-browser.png', '02-read-only-mounted.png', 
                 '99-shared-drive-final.png']
 TRANSIENT_READ = re.compile(r'device offline|no devices/emulators found|device .* not found|'
                             r'connection reset|connection closed|protocol fault|error: closed', re.I)
+
+
+def composition_frames(value):
+    plan = value.get('software_keyboard_declared_plan', {})
+    mode = plan.get('mode')
+    assert mode in ('pinyin-compose-commit-newline', 'latin-direct-newline'), 'Missing declared IME mode'
+    pinyin = mode == 'pinyin-compose-commit-newline'
+    assert plan.get('gestures') == (['a', 'commit-Enter', 'newline-Enter'] if pinyin else ['a', 'newline-Enter'])
+    keys = value.get('actual_software_keyboard_keys', [])
+    assert [x.get('stage') for x in keys] == (['type-a', 'commit-composition', 'newline'] if pinyin else ['type-a', 'newline'])
+    if pinyin:
+        assert value.get('software_keyboard_composition_kept_local') is True
+        assert value.get('software_keyboard_committed_text') == value.get('software_keyboard_composition_committed_text', '') + '\n'
+        return ['04d2a-ime-composing-a.png', '04d2-ime-before-commit-composition-enter.png',
+                '04d2c-ime-after-commit-composition-enter.png', '04d2b-ime-composition-committed.png']
+    return []
 
 
 def directories(kind):
@@ -151,6 +168,17 @@ class Collector:
                     frames = list(DRIVE_FRAMES)
                 if kind == 'classic':
                     frames.append('diagnostics.txt')
+                    try:
+                        frames += composition_frames(values.get(directory, {}))
+                    except AssertionError as error:
+                        errors.append(f'IME plan incomplete: {error}')
+                        if not self.best_effort:
+                            raise
+                        # Failure diagnostics never turn an incomplete plan green.
+                        # Read each possible stage once; missing frames stay errors.
+                        frames += ['04d2a-ime-composing-a.png', '04d2-ime-before-commit-composition-enter.png',
+                                   '04d2c-ime-after-commit-composition-enter.png', '04d2b-ime-composition-committed.png',
+                                   '04d4-ime-key-failure-before-hide.png']
                     for phase in values.get(directory, {}).get('untrusted_certificate_phases', []):
                         if phase.get('system_immersive_coachmark', {}).get('acknowledged'):
                             assert phase['phase'] in ('initial', 'weak_link')

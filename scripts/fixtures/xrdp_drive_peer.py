@@ -9,6 +9,7 @@ from pathlib import Path
 import threading
 import time
 import uuid
+import traceback
 
 from xrdp_drive_files import (BLOCK, LARGE_SIZE, original_manifest, owned_drive,
                              inspect_imports, readonly_check, exercise_rw, expect_denied, read_stall_range)
@@ -125,6 +126,7 @@ def perform(action, operation):
         (OUT / f'operation-{operation}.json').write_text(json.dumps(snapshot(), indent=2))
     except Exception as error:
         update(phase='failed', error=type(error).__name__ + ': ' + str(error),
+               traceback=traceback.format_exc(),
                completed_monotonic=time.monotonic(), duration_seconds=time.monotonic() - started)
         (OUT / f'operation-{operation}.json').write_text(json.dumps(snapshot(), indent=2))
 

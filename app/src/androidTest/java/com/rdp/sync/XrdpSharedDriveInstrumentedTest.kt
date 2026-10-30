@@ -237,6 +237,7 @@ class XrdpSharedDriveInstrumentedTest {
                 if(relay.getBoolean("paused")) request(8771,"/relay/resume-client-read","POST")
                 paused=false
             }
+            cleanup { recordNative("before_cleanup") }
             cleanup { screenshot("99-shared-drive-final") }
             cleanup { if(::documents.isInitialized) {
                 val removed=documents.cleanup();measurements.put("synthetic_seed_cleanup",removed)

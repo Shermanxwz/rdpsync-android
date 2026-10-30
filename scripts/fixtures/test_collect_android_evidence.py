@@ -11,6 +11,40 @@ spec = importlib.util.spec_from_file_location('collector', Path(__file__).with_n
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 
+class CompositionPlanTests(unittest.TestCase):
+    def test_declared_pinyin_frames_and_no_extra_gesture(self):
+        value = dict(software_keyboard_declared_plan=dict(mode='pinyin-compose-commit-newline', gestures=['a', 'commit-Enter', 'newline-Enter']),
+                     actual_software_keyboard_keys=[dict(stage=x) for x in ['type-a', 'commit-composition', 'newline']],
+                     software_keyboard_composition_kept_local=True, software_keyboard_composition_committed_text='ab\na',
+                     software_keyboard_committed_text='ab\na\n')
+        self.assertEqual(len(composition_frames := m.composition_frames(value)), 4)
+        self.assertEqual(len(set(composition_frames)), 4)
+        value['actual_software_keyboard_keys'].append(dict(stage='newline'))
+        with self.assertRaises(AssertionError): m.composition_frames(value)
+
+    def test_incomplete_plan_keeps_best_effort_failure_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            collector = m.Collector(Path(directory), 0, best_effort=True)
+            pulled = []
+            def pull(folder, name):
+                pulled.append(name)
+                return b'{}'
+            collector.pull = pull
+            collector.collect('classic')
+            self.assertIn('04d4-ime-key-failure-before-hide.png', pulled)
+            self.assertIn('04d3-ime-after-enter.png', pulled)
+            receipt = json.loads((Path(directory) / 'evidence-collection-best-effort.json').read_text())
+            self.assertFalse(receipt['complete'])
+            self.assertTrue(receipt['errors'])
+
+    def test_declared_latin_has_one_enter(self):
+        value = dict(software_keyboard_declared_plan=dict(mode='latin-direct-newline', gestures=['a', 'newline-Enter']),
+                     actual_software_keyboard_keys=[dict(stage=x) for x in ['type-a', 'newline']])
+        self.assertEqual(m.composition_frames(value), [])
+        value['software_keyboard_declared_plan']['mode'] = 'unknown'
+        with self.assertRaises(AssertionError): m.composition_frames(value)
+
+
 def transfer():
     return dict(success=True, offer_survived_dialog_hide=True, collision_original_unchanged=True,
                 route_back_revoked_offer=True, peer_to_saf_export={'synthetic': 'hash'}, synthetic_seed_cleanup=[{'removed': True}])

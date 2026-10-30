@@ -1209,11 +1209,43 @@ class RdpFixtureInstrumentedTest {
                     }
                 }
             }
-            tapObservedImeKey("a", keyEvidence)
-            // Some IMEs keep a composing character local until Enter. Record, do not
-            // fabricate a commit or send a replacement/native key as a fallback.
+            // Declare the gesture plan before typing. Never choose another Enter
+            // after a failed final-text assertion or infer a layout from its outcome.
+            val initialLabels = observedImeLabels("before-input")
+            val subtype = (instrumentation.targetContext.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as android.view.inputmethod.InputMethodManager).currentInputMethodSubtype
+            val subtypeLocale = subtype?.languageTag?.ifEmpty { subtype?.locale.orEmpty() }.orEmpty()
+            val pinyin = initialLabels.containsAll(setOf("全角逗号", "全角句号", "下一种语言", "Enter 键"))
+            val latin = !pinyin && subtypeLocale.replace('_', '-').startsWith("en", ignoreCase = true) &&
+                initialLabels.any { it.equals("Enter", true) } &&
+                initialLabels.any { it == "," || it.equals("Comma", true) } &&
+                initialLabels.any { it == "." || it.equals("Period", true) }
+            assertTrue("Unknown observed IME layout; no typing or fallback is permitted", pinyin || latin)
+            assertFalse("Fixture must start without a Pinyin candidate composition", initialLabels.contains("其他候选键"))
+            measurements.put("software_keyboard_declared_plan", JSONObject()
+                .put("mode", if (pinyin) "pinyin-compose-commit-newline" else "latin-direct-newline")
+                .put("subtype_locale_diagnostic", subtypeLocale)
+                .put("gestures", JSONArray(if (pinyin) listOf("a", "commit-Enter", "newline-Enter") else listOf("a", "newline-Enter"))))
+            screenshot("04d0-ime-declared-layout")
+            tapObservedImeKey("a", keyEvidence, "type-a")
+            if (pinyin) {
+                waitFor("declared Pinyin composition is visible without premature remote commit") {
+                    val labels = observedImeLabels("composing-a")
+                    labels.containsAll(setOf("啊", "阿", "其他候选键")) && fixtureState().getString("text") == before
+                }
+                measurements.put("software_keyboard_composition_kept_local", true)
+                screenshot("04d2a-ime-composing-a")
+                tapObservedImeKey("Enter", keyEvidence, "commit-composition")
+                waitFor("one declared composition Enter commits exactly a and collapses candidates") {
+                    val labels = observedImeLabels("composition-committed")
+                    !labels.contains("其他候选键") && !labels.contains("啊") &&
+                        fixtureState().getString("text") == before + "a"
+                }
+                measurements.put("software_keyboard_composition_committed_text", before + "a")
+                screenshot("04d2b-ime-composition-committed")
+            }
             measurements.put("software_keyboard_interim_text", fixtureState().getString("text"))
-            val enterUpCompleted = tapObservedImeKey("Enter", keyEvidence)
+            val enterUpCompleted = tapObservedImeKey("Enter", keyEvidence, "newline")
             val expected = before + "a\n"
             val length = expected.codePointCount(0, expected.length)
             val colors = intArrayOf(Color.rgb(85, 204, 204), Color.rgb(204, 170, 85), Color.rgb(153, 85, 221))
@@ -1331,12 +1363,29 @@ class RdpFixtureInstrumentedTest {
         return null
     }
 
-    private fun tapObservedImeKey(label: String, evidence: JSONArray): Long {
-        val attempt = JSONObject().put("requested", label).put("readiness_started", clockSnapshot())
+    private fun observedImeLabels(stage: String): Set<String> {
+        val key = requireNotNull(findFreshImeKey("Enter")) { "No unique live IME Enter at $stage" }
+        try { assertEquals("Pinned fixture requires actual Gboard", "com.google.android.inputmethod.latin", key.rootPackage) }
+        finally { key.node.recycle() }
+        val nodes = measurements.getJSONArray("ime_accessibility_observed_nodes")
+        val labels = mutableSetOf<String>()
+        for (i in 0 until nodes.length()) {
+            val node = nodes.getJSONObject(i)
+            labels.add(node.getString("text")); labels.add(node.getString("description"))
+        }
+        val stages = measurements.optJSONObject("software_keyboard_layout_receipts") ?: JSONObject().also {
+            measurements.put("software_keyboard_layout_receipts", it)
+        }
+        stages.put(stage, JSONObject().put("clock", clockSnapshot()).put("nodes", nodes))
+        return labels
+    }
+
+    private fun tapObservedImeKey(label: String, evidence: JSONArray, stage: String): Long {
+        val attempt = JSONObject().put("requested", label).put("stage", stage).put("readiness_started", clockSnapshot())
         evidence.put(attempt)
         val readiness = JSONArray()
         attempt.put("readiness_observations", readiness)
-        if (label == "Enter") screenshot("04d2-ime-before-enter")
+        if (label == "Enter") screenshot("04d2-ime-before-$stage-enter")
         val deadline = SystemClock.elapsedRealtime() + 15_000
         var target: ObservedImeKey? = null
         while (SystemClock.elapsedRealtime() < deadline && target == null) {
@@ -1384,7 +1433,7 @@ class RdpFixtureInstrumentedTest {
             try { attempt.put("after_gesture", after?.snapshot() ?: JSONObject.NULL) }
             finally { after?.node?.recycle() }
             attempt.put("view_after_gesture", inputViewSnapshot()).put("ime_visible_after_gesture", imeVisible())
-            if (label == "Enter") screenshot("04d3-ime-after-enter")
+            if (label == "Enter") screenshot(if (stage == "newline") "04d3-ime-after-enter" else "04d2c-ime-after-$stage-enter")
             return upCompleted
         } finally { key.node.recycle() }
     }

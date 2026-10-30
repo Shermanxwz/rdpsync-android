@@ -143,4 +143,53 @@ setup(&f,2);put32(packet+24,1);put32(packet+12,20);assert(rdpsync_drive_ingress(
 setup(&f,2);BYTE caps[12]={1,0,0,0};put16(caps+4,CAP_DRIVE_TYPE);put16(caps+6,8);put32(caps+8,2);size_t controls=0;while(control(&f,PAKID_CORE_SERVER_CAPABILITY,caps,sizeof(caps)))controls++;assert(controls<DRIVE_CONTROL_BYTES/16+1&&f.drive->state==-5);cleanup(&f);
 setup(&f,2);BYTE no_caps[4]={0};assert(control(&f,PAKID_CORE_SERVER_CAPABILITY,no_caps,4));assert(f.drive->state==-1);cleanup(&f);}
 static void readonly_tests(void){Fixture f;setup(&f,1);uint32_t root=create(&f,"",FILE_LIST_DIRECTORY|FILE_READ_ATTRIBUTES,FILE_OPEN,FILE_DIRECTORY_FILE);BYTE body[32]={0};assert(request(&f,IRP_MJ_WRITE,0,root,body,32)==STATUS_MEDIA_WRITE_PROTECTED);put32(body,GENERIC_WRITE);put32(body+20,FILE_CREATE);put32(body+24,FILE_NON_DIRECTORY_FILE);BYTE create_body[34];memcpy(create_body,body,32);put32(create_body+28,2);put16(create_body+32,'x');assert(request(&f,IRP_MJ_CREATE,0,0,create_body,34)==STATUS_ACCESS_DENIED);cleanup(&f);}
-int main(void){protocol_owner=pthread_self();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
+
+/* Pinned xrdp 0.10.6.1 devredir.c lookup sequence: one CompletionId reused,
+ * CREATE FILE_READ_ATTRIBUTES|SYNCHRONIZE, zero options, terminal UTF-16 NUL,
+ * then padded Basic36/Standard22 requests, and CLOSE. */
+static void diagnostic_privacy_test(void) {
+    Fixture f; setup(&f, 1);
+    BYTE opaque[32]; memset(opaque, 0x5a, sizeof(opaque));
+    (void)request(&f, 0x7fffffff, 0, 0, opaque, sizeof(opaque));
+    size_t latest = (size_t)((f.drive->irp_observed - 1) % 16);
+    assert(f.drive->irp_trace[latest].arg0 == 0 && f.drive->irp_trace[latest].arg1 == 0);
+    (void)request(&f, IRP_MJ_CLOSE, 0, 0, opaque, sizeof(opaque));
+    latest = (size_t)((f.drive->irp_observed - 1) % 16);
+    assert(f.drive->irp_trace[latest].arg0 == 0 && f.drive->irp_trace[latest].arg1 == 0);
+    cleanup(&f);
+}
+
+static void xrdp_lookup_replay(void) {
+    Fixture f; setup(&f, 1);
+    uint32_t local = 0, information = 0;
+    assert(!rdp_ws_open(f.ws, 0, "android-empty.txt", GENERIC_READ | GENERIC_WRITE,
+        7, FILE_CREATE, FILE_NON_DIRECTORY_FILE, false, 0, &local, &information));
+    assert(!rdp_ws_close(f.ws, 0, local));
+    BYTE body[256] = {0};
+    put32(body, FILE_READ_ATTRIBUTES | SYNCHRONIZE); put32(body + 16, 7);
+    put32(body + 20, FILE_OPEN);
+    size_t path_length = path_bytes("\\android-empty.txt", body + 32) + 2;
+    put32(body + 28, (uint32_t)path_length);
+    assert(!request(&f, IRP_MJ_CREATE, 0, 0, body, 32 + path_length));
+    uint32_t file = get32(sent + 16), completion = f.sequence;
+    memset(body, 0, sizeof(body)); put32(body, FileBasicInformation); put32(body + 4, 36);
+    f.sequence = completion - 1;
+    assert(!request(&f, IRP_MJ_QUERY_INFORMATION, 0, file, body, 32 + 36));
+    assert(get32(sent + 16) == 36 && sent_size == 56);
+    assert(get32(sent + 52) == (FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_READONLY));
+    put32(body, FileStandardInformation); put32(body + 4, 22);
+    f.sequence = completion - 1;
+    assert(!request(&f, IRP_MJ_QUERY_INFORMATION, 0, file, body, 32 + 22));
+    assert(get32(sent + 16) == 22 && sent_size == 42 && get64(sent + 28) == 0);
+    f.sequence = completion - 1;
+    assert(!request(&f, IRP_MJ_CLOSE, 0, file, body, 32));
+    memset(body, 0, sizeof(body)); put32(body, FILE_READ_DATA | SYNCHRONIZE);
+    put32(body + 16, 7); put32(body + 20, FILE_OPEN); put32(body + 24, FILE_SYNCHRONOUS_IO_NONALERT);
+    path_length = path_bytes("\\android-empty.txt", body + 32) + 2;
+    put32(body + 28, (uint32_t)path_length);
+    assert(!request(&f, IRP_MJ_CREATE, 0, 0, body, 32 + path_length));
+    file = get32(sent + 16); read_file(&f, file, 0, 65536, "", 0);
+    assert(!request(&f, IRP_MJ_CLOSE, 0, file, NULL, 0));
+    cleanup(&f);
+}
+int main(void){protocol_owner=pthread_self();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}

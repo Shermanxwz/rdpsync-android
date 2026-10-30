@@ -57,6 +57,8 @@ struct RdpDrive {
     DriveHandle handles[RDP_WS_MAX_HANDLES];
     size_t pending_count, pending_bytes, pending_response_bytes, peak_response_bytes;
     uint64_t read_bytes, written_bytes, completed;
+    uint64_t irp_observed;
+    struct { uint32_t major, minor, file_id, status, arg0, arg1; } irp_trace[16];
     int64_t transport_pending, peak_transport_pending;
     size_t control_remaining, error_remaining;
     struct {
@@ -441,6 +443,20 @@ static UINT drive_irp(DEVICE* device, IRP* irp) {
      * a barrier: they may still be queued ahead of that worker. */
     d->ready_epoch = slot->epoch;
     irp->IoStatus = process_irp(d, irp);
+    const size_t trace_index = (size_t)(d->irp_observed++ % 16);
+    d->irp_trace[trace_index].major = irp->MajorFunction;
+    d->irp_trace[trace_index].minor = irp->MinorFunction;
+    d->irp_trace[trace_index].file_id = irp->FileId;
+    d->irp_trace[trace_index].status = irp->IoStatus;
+    const BYTE* trace_input = Stream_ConstPointer(irp->input);
+    const size_t trace_remaining = Stream_GetRemainingLength(irp->input);
+    const bool metadata_arg = irp->MajorFunction == IRP_MJ_CREATE ||
+        irp->MajorFunction == IRP_MJ_READ || irp->MajorFunction == IRP_MJ_WRITE ||
+        irp->MajorFunction == IRP_MJ_QUERY_INFORMATION || irp->MajorFunction == IRP_MJ_QUERY_VOLUME_INFORMATION ||
+        irp->MajorFunction == IRP_MJ_SET_INFORMATION ||
+        (irp->MajorFunction == IRP_MJ_DIRECTORY_CONTROL && irp->MinorFunction == IRP_MN_QUERY_DIRECTORY);
+    d->irp_trace[trace_index].arg0 = metadata_arg && trace_remaining >= 4 ? get32(trace_input) : 0;
+    d->irp_trace[trace_index].arg1 = irp->MajorFunction == IRP_MJ_CREATE && trace_remaining >= 28 ? get32(trace_input + 24) : 0;
     if (irp->IoStatus != STATUS_SUCCESS) empty_response(irp);
     else if (!d->revoked && d->state == 3) d->state = 4;
     slot->irp = irp;
@@ -757,5 +773,16 @@ void rdpsync_drive_diagnostics(RdpDrive* d, char* output, size_t capacity) {
         "shared-space-ready-responses=%zu\nshared-space-control-input-remaining=%zu\n"
         "shared-space-error-output-remaining=%zu\n",
         d->pending_response_bytes, d->peak_response_bytes, ready, d->control_remaining, d->error_remaining);
+    /* Fixed numeric protocol metadata only: never paths, names or file bytes. */
+    const uint64_t first = d->irp_observed > 16 ? d->irp_observed - 16 : 0;
+    for (uint64_t i = first; i < d->irp_observed; ++i) {
+        const size_t used = strlen(output), index = (size_t)(i % 16);
+        if (used >= capacity - 1) break;
+        snprintf(output + used, capacity - used,
+            "shared-space-irp=%llu,%u,%u,%u,0x%08x,0x%08x,0x%08x\n",
+            (unsigned long long)i, d->irp_trace[index].major, d->irp_trace[index].minor,
+            d->irp_trace[index].file_id, d->irp_trace[index].status,
+            d->irp_trace[index].arg0, d->irp_trace[index].arg1);
+    }
     pthread_mutex_unlock(&d->mutex);
 }
