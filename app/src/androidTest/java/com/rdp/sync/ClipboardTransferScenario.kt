@@ -21,6 +21,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
+import com.rdp.sync.transfer.TransferFailure
 import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.MainActivity
 import com.rdp.sync.ui.screens.RdpConnectionScreen
@@ -195,10 +196,56 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
             tapDocumentAction("confirm-reoffer-selection") { node -> node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT") }
             waitFor("restaged explicit selection") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
+            val beforeReofferGeneration = RdpConnector.sessionGeneration()
             compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+            var expectedRouteOfferBudget = budgetAfterRead
+            if (peer == ClipboardFixturePeer.XRDP) {
+                // This pinned peer does not negotiate snapshot locking. A second
+                // offer must be rejected, not silently replace a first generation.
+                val reason = TransferFailure.Reason.RECONNECT_REQUIRED.message
+                waitFor("actual no-lock peer reports explicit reconnect-required") {
+                    compose.onAllNodesWithText(reason).fetchSemanticsNodes().size == 1
+                }
+                compose.onNodeWithText(reason).performScrollTo().assertIsDisplayed()
+                val previousPoll = RdpConnector.pollDisplayStatus()
+                waitFor("live session remains stable after rejected reoffer") { RdpConnector.pollDisplayStatus() !== previousPoll }
+                assertTrue(RdpConnector.isConnected())
+                assertEquals(beforeReofferGeneration, RdpConnector.sessionGeneration())
+                assertEquals(0L, RdpConnector.nativeFileTransferState()[2])
+                assertEquals(budgetAfterRead, RdpConnector.nativeFileTransferState()[9])
+                assertEquals("Rejected replacement must preserve every selected source", originals.mapValues { sha256(it.value) }, directoryHashes("source"))
+                assertEquals("Rejected replacement must preserve the destination sentinel", sha256(sentinel), directoryHashes("destination").getValue("server-binary.bin"))
+                measurements.put("no_lock_reoffer_rejected_without_reconnect_or_budget_reset", true)
+                    .put("no_lock_reoffer_message", reason)
+                compose.onNodeWithText("重新连接以开始新的发送会话").performScrollTo().performTouchInput { click() }
+                compose.onNodeWithText("重新连接远程桌面？").assertIsDisplayed()
+                assertEquals("Confirmation must precede reconnect", beforeReofferGeneration, RdpConnector.sessionGeneration())
+                compose.onNodeWithText("重新连接").performTouchInput { click() }
+                waitFor("explicit manual reconnect starts a fresh opted-in connection", 45_000) {
+                    val state = RdpConnector.nativeFileTransferState()
+                    RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && state.size == 10 &&
+                        RdpConnector.sessionGeneration() != beforeReofferGeneration && state[1] == 1L
+                }
+                expectedRouteOfferBudget = 32L * 1024 * 1024
+                assertEquals(expectedRouteOfferBudget, RdpConnector.nativeFileTransferState()[9])
+                assertEquals("Manual reconnect must not auto-publish old private files", 0L, RdpConnector.nativeFileTransferState()[2])
+                assertEquals("Explicit reconnect must preserve selected source bytes", originals.mapValues { sha256(it.value) }, directoryHashes("source"))
+                assertEquals(sha256(sentinel), directoryHashes("destination").getValue("server-binary.bin"))
+                measurements.put("no_lock_manual_reconnect_generation", RdpConnector.sessionGeneration())
+                openFiles("发送文件")
+                waitFor("fresh file controller requires fresh explicit selection") { compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().size == 1 }
+                compose.onNodeWithText("选择文件").performScrollTo().performClick()
+                navigateDocumentsFolder("source")
+                originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
+                tapDocumentAction("confirm-fresh-connection-selection") { node ->
+                    node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT")
+                }
+                waitFor("new connection stages only the new SAF selection") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
+                compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+            }
             waitFor("fresh offer") { RdpConnector.nativeFileTransferState()[2] > 0 }
             val routeOffer = RdpConnector.nativeFileTransferState()[2]
-            assertEquals("Re-offering must not reset sending budget", budgetAfterRead, RdpConnector.nativeFileTransferState()[9])
+            assertEquals("Publishing itself must not reset sending budget", expectedRouteOfferBudget, RdpConnector.nativeFileTransferState()[9])
             compose.onNodeWithText("返回远程桌面").performClick()
             assertTrue(RdpConnector.nativeFileTransferOfferRetained(routeOffer))
             sendSystemBack()
@@ -294,23 +341,44 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         // root proves the standalone test process loaded through the real path;
         // adopting shell identity cannot grant that permission to this test.
         waitFor("DocumentsUI discovered the protected standalone synthetic provider", 15_000) {
-            val roots = documentNodes { it.text?.toString() == "RdpSync synthetic transfer fixture" }
+            // Recent also exposes the same provider as an app card behind the
+            // drawer. Require the unique foreground roots-list row, not either
+            // globally matching label or a first-match shortcut.
+            val roots = documentNodes { it.text?.toString() == "RdpSync synthetic transfer fixture" &&
+                ancestorResourceId(it, "/roots_list") != null }
             try {
                 if (roots.size != 1) false else {
                     val root = roots.single()
                     measurements.put("standalone_provider_discovered_by_documentsui", JSONObject()
                         .put("title", root.text).put("package", root.packageName).put("window_id", root.windowId)
+                        .put("ancestor_resource_id", ancestorResourceId(root, "/roots_list"))
                         .put("bounds", Rect().also(root::getBoundsInScreen).toShortString())
                         .put("elapsed_ms", SystemClock.elapsedRealtime()))
                     true
                 }
             } finally { roots.forEach { it.recycle() } }
         }
-        tapDocumentLabel("Downloads")
+        tapDocumentLabel("Downloads", ancestorResourceSuffix = "/roots_list")
         tapDocumentLabel(folder)
         tapDocumentLabel(child)
     }
-    private fun tapDocumentLabel(label: String, longPress: Boolean = false) = tapDocumentAction(label, longPress) { it.text?.toString() == label }
+    private fun tapDocumentLabel(label: String, longPress: Boolean = false, ancestorResourceSuffix: String? = null) =
+        tapDocumentAction(label, longPress) { it.text?.toString() == label &&
+            (ancestorResourceSuffix == null || ancestorResourceId(it, ancestorResourceSuffix) != null) }
+
+    private fun ancestorResourceId(node: AccessibilityNodeInfo, suffix: String): String? {
+        var ancestor = node.parent
+        try {
+            repeat(32) {
+                val current = ancestor ?: return null
+                val resource = current.viewIdResourceName
+                if (resource?.endsWith(suffix) == true) return resource
+                ancestor = current.parent
+                current.recycle()
+            }
+            return null
+        } finally { ancestor?.recycle() }
+    }
     private fun tapDocumentAction(reason: String, longPress: Boolean = false, predicate: (AccessibilityNodeInfo) -> Boolean) {
         val attempt = JSONObject().put("reason", reason).put("long_press", longPress)
             .put("readiness_start_ms", SystemClock.elapsedRealtime())
@@ -363,6 +431,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 node.windowId == expectedWindow && node.packageName?.toString() == expectedPackage)
             attempt.put("package", node.packageName).put("resource_id", node.viewIdResourceName)
                 .put("window_id", node.windowId).put("bounds", bounds.toShortString())
+                .put("roots_list_ancestor", ancestorResourceId(node, "/roots_list"))
                 .put("uptime_before_down", SystemClock.uptimeMillis())
             val injections = JSONArray()
             attempt.put("injections", injections)

@@ -66,13 +66,24 @@ int main(void){
     assert(!rdpsync_transfer_cancel(t,replacement));
     CLIPRDR_FORMAT fmt={123,"FileGroupDescriptorW"};CLIPRDR_FORMAT_LIST fl={.numFormats=1,.formats=&fmt};assert(!c.ServerFormatList(&c,&fl));
     assert(rdpsync_transfer_request_list(t,76)==TF_STALE);int64_t receive=rdpsync_transfer_request_list(t,77);assert(receive>offered);assert(!rdpsync_transfer_pump(t)&&last_clip);
+    /* xrdp's descriptor response has dataLen=count*592+4 plus a zero DWORD
+     * trailer. The admitted metadata size must exclude that trailer. */
+    uint8_t padded[TF_MANIFEST_MAX+12]={0};put16(padded,CB_FORMAT_DATA_RESPONSE);put16(padded+2,CB_RESPONSE_OK);put32(padded+4,(uint32_t)n);memcpy(padded+8,bytes,n);
+    RdpTransferIngress ingress={0};assert(rdpsync_transfer_ingress(&ingress,padded,12,CHANNEL_FLAG_FIRST,n+12));
+    assert(rdpsync_transfer_admit_incoming(t,padded,12,n+12));
+    assert(rdpsync_transfer_ingress(&ingress,padded+12,n,CHANNEL_FLAG_LAST,n+12));
     CLIPRDR_FORMAT_DATA_RESPONSE descriptor={.common={.msgFlags=CB_RESPONSE_OK,.dataLen=(UINT32)n},.requestedFormatData=bytes};assert(!c.ServerFormatDataResponse(&c,&descriptor));
     assert(!rdpsync_transfer_manifest(t,receive,parsed,&count)&&count==2);
     assert(rdpsync_transfer_request_chunk(t,receive,0,UINT64_MAX,1)==TF_INVALID);assert(rdpsync_transfer_request_chunk(t,receive,0,0,65537)==TF_INVALID);
     assert(!rdpsync_transfer_request_chunk(t,receive,0,0,4));assert(rdpsync_transfer_request_chunk(t,receive,0,0,4)==TF_BUSY);assert(!rdpsync_transfer_pump(t));
     CLIPRDR_FILE_CONTENTS_RESPONSE answer={.common={.msgFlags=CB_RESPONSE_OK},.streamId=last_request.streamId+1,.cbRequested=4,.requestedData=(const BYTE*)"EFGH"};
     assert(!c.ServerFileContentsResponse(&c,&answer));uint8_t chunk[65536];assert(rdpsync_transfer_take_chunk(t,receive,chunk,sizeof(chunk))==0);
-    answer.streamId=last_request.streamId;assert(!c.ServerFileContentsResponse(&c,&answer));assert(rdpsync_transfer_take_chunk(t,receive,chunk,sizeof(chunk))==4&&!memcmp(chunk,"EFGH",4));
+    answer.streamId=last_request.streamId;
+    memset(padded,0,20);put16(padded,CB_FILECONTENTS_RESPONSE);put16(padded+2,CB_RESPONSE_OK);put32(padded+4,8);put32(padded+8,last_request.streamId);memcpy(padded+12,"EFGH",4);
+    ingress=(RdpTransferIngress){0};assert(rdpsync_transfer_ingress(&ingress,padded,12,CHANNEL_FLAG_FIRST,20));
+    assert(rdpsync_transfer_admit_incoming(t,padded,12,20));assert(!rdpsync_transfer_admit_incoming(t,padded,12,20));
+    assert(rdpsync_transfer_ingress(&ingress,padded+12,8,CHANNEL_FLAG_LAST,20));
+    assert(!c.ServerFileContentsResponse(&c,&answer));assert(rdpsync_transfer_take_chunk(t,receive,chunk,sizeof(chunk))==4&&!memcmp(chunk,"EFGH",4));
     assert(!rdpsync_transfer_request_chunk(t,receive,0,0,4));assert(!rdpsync_transfer_pump(t));
     answer.streamId=last_request.streamId;answer.common.msgFlags=CB_RESPONSE_OK|CB_RESPONSE_FAIL;
     assert(!c.ServerFileContentsResponse(&c,&answer));assert(rdpsync_transfer_take_chunk(t,receive,chunk,sizeof(chunk))==TF_INVALID);
@@ -105,6 +116,9 @@ int main(void){
     answer.streamId=last_request.streamId;assert(!c.ServerFileContentsResponse(&c,&answer));assert(!t->data_admitted&&!t->retired_request_id);
     int64_t unsent=rdpsync_transfer_request_list(t,77);assert(unsent>0);assert(!rdpsync_transfer_cancel(t,unsent));
     unsent=rdpsync_transfer_request_list(t,77);assert(unsent>0);assert(!rdpsync_transfer_cancel(t,unsent)); /* no false barrier */
+    uint8_t caps_packet[28]={0};put16(caps_packet,CB_CLIP_CAPS);put32(caps_packet+4,16);t->incoming_control_remaining=28;
+    assert(rdpsync_transfer_admit_incoming(t,caps_packet,28,28)&&t->incoming_control_remaining==0); /* actual wirebytes inclpad */
+    assert(!rdpsync_transfer_admit_incoming(t,caps_packet,28,28));
     t->incoming_control_remaining=16;put16(header,CB_CLIP_CAPS);put32(header+4,8);
     assert(rdpsync_transfer_admit_incoming(t,header,16,16));assert(!rdpsync_transfer_admit_incoming(t,header,16,16));
     /* Simulated stalled peer: send delegates never acknowledge/drain. Quotas
@@ -122,5 +136,24 @@ int main(void){
     assert(!c.ServerFormatDataRequest(&c,&fr));assert(c.ServerFormatDataRequest(&c,&fr)==ERROR_NOT_ENOUGH_QUOTA);
     assert(t->send_remaining==remaining);
     rdpsync_transfer_detach(t,&c);rdpsync_transfer_free(t);
+    /* A no-lock peer's optional zero ID is only an absent-ID sentinel on the
+     * first snapshot. It never grants a lock or revives cancelled/replaced data. */
+    t=rdpsync_transfer_new(78,1);rdpsync_transfer_attach(t,&c);gen.generalFlags=CB_STREAM_FILECLIP_ENABLED;
+    assert(!c.ServerCapabilities(&c,&caps)&&!c.MonitorReady(&c,NULL));
+    char nolock[]="/tmp/rdpsync-transfer-nolock-XXXXXX";rw=mkstemp(nolock);assert(rw>=0&&write(rw,"ABCD",4)==4);fd=open(nolock,O_RDONLY|O_CLOEXEC);unlink(nolock);close(rw);
+    int64_t first=rdpsync_transfer_offer(t,78,files,&fd,1);assert(first>0&&!t->require_lock&&!t->peer_lock);
+    req=(CLIPRDR_FILE_CONTENTS_REQUEST){.streamId=40,.listIndex=0,.dwFlags=FILECONTENTS_RANGE,.cbRequested=4,.haveClipDataId=1,.clipDataId=0};
+    assert(!c.ServerFileContentsRequest(&c,&req)&&response_flags==CB_RESPONSE_OK&&!memcmp(response_bytes,"ABCD",4));
+    req.clipDataId=99;assert(!c.ServerFileContentsRequest(&c,&req)&&response_flags==CB_RESPONSE_FAIL);req.clipDataId=0;
+    gen.generalFlags|=CB_CAN_LOCK_CLIPDATA;assert(!c.ServerCapabilities(&c,&caps));
+    assert(!c.ServerFileContentsRequest(&c,&req)&&response_flags==CB_RESPONSE_FAIL); /* no zero-ID lock was granted */
+    gen.generalFlags=CB_STREAM_FILECLIP_ENABLED;assert(!c.ServerCapabilities(&c,&caps));
+    assert(!rdpsync_transfer_cancel(t,first));assert(!c.ServerFileContentsRequest(&c,&req)&&response_flags==CB_RESPONSE_FAIL);
+    remaining=t->send_remaining;assert(rdpsync_transfer_offer(t,78,files,&fd,1)==TF_RECONNECT_REQUIRED&&t->send_remaining==remaining);
+    gen.generalFlags|=CB_CAN_LOCK_CLIPDATA;assert(!c.ServerCapabilities(&c,&caps));
+    int64_t second_offer=rdpsync_transfer_offer(t,78,files,&fd,1);assert(second_offer>first&&t->require_lock);close(fd);
+    gen.generalFlags=CB_STREAM_FILECLIP_ENABLED;assert(!c.ServerCapabilities(&c,&caps));
+    assert(!c.ServerFileContentsRequest(&c,&req)&&response_flags==CB_RESPONSE_FAIL&&t->require_lock); /* downgrade can't erase replacement guard */
+    assert(!rdpsync_transfer_cancel(t,second_offer));rdpsync_transfer_detach(t,&c);rdpsync_transfer_free(t);
     puts("file-only transfer: manifest bounds/names, readonly FD leases, generations, range requests, cancellation and stale responses PASS");
 }

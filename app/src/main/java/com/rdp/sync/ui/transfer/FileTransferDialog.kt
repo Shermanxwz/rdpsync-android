@@ -73,7 +73,7 @@ internal fun FileTransferDialog(
                         color = if (remaining == 0L) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
                     Text("重复读取、失败或取消的读取也可能计入额度；取消传输不会恢复额度。只有主动重新连接才会重置，不会自动重连或续传。",
                         style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = onReconnect, enabled = !busy && !pickerPending) { Text("重新连接以重置发送额度") }
+                    TextButton(onClick = onReconnect, enabled = !busy && !pickerPending) { Text("重新连接以开始新的发送会话") }
                     Text("重连会短暂中断远程桌面并撤回当前文件共享；请先保存远程工作，重连后需重新选择并提供文件。",
                         style = MaterialTheme.typography.bodySmall)
                     Text("只读取你随后明确选择的文件，并复制到本应用私有暂存区；不会共享手机目录或监听系统剪贴板。",

@@ -94,33 +94,65 @@ done:
     if(directory>=0)close(directory);if(base>=0)close(base);if(root>=0)close(root);
     return file>=0?file:TF_IO;
 }
-int rdpsync_transfer_ingress(RdpTransferIngress* s,size_t size,uint32_t flags,size_t total) {
-    if(!s)return 0;
-    if(flags&(CHANNEL_FLAG_SUSPEND|CHANNEL_FLAG_RESUME))return 1;
-    if(total<8||total>RDPSYNC_TRANSFER_MESSAGE_MAX||!size||size>total)return 0;
-    if(flags&CHANNEL_FLAG_FIRST) {if(s->active||s->messages>=RDPSYNC_TRANSFER_MAX_MESSAGES)return 0;s->active=1;s->total=total;s->received=0;}
-    if(!s->active||total!=s->total||size>s->total-s->received)return 0;
-    s->received+=size;
-    if(flags&CHANNEL_FLAG_LAST){if(s->received!=s->total)return 0;s->active=0;s->received=0;s->total=0;++s->messages;}
-    return 1;
-}
 static uint16_t get16(const uint8_t* p) { return (uint16_t)(p[0]|(uint16_t)p[1]<<8); }
 static uint32_t get32(const uint8_t* p) { return (uint32_t)get16(p)|(uint32_t)get16(p+2)<<16; }
+/* xrdp v0.10.6.1 clipboard.c / clipboard_file.c append one zero DWORD
+ * outside dataLen on these message shapes. Accept ONLY that bounded trailer;
+ * it is not payload and never increases admitted descriptor/chunk lengths. */
+static int zero_trailer_shape(uint16_t type,uint32_t length) {
+    switch(type) {
+        case CB_CLIP_CAPS:return length==16;
+        case CB_MONITOR_READY:case CB_FORMAT_LIST_RESPONSE:return length==0;
+        case CB_FORMAT_DATA_REQUEST:return length==4;
+        case CB_FORMAT_LIST:return 1; /* variable serialized format records */
+        case CB_FORMAT_DATA_RESPONSE:return length<=TF_MANIFEST_MAX;
+        case CB_FILECONTENTS_REQUEST:return length==28;
+        case CB_FILECONTENTS_RESPONSE:return length>=4&&length<=RDPSYNC_TRANSFER_CHUNK+4;
+        default:return 0;
+    }
+}
+static int wire_payload_length(const uint8_t* data,size_t size,size_t total,uint32_t* length) {
+    if(!data||size<8||total<8||total>RDPSYNC_TRANSFER_MESSAGE_MAX)return 0;
+    uint32_t declared=get32(data+4);
+    if(declared>total-8)return 0;
+    size_t extra=total-8-declared;
+    if(extra&&!(extra==4&&zero_trailer_shape(get16(data),declared)))return 0;
+    *length=declared;return 1;
+}
+int rdpsync_transfer_ingress(RdpTransferIngress* s,const uint8_t* data,size_t size,uint32_t flags,size_t total) {
+    if(!s)return 0;
+    if(flags&(CHANNEL_FLAG_SUSPEND|CHANNEL_FLAG_RESUME))return 1;
+    if(!data||total<8||total>RDPSYNC_TRANSFER_MESSAGE_MAX||!size||size>total)return 0;
+    if(flags&CHANNEL_FLAG_FIRST) {
+        uint32_t declared=0;
+        if(s->active||s->messages>=RDPSYNC_TRANSFER_MAX_MESSAGES||!wire_payload_length(data,size,total,&declared))return 0;
+        s->active=1;s->total=total;s->received=0;s->payload_end=(size_t)declared+8;
+    }
+    if(!s->active||total!=s->total||size>s->total-s->received)return 0;
+    /* Validate a split trailer BEFORE forwarding the completing fragment to
+     * upstream's async queue. Earlier incomplete reassembly stays size-capped. */
+    size_t padding_start=s->received<s->payload_end?s->payload_end-s->received:0;
+    for(size_t i=padding_start;i<size;i++)if(data[i]!=0)return 0;
+    s->received+=size;
+    if(flags&CHANNEL_FLAG_LAST){if(s->received!=s->total)return 0;s->active=0;s->received=0;s->total=0;s->payload_end=0;++s->messages;}
+    return 1;
+}
 /* The generic static-channel worker queues completed PDUs before callbacks.
  * Only explicitly requested data gets a one-message admission slot; other
  * messages share a finite connection-lifetime control-byte budget. */
 int rdpsync_transfer_admit_incoming(RdpTransfer* t,const uint8_t* p,size_t size,size_t total) {
-    if(!t||!p||size<8||total<8||total>RDPSYNC_TRANSFER_MESSAGE_MAX||get32(p+4)!=total-8)return 0;
+    uint32_t payload=0;
+    if(!t||!wire_payload_length(p,size,total,&payload))return 0;
     uint16_t type=get16(p);pthread_mutex_lock(&t->mutex);int okay=0;
     if(type==CB_FILECONTENTS_RESPONSE) {
-        if(size>=12&&total>=12&&!t->data_admitted) {
+        if(size>=12&&payload>=4&&!t->data_admitted) {
             uint32_t id=get32(p+8),length=0;
             if(t->phase==3&&!t->request_chunk&&id==t->request_id)length=t->request_length;
             else if(id&&id==t->retired_request_id)length=t->retired_request_length;
-            if(length&&total-12<=length){t->data_admitted=1;t->admitted_stream_id=id;okay=1;}
+            if(length&&payload-4<=length){t->data_admitted=1;t->admitted_stream_id=id;okay=1;}
         }
     } else if(type==CB_FORMAT_DATA_RESPONSE) {
-        if(t->list_inflight&&!t->format_admitted&&total<=TF_MANIFEST_MAX+8){t->format_admitted=1;okay=1;}
+        if(t->list_inflight&&!t->format_admitted&&payload<=TF_MANIFEST_MAX){t->format_admitted=1;okay=1;}
     } else if(total<=t->incoming_control_remaining) {
         t->incoming_control_remaining-=total;okay=1;
     }
@@ -283,10 +315,13 @@ static UINT contents_request_callback(CliprdrClientContext* c,const CLIPRDR_FILE
     RdpTransfer* t=transfer_from(c);if(!t||!p)return ERROR_INVALID_PARAMETER;
     int fd=-1,valid=0;uint64_t size=0,token=0,offset=(uint64_t)p->nPositionHigh<<32|p->nPositionLow;uint32_t length=0;
     pthread_mutex_lock(&t->mutex);
-    int lock_ok=!p->haveClipDataId&&!t->require_lock;if(p->haveClipDataId)for(size_t i=0;i<t->lock_count;i++)if(t->locks[i]==p->clipDataId)lock_ok=1;
+    /* xrdp sends an optional zero ID without negotiating CAN_LOCK_CLIPDATA.
+     * Treat only that sentinel as absent, and only for the first snapshot. */
+    int lock_ok=!t->require_lock&&(!p->haveClipDataId||(!t->peer_lock&&p->clipDataId==0));
+    if(p->haveClipDataId&&t->peer_lock)for(size_t i=0;i<t->lock_count;i++)if(t->locks[i]==p->clipDataId)lock_ok=1;
     if(t->ready&&t->offer_token&&p->listIndex<t->offer_count&&lock_ok&&!t->active_reads) {
         size=t->offered[p->listIndex].size;token=t->offer_token;
-        if(p->dwFlags==FILECONTENTS_SIZE&&p->cbRequested==8) { valid=1;length=8; }
+        if(p->dwFlags==FILECONTENTS_SIZE&&p->cbRequested==8&&offset==0) { valid=1;length=8; }
         else if(p->dwFlags==FILECONTENTS_RANGE&&p->cbRequested>0&&p->cbRequested<=RDPSYNC_TRANSFER_PEER_RANGE&&offset<=size) {
             length=(uint32_t)((size-offset<p->cbRequested)?size-offset:p->cbRequested);fd=fcntl(t->fds[p->listIndex],F_DUPFD_CLOEXEC,0);valid=fd>=0;
         }
@@ -362,7 +397,7 @@ int64_t rdpsync_transfer_offer(RdpTransfer* t,uint64_t gen,const RdpTransferFile
     uint64_t total; if(!fds||!files_valid(files,count,&total))return TF_INVALID;
     int copies[RDPSYNC_TRANSFER_FILES];for(size_t i=0;i<RDPSYNC_TRANSFER_FILES;i++)copies[i]=-1;
     for(size_t i=0;i<count;i++){struct stat st;int flags=fcntl(fds[i],F_GETFL);if(flags<0||(flags&O_ACCMODE)!=O_RDONLY||fstat(fds[i],&st)||!S_ISREG(st.st_mode)||st.st_size<0||(uint64_t)st.st_size!=files[i].size)goto invalid;copies[i]=fcntl(fds[i],F_DUPFD_CLOEXEC,0);if(copies[i]<0)goto invalid;}
-    pthread_mutex_lock(&t->mutex);int64_t result=t->generation!=gen?TF_STALE:t->capability!=1?TF_UNAVAILABLE:total>t->send_remaining?TF_QUOTA:(t->lock_count||t->active_reads||(t->ever_offered&&!t->peer_lock))?TF_BUSY:0;
+    pthread_mutex_lock(&t->mutex);int64_t result=t->generation!=gen?TF_STALE:t->capability!=1?TF_UNAVAILABLE:total>t->send_remaining?TF_QUOTA:(t->ever_offered&&!t->peer_lock)?TF_RECONNECT_REQUIRED:(t->lock_count||t->active_reads)?TF_BUSY:0;
     if(!result){uint64_t token=token_new();if(!token)result=TF_INVALID;else{close_offer(t);memcpy(t->offered,files,count*sizeof(*files));memcpy(t->fds,copies,count*sizeof(int));t->offer_count=count;t->offer_token=token;t->require_lock=t->ever_offered;t->ever_offered=1;t->served_bytes=0;t->error=0;t->advertise=1;result=(int64_t)token;}}
     pthread_mutex_unlock(&t->mutex);if(result>0)return result;
     for(size_t i=0;i<count;i++)if(copies[i]>=0)close(copies[i]);return result;

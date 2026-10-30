@@ -15,11 +15,12 @@
 #define RDPSYNC_TRANSFER_MESSAGE_MAX (RDPSYNC_TRANSFER_CHUNK + 1024U)
 /* Negative results are stable JNI/storage error codes; no endpoint/file text. */
 enum { TF_DISCONNECTED=-1, TF_UNAVAILABLE=-2, TF_BUSY=-3, TF_STALE=-4,
-       TF_INVALID=-5, TF_IO=-6, TF_CANCELLED=-7, TF_TIMEOUT=-8, TF_QUOTA=-9 };
+       TF_INVALID=-5, TF_IO=-6, TF_CANCELLED=-7, TF_TIMEOUT=-8, TF_QUOTA=-9,
+       TF_RECONNECT_REQUIRED=-10 };
 typedef struct { uint16_t name[RDPSYNC_TRANSFER_NAME + 1]; uint64_t size; } RdpTransferFile;
 typedef struct RdpTransfer RdpTransfer;
-typedef struct { size_t total, received; uint32_t messages; int active; } RdpTransferIngress;
-int rdpsync_transfer_ingress(RdpTransferIngress* state, size_t size, uint32_t flags, size_t total);
+typedef struct { size_t total, received, payload_end; uint32_t messages; int active; } RdpTransferIngress;
+int rdpsync_transfer_ingress(RdpTransferIngress* state, const uint8_t* data, size_t size, uint32_t flags, size_t total);
 int rdpsync_transfer_admit_incoming(RdpTransfer* transfer, const uint8_t* first, size_t size, size_t total);
 /* Local staging only: runtime_cache is the immutable Application-initialized
  * directory, never a JNI path argument. Returns an owned CLOEXEC readonly fd. */

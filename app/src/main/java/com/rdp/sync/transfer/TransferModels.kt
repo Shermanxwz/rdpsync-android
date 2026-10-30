@@ -51,6 +51,7 @@ class TransferFailure(val reason: Reason) : IllegalStateException(reason.message
         CANCELLED("文件传输已取消；原始文件未修改。"),
         CLOSED("会话已结束，请重新选择文件。"),
         BUSY("另一项文件操作尚未完成，请稍后重试。"),
+        RECONNECT_REQUIRED("远程端不支持文件快照锁定；停止共享后再次发送或替换文件，需要你手动重新连接。不会自动重连。"),
         UNSUPPORTED("此连接不支持文件剪贴板传输。"),
         FILES_ONLY("目前仅支持普通文件；文件夹、快捷方式或虚拟文档不受支持。"),
         STALE("远程文件列表或会话已变化，请重新获取并确认。"),
@@ -59,6 +60,18 @@ class TransferFailure(val reason: Reason) : IllegalStateException(reason.message
         EXPORT_INCOMPLETE("导出未完成；暂存原件仍保留，目标目录可能残留一个新建的不完整副本。")
     }
 }
+
+/** Pure mapping keeps reconnect-required distinct from temporary backpressure and quota exhaustion. */
+internal fun nativeTransferFailure(code: Int): TransferFailure = TransferFailure(when (code) {
+    -1, -4 -> TransferFailure.Reason.STALE
+    -2 -> TransferFailure.Reason.UNSUPPORTED
+    -3 -> TransferFailure.Reason.BUSY
+    -5 -> TransferFailure.Reason.FILES_ONLY
+    -7 -> TransferFailure.Reason.CANCELLED
+    -9 -> TransferFailure.Reason.SEND_BUDGET
+    -10 -> TransferFailure.Reason.RECONNECT_REQUIRED
+    else -> TransferFailure.Reason.IO
+})
 
 /** Cooperative cancellation also closes provider streams / cancels Android CancellationSignals. */
 class TransferCancellation {

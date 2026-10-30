@@ -103,13 +103,5 @@ class RdpFileTransferTransport(override val generation: Long) : TransferTranspor
         }
     }
     private fun checkCurrent() { if (!isCurrent()) throw TransferFailure(TransferFailure.Reason.STALE) }
-    private fun nativeError(code: Int): Nothing = throw TransferFailure(when (code) {
-        -1, -4 -> TransferFailure.Reason.STALE
-        -2 -> TransferFailure.Reason.UNSUPPORTED
-        -3 -> TransferFailure.Reason.BUSY
-        -5 -> TransferFailure.Reason.FILES_ONLY
-        -7 -> TransferFailure.Reason.CANCELLED
-        -9 -> TransferFailure.Reason.SEND_BUDGET
-        else -> TransferFailure.Reason.IO
-    })
+    private fun nativeError(code: Int): Nothing = throw nativeTransferFailure(code)
 }

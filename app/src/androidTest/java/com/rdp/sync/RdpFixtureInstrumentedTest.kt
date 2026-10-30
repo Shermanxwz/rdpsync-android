@@ -440,6 +440,71 @@ class RdpFixtureInstrumentedTest {
             .put("density", resources.displayMetrics.density).put("maximum_crossing_ms_exclusive", 500)
             .put("step_delay_ms", 5).put("cadence_source", "AndroidX UiAutomator 2.3.0 InteractionController")
             .put("before", systemBarVisibility()))
+        TransientSystemBarsPolicy.verifyParserContract()
+        measurements.put("transient_policy_parser_mutations_checked", true)
+        val policyBaseline = systemTransientPolicy()
+        assertTrue("One swipe must start with no already-visible transient policy", policyBaseline.showing.isEmpty())
+        var statusRegion = Rect()
+        var navigationRegions = emptyList<Rect>()
+        compose.runOnUiThread {
+            val insets = requireNotNull(ViewCompat.getRootWindowInsets(compose.activity.window.decorView))
+            val status = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.statusBars())
+            val navigation = insets.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.navigationBars())
+            val left = bounds.getInt("window_left"); val topEdge = bounds.getInt("window_top")
+            val right = left + bounds.getInt("window_width"); val bottom = topEdge + bounds.getInt("window_height")
+            statusRegion = Rect(left, topEdge, right, topEdge + status.top)
+            navigationRegions = listOf(Rect(left, topEdge, left + navigation.left, bottom),
+                Rect(right - navigation.right, topEdge, right, bottom),
+                Rect(left, bottom - navigation.bottom, right, bottom)).filterNot { it.isEmpty }
+        }
+        assertFalse("Actual top system bar region must be measurable", statusRegion.isEmpty)
+        val baselineShot = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val baselineStatus = pixelsIn(baselineShot, statusRegion)
+        val baselineNavigation = navigationRegions.map { pixelsIn(baselineShot, it) }
+        File(evidence, "04g-before-system-edge.png").outputStream().use { baselineShot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        baselineShot.recycle()
+        measurements.put("transient_system_bar_regions", JSONObject().put("status", statusRegion.toShortString())
+            .put("navigation", JSONArray(navigationRegions.map { it.toShortString() }))
+            .put("policy_before", policyBaseline.section))
+        val handleOrigin = IntArray(2)
+        val handleWindowOrigin = IntArray(2)
+        compose.runOnUiThread {
+            compose.activity.window.decorView.getLocationOnScreen(handleOrigin)
+            compose.activity.window.decorView.getLocationInWindow(handleWindowOrigin)
+        }
+        val handleBounds = compose.onNodeWithContentDescription("会话菜单").fetchSemanticsNode().boundsInWindow
+        val handleScreen = Rect((handleOrigin[0] - handleWindowOrigin[0] + handleBounds.left).toInt(),
+            (handleOrigin[1] - handleWindowOrigin[1] + handleBounds.top).toInt(),
+            (handleOrigin[0] - handleWindowOrigin[0] + handleBounds.right).toInt(),
+            (handleOrigin[1] - handleWindowOrigin[1] + handleBounds.bottom).toInt())
+        measurements.put("transient_floating_handle", JSONObject().put("bounds_in_window", handleBounds.toString())
+            .put("bounds_on_screen", handleScreen.toShortString())
+            .put("intersects_status_region", Rect.intersects(handleScreen, statusRegion))
+            .put("intersects_navigation_region", navigationRegions.any { Rect.intersects(handleScreen, it) }))
+        val exclusions = mutableListOf(handleScreen)
+        compose.runOnUiThread {
+            val view = desktop(); val origin = IntArray(2); view.getLocationOnScreen(origin)
+            val transform = view.viewportSnapshot()
+            fun remoteRect(left: Float, top: Float, right: Float, bottom: Float): Rect {
+                val a = transform.toScreen(left, top); val b = transform.toScreen(right, bottom)
+                return Rect((origin[0] + a.x).toInt(), (origin[1] + a.y).toInt(),
+                    kotlin.math.ceil(origin[0] + b.x).toInt(), kotlin.math.ceil(origin[1] + b.y).toInt())
+            }
+            // Exact synthetic desktop dynamic feedback regions (rdp_desktop.py),
+            // not color tolerance: only stable RGB/background pixels are compared.
+            exclusions += remoteRect(304f, 16f, 369f, 81f)
+            exclusions += remoteRect(0f, 96f, transform.remoteWidth.toFloat(), 240f)
+        }
+        val pointerMargin = 32 * resources.displayMetrics.density
+        exclusions += Rect((x - pointerMargin).toInt(), top.toInt(),
+            kotlin.math.ceil(x + pointerMargin).toInt(), kotlin.math.ceil(top + distance + pointerMargin).toInt())
+        val statusEligible = eligiblePixels(statusRegion, exclusions)
+        val navigationEligible = navigationRegions.map { eligiblePixels(it, exclusions) }
+        assertTrue("Stable system bar tiles must not be empty", statusEligible > 0 && navigationEligible.all { it > 0 })
+        measurements.put("transient_pixel_mask", JSONObject()
+            .put("excluded_screen_rectangles", JSONArray(exclusions.map { it.toShortString() }))
+            .put("status_pixels_compared", statusEligible).put("navigation_pixels_compared", JSONArray(navigationEligible))
+            .put("reason", "Exclude mapped remote text/feedback, actual floating control/ripple bounds and pointer corridor; exact stable RGB/background comparison"))
         val events = JSONArray()
         measurements.put("transient_system_bar_swipe", events)
         val down = SystemClock.uptimeMillis()
@@ -474,8 +539,22 @@ class RdpFixtureInstrumentedTest {
         val observations = JSONArray()
         measurements.put("transient_system_bar_observations", observations)
         var everChanged = false
-        fun observe(): JSONObject {
-            val b = systemBarVisibility()
+        var screenshotIndex = 0
+        fun observe(saveAs: String? = null): Triple<TransientSystemBarsPolicy, Int, Int> {
+            val started = SystemClock.elapsedRealtime()
+            val policy = systemTransientPolicy()
+            val shot = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+            val screenshotAt = SystemClock.elapsedRealtime()
+            val statusDiff = changedPixels(pixelsIn(shot, statusRegion), baselineStatus, statusRegion, exclusions)
+            val navigationDiff = navigationRegions.indices.sumOf { i ->
+                changedPixels(pixelsIn(shot, navigationRegions[i]), baselineNavigation[i], navigationRegions[i], exclusions)
+            }
+            // Preserve the actual contemporaneous image, not a second delayed capture.
+            if (screenshotIndex < 4 || (policy.showing.isNotEmpty() && screenshotIndex < 16) || saveAs != null) {
+                val name = saveAs ?: "04g-system-edge-observation-${screenshotIndex++}"
+                File(evidence, "$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            }
+            shot.recycle()
             val server = fixtureState()
             val requested = RdpConnector.pollDisplayStatus().requested
             everChanged = everChanged || !RdpConnector.isConnected() || !actualSize(width, height) ||
@@ -483,24 +562,62 @@ class RdpFixtureInstrumentedTest {
                 server.getString("session_id") != sessionId || server.getInt("desktop_pid") != pid ||
                 RdpConnector.nativeGetTelemetry()[11] != generation ||
                 requested?.let { it.width != width || it.height != height } == true
-            b.put("elapsed_ms", SystemClock.elapsedRealtime()).put("client_width", RdpConnector.getWidth())
-                .put("client_height", RdpConnector.getHeight()).put("server_width", server.getInt("width"))
-                .put("server_height", server.getInt("height")).put("native_generation", RdpConnector.nativeGetTelemetry()[11])
-                .put("ever_changed", everChanged)
-            observations.put(b)
-            return b
+            observations.put(systemBarVisibility().put("observation_started_ms", started)
+                .put("screenshot_elapsed_ms", screenshotAt).put("policy_section", policy.section)
+                .put("policy_transient_types", JSONArray(policy.showing.toList()))
+                .put("status_region_changed_pixels", statusDiff).put("navigation_region_changed_pixels", navigationDiff)
+                .put("client_width", RdpConnector.getWidth()).put("client_height", RdpConnector.getHeight())
+                .put("server_width", server.getInt("width")).put("server_height", server.getInt("height"))
+                .put("native_generation", RdpConnector.nativeGetTelemetry()[11]).put("ever_changed", everChanged))
+            return Triple(policy, statusDiff, navigationDiff)
         }
-        waitFor("physical edge swipe reveals transient Android system bars", 5_000) {
-            val b = observe(); b.getBoolean("status") || b.getBoolean("navigation")
+        val revealDeadline = SystemClock.elapsedRealtime() + 5_000
+        waitFor("one physical edge swipe reveals real SystemUI policy and actual top-bar pixels", 5_000) {
+            val (policy, statusDiff) = observe()
+            SystemClock.elapsedRealtime() <= revealDeadline && "statusBars" in policy.showing && statusDiff > 0
         }
-        screenshot("04g-transient-system-bars-visible")
-        waitFor("transient Android bars auto-hide without a remote resize", 12_000) {
-            val b = observe(); !b.getBoolean("status") && !b.getBoolean("navigation")
+        measurements.put("transient_system_bar_reveal_verified", true)
+        val hideDeadline = SystemClock.elapsedRealtime() + 12_000
+        waitFor("transient system policy clears and exact original bar-region pixels return", 12_000) {
+            val (policy, statusDiff, navigationDiff) = observe()
+            SystemClock.elapsedRealtime() <= hideDeadline && policy.showing.isEmpty() && statusDiff == 0 && navigationDiff == 0
         }
+        observe("04h-system-bars-hidden-restored")
         assertFalse("Transient bars must not resize or reconnect the remote desktop: $observations", everChanged)
         assertFullscreenDefault("after_transient_bars_fullscreen")
         assertColor(40, 40, Color.RED)
         measurements.put("transient_bars_preserved_remote_session", true)
+    }
+
+    private fun systemTransientPolicy(): TransientSystemBarsPolicy {
+        // AOSP15 fake control deliberately masks transient visibility from app
+        // Insets. Parse complete display0 system policy instead, never assume a
+        // missing/truncated dump means hidden. Owned synthetic emulator only.
+        val dump = shellOutput("dumpsys -t 2 window displays")
+        return try { TransientSystemBarsPolicy.parse(dump) } catch (failure: Throwable) {
+            File(evidence, "system-policy-parse-failure.txt").writeText(dump.take(256_000))
+            throw failure
+        }
+    }
+
+    private fun changedPixels(actual: IntArray, baseline: IntArray, region: Rect, exclusions: List<Rect>): Int {
+        require(actual.size == baseline.size)
+        return actual.indices.count { i -> actual[i] != baseline[i] && exclusions.none {
+            it.contains(region.left + i % region.width(), region.top + i / region.width())
+        } }
+    }
+
+    private fun eligiblePixels(region: Rect, exclusions: List<Rect>): Int =
+        (0 until region.width() * region.height()).count { i -> exclusions.none {
+            it.contains(region.left + i % region.width(), region.top + i / region.width())
+        } }
+
+
+    private fun pixelsIn(bitmap: Bitmap, region: Rect): IntArray {
+        require(region.left >= 0 && region.top >= 0 && region.right <= bitmap.width && region.bottom <= bitmap.height)
+        return IntArray(region.width() * region.height()).also {
+            bitmap.getPixels(it, 0, region.width(), region.left, region.top, region.width(), region.height())
+        }
     }
 
     private fun assertFullscreenDefault(key: String) {

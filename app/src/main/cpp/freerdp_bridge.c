@@ -508,14 +508,16 @@ static BOOL receive_channel_data(freerdp* instance, UINT16 id, const BYTE* data,
     RdpSession* s = s_from_ctx(instance->context);
     const char* name = freerdp_channels_get_name_by_id(instance, id);
     if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 &&
-        (!s || !rdpsync_transfer_ingress(&s->transfer_ingress, size, flags, total))) {
+        (!s || !rdpsync_transfer_ingress(&s->transfer_ingress, data, size, flags, total))) {
         s_error(s, "文件传输通道消息超出安全限制");
+        s_diag(s, "file-transfer=ingress-framing-rejected");
         return FALSE;
     }
     if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 &&
         (flags & CHANNEL_FLAG_FIRST) && !(flags & (CHANNEL_FLAG_SUSPEND | CHANNEL_FLAG_RESUME)) &&
         !rdpsync_transfer_admit_incoming(s->transfer, data, size, total)) {
         s_error(s, "文件传输通道收到未请求或超额的数据");
+        s_diag(s, "file-transfer=unsolicited-or-budget-rejected");
         return FALSE;
     }
     return s && s->receive_channel_data && s->receive_channel_data(instance, id, data, size, flags, total);

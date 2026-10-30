@@ -18,6 +18,17 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     "$ROOT/app/src/test/cpp/transfer_test.c" -o "$OUT/transfer_test"
 "$OUT/transfer_test"
 
+# Link the unmodified pinned parser/stream implementation; logging sinks only
+# are mocked. Proves compatibility trailers never become file payload bytes.
+"$HOST_CC" "${FLAGS[@]}" -D_GNU_SOURCE= -pthread -Wno-deprecated-declarations \
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
+    -I"$DEPS/freerdp-src/channels/cliprdr" \
+    "$ROOT/app/src/test/cpp/transfer_parser_test.c" \
+    "$DEPS/freerdp-src/channels/cliprdr/cliprdr_common.c" \
+    "$DEPS/freerdp-src/winpr/libwinpr/utils/stream.c" -o "$OUT/transfer_parser_test"
+"$OUT/transfer_parser_test"
+
 "$HOST_CC" "${FLAGS[@]}" -pthread -Wno-deprecated-declarations \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
