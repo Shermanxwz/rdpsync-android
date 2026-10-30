@@ -81,7 +81,7 @@ class RdpFixtureInstrumentedTest {
             measurements.put("initial_display_control_state", RdpConnector.nativeGetDisplayControlState())
             assertFalse("normal fixture session must not silently downgrade to compatibility mode: ${RdpConnector.getDiag()}",
                 RdpConnector.getDiag().contains("connection=compatibility-retry"))
-            measurements.put("latency_method", "Android injected touch (40ms hold) to matching synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
+            measurements.put("latency_method", "Single async FINGER touch (nominal 40ms hold; actual event-time duration recorded and required below 500ms) to exact synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
             measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
                 { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
@@ -946,6 +946,7 @@ class RdpFixtureInstrumentedTest {
         val attempts = measurements.optJSONArray("touch_attempts") ?: JSONArray().also { measurements.put("touch_attempts", it) }
         attempts.put(attempt)
         measurements.put("rgb_assertion", "exact 8-bit RGB channels at uniform interior pixels")
+        var observedView: RdpDesktopView? = null
         // Compose semantics can disappear before Android disposes the dialog's
         // input window. Do not inject a measured gesture into that transition.
         // A native frame counter also does not establish a drawn View bitmap.
@@ -953,6 +954,7 @@ class RdpFixtureInstrumentedTest {
             var viewReady = false
             compose.runOnUiThread {
                 val view = desktop()
+                observedView = view
                 val location = IntArray(2)
                 view.getLocationOnScreen(location)
                 viewReady = view.isAttachedToWindow && view.isShown && view.hasWindowFocus() && view.width > 0 && view.height > 0
@@ -970,24 +972,95 @@ class RdpFixtureInstrumentedTest {
                 .put("frame_width", RdpConnector.getWidth()).put("frame_height", RdpConnector.getHeight())
             painted
         }
-        val before = fixtureState().getInt("clicks")
+        val beforeState = fixtureState()
+        val before = beforeState.getInt("clicks")
         val point = requireNotNull(remoteScreenPoint(remoteX, remoteY)) { "Touch target is outside the actual cropped viewport" }
         attempt.put("screen_x", point.x).put("screen_y", point.y).put("remote_x", remoteX).put("remote_y", remoteY)
-            .put("server_clicks_before", before)
+            .put("server_clicks_before", before).put("server_before", beforeState)
+        compose.runOnUiThread {
+            val view = desktop(); val location = IntArray(2); view.getLocationOnScreen(location)
+            assertTrue("The same observed desktop must receive this one tap", view === observedView)
+            assertTrue(view.isAttachedToWindow && view.isShown && view.hasWindowFocus())
+            assertEquals(attempt.getInt("view_left"), location[0]); assertEquals(attempt.getInt("view_top"), location[1])
+            assertEquals(attempt.getInt("view_width"), view.width); assertEquals(attempt.getInt("view_height"), view.height)
+            val mapped = view.viewportSnapshot().toScreen(remoteX, remoteY)
+            assertEquals(point.x, location[0] + mapped.x, 0f); assertEquals(point.y, location[1] + mapped.y, 0f)
+            attempt.put("view_identity", System.identityHashCode(view)).put("revalidated_elapsed_ms", SystemClock.elapsedRealtime())
+        }
+        val events = JSONArray(); attempt.put("injected_events", events)
         val start = SystemClock.elapsedRealtime()
-        injectSingleTap(point.x, point.y)
-        waitFor("Android touch reaches server and returns painted response", timeout) {
-            val state = fixtureState()
-            state.getInt("clicks") > before && receivedPointMatches(state.optJSONArray("last_press"), remoteX, remoteY) &&
-                receivedPointMatches(state.optJSONArray("last_release"), remoteX, remoteY) &&
-                colorAt(40, 140)?.let { sameColor(it, if ((before + 1) % 2 == 1) Color.rgb(68, 221, 136) else Color.rgb(221, 68, 136)) } == true
+        val upCompleted = injectDesktopTap(point.x, point.y, events)
+        val deadline = upCompleted + timeout
+        attempt.put("up_completed_elapsed_ms", upCompleted).put("response_deadline_elapsed_ms", deadline)
+            .put("gesture_duration_ms", events.getJSONObject(1).getLong("event_time_ms") - events.getJSONObject(0).getLong("down_time_ms"))
+        val samples = JSONArray(); attempt.put("response_samples", samples)
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
+            val sample = JSONObject().put("started_elapsed_ms", SystemClock.elapsedRealtime())
+            var matched = false
+            try {
+                val state = fixtureState()
+                val actual = colorAt(40, 140)
+                val expected = if ((before + 1) % 2 == 1) Color.rgb(68, 221, 136) else Color.rgb(221, 68, 136)
+                sample.put("server", state).put("actual_rgb", actual?.and(0xffffff)).put("source_rgb", expected and 0xffffff)
+                    .put("native_frame_id", RdpConnector.nativeGetFrameId()).put("native_generation", RdpConnector.nativeGetTelemetry()[11])
+                matched = state.getInt("clicks") == before + 1 && state.getInt("right_clicks") == beforeState.getInt("right_clicks") &&
+                    receivedPointMatches(state.optJSONArray("last_press"), remoteX, remoteY) &&
+                    receivedPointMatches(state.optJSONArray("last_release"), remoteX, remoteY) && actual?.let { sameColor(it, expected) } == true
+                sample.put("outcome_matched", matched)
+            } catch (error: java.io.IOException) { sample.put("read_error", error.toString()) }
+            val completed = SystemClock.elapsedRealtime()
+            sample.put("completed_elapsed_ms", completed)
+            if (samples.length() < 64) samples.put(sample)
+            attempt.put("last_response", sample)
+            if (matched && completed <= deadline) return (completed - start).also {
+                latencySamples += it
+                val state = sample.getJSONObject("server")
+                attempt.put("passed", true).put("touch_to_observed_response_ms", it).put("server_clicks_after", state.getInt("clicks"))
+                    .put("server_last_press", state.getJSONArray("last_press")).put("server_last_release", state.getJSONArray("last_release"))
+            }
+            SystemClock.sleep(100)
         }
-        return (SystemClock.elapsedRealtime() - start).also {
-            latencySamples += it
-            val state = fixtureState()
-            attempt.put("touch_to_observed_response_ms", it).put("server_clicks_after", state.getInt("clicks"))
-                .put("server_last_press", state.getJSONArray("last_press")).put("server_last_release", state.getJSONArray("last_release"))
+        attempt.put("passed", false)
+        throw AssertionError("Android touch reaches server and returns painted response within ${timeout}ms after the single UP: ${RdpConnector.getDiag()}")
+    }
+
+    /** Desktop only: keep IME-key and app-popup injectors unchanged. */
+    private fun injectDesktopTap(x: Float, y: Float, trace: JSONArray): Long {
+        val down = SystemClock.uptimeMillis()
+        var upEventTime = -1L
+        var upCompleted = -1L
+        fun inject(action: Int) {
+            val eventTime = SystemClock.uptimeMillis()
+            val properties = MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER }
+            val coordinates = MotionEvent.PointerCoords().apply { this.x = x; this.y = y; pressure = 1f; size = 1f }
+            val event = MotionEvent.obtain(down, eventTime, action, 1, arrayOf(properties), arrayOf(coordinates), 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
+            val record = clockSnapshot().put("action", action).put("event_time_ms", eventTime).put("down_time_ms", down)
+                .put("x", x).put("y", y).put("tool_type", event.getToolType(0)).put("source", event.source).put("sync", false)
+            trace.put(record)
+            try {
+                val accepted = instrumentation.uiAutomation.injectInputEvent(event, false)
+                record.put("accepted", accepted)
+                assertTrue("One observed desktop finger event admitted", accepted)
+            } catch (error: Throwable) { record.put("injection_error", error.toString()); throw error }
+            finally {
+                val completed = clockSnapshot(); record.put("completed", completed)
+                if (action == MotionEvent.ACTION_UP) { upEventTime = eventTime; upCompleted = completed.getLong("elapsed_ms") }
+                event.recycle()
+            }
         }
+        var downFailure: Throwable? = null
+        try { inject(MotionEvent.ACTION_DOWN); SystemClock.sleep(40) }
+        catch (error: Throwable) { downFailure = error; throw error }
+        finally {
+            try { inject(MotionEvent.ACTION_UP) }
+            catch (upFailure: Throwable) { if (downFailure != null) downFailure.addSuppressed(upFailure) else throw upFailure }
+        }
+        // Real timestamps only: >=500ms is intentionally a production right-click.
+        // Reject an invalid harness gesture rather than backdating or retrying it.
+        assertTrue("Actual desktop tap must remain below the 500ms long-press threshold", upEventTime - down in 0L until 500L)
+        return upCompleted
     }
 
     private fun receivedPointMatches(point: JSONArray?, x: Float, y: Float): Boolean =
