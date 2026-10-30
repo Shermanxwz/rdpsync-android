@@ -20,10 +20,10 @@ files = []
 stopping = False
 
 
-def spawn(args, name):
+def spawn(args, name, env=None):
     f = (OUT / f'{name}.log').open('wb')
     files.append(f)
-    p = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT, start_new_session=(name == 'session'))
+    p = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT, start_new_session=(name == 'session'), env=env)
     p.owns_group = name == 'session'
     children.append(p)
     return p
@@ -79,7 +79,12 @@ try:
         mutter = ['mutter', '--headless', '--wayland', '--no-x11', '--wayland-display=rdpsync-wayland']
         if MODE == 'screen-share-mirror':
             mutter += ['--virtual-monitor=1024x768']
-        spawn(mutter, 'mutter')
+        # Official Mutter 46.2 default plugin map() animates scale and opacity.
+        # Its test-only switch removes this synthetic desktop presentation
+        # variable, not any RDP codec/geometry/input assertion or timeout.
+        # https://github.com/GNOME/mutter/blob/46.2/src/compositor/plugins/default.c
+        mutter_env = dict(os.environ, MUTTER_DEBUG_DISABLE_ANIMATIONS='1')
+        spawn(mutter, 'mutter', env=mutter_env)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             p = subprocess.run(['gdbus', 'wait', '--session', '--timeout=1', 'org.gnome.Mutter.RemoteDesktop'], capture_output=True)
@@ -97,6 +102,10 @@ try:
         spawn(['socat', f'UNIX-LISTEN:{PRIVATE}/rdp.sock,fork,mode=600', 'TCP:127.0.0.1:3389'], 'rdp-unix-relay')
         spawn(['socat', f'UNIX-LISTEN:{PRIVATE}/state.sock,fork,mode=600', 'TCP:127.0.0.1:8768'], 'state-unix-relay')
         (OUT / 'runtime.json').write_text(json.dumps(dict(mode=MODE, supervisor_pid=os.getpid(),
+            fixture_mutter_animations=dict(environment='MUTTER_DEBUG_DISABLE_ANIMATIONS=1',
+                scope='Only the owned synthetic Mutter process; no animation/high-motion coverage claim',
+                installed_version=(OUT / 'mutter-version.txt').read_text().strip(),
+                source='https://github.com/GNOME/mutter/blob/46.2/src/compositor/plugins/default.c'),
             net_namespace=os.readlink('/proc/self/ns/net'), nla='GNOME native required; no server downgrade',
             scope='per-user headless extend' if MODE == 'headless-extend' else 'per-user screen sharing mirror-primary',
             not_covered=['GDM system Remote Login / redirection', 'Windows server NLA']), indent=2))

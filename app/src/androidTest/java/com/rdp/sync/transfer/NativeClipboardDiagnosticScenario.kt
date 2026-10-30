@@ -2,6 +2,8 @@ package com.rdp.sync.transfer
 
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.system.ErrnoException
+import android.system.OsConstants
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.ClipboardFixturePeer
 import com.rdp.sync.network.RdpConnector
@@ -12,6 +14,7 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.InetSocketAddress
+import java.net.ConnectException
 import java.net.Socket
 import java.nio.file.Files
 import java.security.MessageDigest
@@ -196,7 +199,45 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
     }
 
     private fun focusFixedPeerSurface() {
-        val before = request("GET", "/state").getInt("clicks")
+        // The first native frame may precede startup of the isolated peer's HTTP
+        // observation process. Wait for READ-ONLY readiness before the one click;
+        // never repeat a pointer event, POST, connection, or timed-out transaction.
+        val readiness = JSONObject().put("started_elapsed_ms", SystemClock.elapsedRealtime())
+            .put("fixed_state_port", peer.statePort)
+        measurements.put("focus_observer_readiness", readiness)
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        var attempts = 0
+        var refused = 0
+        var notReady = 0
+        var initial: JSONObject? = null
+        while (initial == null) {
+            attempts++
+            try {
+                val observed = request("GET", "/state")
+                check(SystemClock.elapsedRealtime() <= deadline) { "Fixed peer observer readiness deadline exceeded" }
+                val ready = observed.getBoolean("ready")
+                val width = observed.getInt("width")
+                val height = observed.getInt("height")
+                readiness.put("last_ready", ready).put("last_width", width).put("last_height", height)
+                if (ready && width == 1024 && height == 768) initial = observed
+                else {
+                    notReady++
+                    readiness.put("not_ready_observations", notReady)
+                        .put("last_not_ready_elapsed_ms", SystemClock.elapsedRealtime())
+                    SystemClock.sleep(50)
+                }
+            } catch (failure: ConnectException) {
+                val errno = generateSequence(failure as Throwable) { it.cause }
+                    .filterIsInstance<ErrnoException>().firstOrNull()?.errno
+                if (errno != OsConstants.ECONNREFUSED || SystemClock.elapsedRealtime() >= deadline) throw failure
+                refused++
+                readiness.put("refused_before_ready", refused).put("last_refused_elapsed_ms", SystemClock.elapsedRealtime())
+                SystemClock.sleep(50)
+            } finally { readiness.put("get_attempts", attempts) }
+        }
+        readiness.put("ready_elapsed_ms", SystemClock.elapsedRealtime()).put("refused_before_ready", refused)
+            .put("not_ready_observations", notReady)
+        val before = initial.getInt("clicks")
         assertEquals(0, RdpConnector.sendMouseButton(400, 300, 1, true))
         assertEquals(0, RdpConnector.sendMouseButton(400, 300, 1, false))
         await("native pointer focuses only fixed synthetic fixture surface") {

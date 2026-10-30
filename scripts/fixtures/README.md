@@ -222,6 +222,12 @@ remains covered by the separate mandatory full xrdp UI scenario. Software
 progressive graphics is not H264 or hardware decoding. No GNOME pass is claimed
 until actual runtime artifacts have been inspected.
 
+The owned synthetic Mutter process alone uses its official
+`MUTTER_DEBUG_DISABLE_ANIMATIONS=1` test switch (46.2 default-plugin map scale/
+opacity effects). `runtime.json` records this setting, installed version and
+source. This fixture does not validate desktop animation/high-motion behavior;
+the retained 403bb oracle failure does not prove the exact animation-stall cause.
+
 The GNOME46 **codec9 synthetic flat-patch** gate uses an empirical bound of
 **at most 2 per RGB channel from intended source color**, independently for the
 same-run official decoder and Android. It is not a universal codec guarantee:

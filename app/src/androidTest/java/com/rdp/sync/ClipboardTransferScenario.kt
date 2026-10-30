@@ -451,9 +451,34 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         }
     }
     private fun openFiles(label: String) {
-        waitFor("focused fullscreen menu") { compose.onAllNodesWithContentDescription("会话菜单").fetchSemanticsNodes().size == 1 }
+        val started = SystemClock.elapsedRealtime()
+        val deadline = started + 15_000
+        val observation = JSONObject().put("label", label).put("started_elapsed_ms", started)
+            .put("generation", RdpConnector.sessionGeneration())
+        val observations = measurements.optJSONArray("file_menu_readiness") ?: JSONArray().also { measurements.put("file_menu_readiness", it) }
+        observations.put(observation)
+        waitFor("focused fullscreen menu", (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
+            compose.onAllNodesWithContentDescription("会话菜单").fetchSemanticsNodes().size == 1
+        }
         compose.onNodeWithContentDescription("会话菜单").performTouchInput { click() }
-        compose.onNodeWithText(label).performScrollTo().performClick()
+        // Native connection completion precedes the production UI's connected
+        // snapshot. A disabled semantics click is not a user's enabled action.
+        waitFor("unique enabled file menu target", (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
+            val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
+            val enabled = nodes.size == 1 && isEnabled().matches(nodes.single())
+            observation.put("node_count", nodes.size).put("enabled", enabled)
+            nodes.size == 1 && enabled
+        }
+        compose.onNodeWithText(label).performScrollTo()
+        waitFor("visible enabled file menu target", (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
+            val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
+            nodes.size == 1 && isEnabled().matches(nodes.single()) && compose.onNodeWithText(label).isDisplayed()
+        }
+        assertTrue("File menu readiness must complete inside the original UI budget", SystemClock.elapsedRealtime() < deadline)
+        observation.put("ready_elapsed_ms", SystemClock.elapsedRealtime())
+            .put("bounds", compose.onNodeWithText(label).fetchSemanticsNode().boundsInRoot.toString())
+        compose.onNodeWithText(label).assertIsEnabled().assertIsDisplayed().performClick()
+        observation.put("single_action_completed_elapsed_ms", SystemClock.elapsedRealtime())
     }
     private fun findDesktop(view: View): RdpDesktopView? {
         if (view is RdpDesktopView) return view
