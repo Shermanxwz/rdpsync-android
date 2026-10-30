@@ -103,11 +103,16 @@ static void directory_identity_tests(void) {
     uint32_t file = create(&f, "Before\\a.txt", GENERIC_READ | GENERIC_WRITE, FILE_CREATE, FILE_NON_DIRECTORY_FILE);
     assert(!request(&f, IRP_MJ_CLOSE, 0, file, NULL, 0));
     assert(!directory(&f, directory_handle, "\\before\\*.TXT", true));
+    assert(!directory(&f, directory_handle, "/before/*.TXT", true));
+    assert(directory(&f, directory_handle, "/*", true) == (uint32_t)STATUS_OBJECT_PATH_NOT_FOUND);
+    assert(directory(&f, directory_handle, "\\*", true) == (uint32_t)STATUS_OBJECT_PATH_NOT_FOUND);
     uint32_t local = 0, information = 0;
     assert(!rdp_ws_open(f.ws, 0, "BEFORE", DELETE, 7, FILE_OPEN, FILE_DIRECTORY_FILE, false, 0, &local, &information));
     assert(!rdp_ws_rename(f.ws, 0, local, "After", false));
     assert(!rdp_ws_close(f.ws, 0, local));
     assert(!directory(&f, directory_handle, "\\after\\*.TXT", true));
+    assert(!directory(&f, directory_handle, "/after/*.TXT", true));
+    assert(directory(&f, directory_handle, "/before/*", true) == (uint32_t)STATUS_OBJECT_PATH_NOT_FOUND);
     assert(directory(&f, directory_handle, "\\before\\*", true) == (uint32_t)STATUS_OBJECT_PATH_NOT_FOUND);
     file = create(&f, "After\\猫", GENERIC_READ, FILE_CREATE, FILE_NON_DIRECTORY_FILE);
     assert(!request(&f, IRP_MJ_CLOSE, 0, file, NULL, 0));
@@ -185,11 +190,35 @@ static void xrdp_lookup_replay(void) {
     assert(!request(&f, IRP_MJ_CLOSE, 0, file, body, 32));
     memset(body, 0, sizeof(body)); put32(body, FILE_READ_DATA | SYNCHRONIZE);
     put32(body + 16, 7); put32(body + 20, FILE_OPEN); put32(body + 24, FILE_SYNCHRONOUS_IO_NONALERT);
-    path_length = path_bytes("\\android-empty.txt", body + 32) + 2;
+    /* Pinned xrdp converts irp->pathname but sends original POSIX path here. */
+    path_length = path_bytes("/android-empty.txt", body + 32) + 2;
     put32(body + 28, (uint32_t)path_length);
     assert(!request(&f, IRP_MJ_CREATE, 0, 0, body, 32 + path_length));
     file = get32(sent + 16); read_file(&f, file, 0, 65536, "", 0);
     assert(!request(&f, IRP_MJ_CLOSE, 0, file, NULL, 0));
     cleanup(&f);
 }
-int main(void){protocol_owner=pthread_self();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
+
+static void wire_separator_tests(void) {
+    char output[RDP_WS_MAX_PATH + 1]; BYTE wire[256];
+    const char* accepted[][2] = {
+        {"/android-empty.txt", "android-empty.txt"}, {"\\android-empty.txt", "android-empty.txt"},
+        {"/nested/file.txt", "nested/file.txt"}, {"\\nested\\file.txt", "nested/file.txt"},
+        {"nested/file.txt", "nested/file.txt"}, {"nested\\file.txt", "nested/file.txt"},
+        {"/", ""}, {"\\", ""}
+    };
+    for (size_t i = 0; i < sizeof(accepted)/sizeof(*accepted); ++i) {
+        size_t n = path_bytes(accepted[i][0], wire);
+        assert(!wire_path(wire, n, 0, output) && !strcmp(output, accepted[i][1]));
+    }
+    const char* rejected[] = {"//etc/passwd", "\\\\server\\share", "/\\secret", "\\/secret",
+        "a//b", "a\\\\b", "/a\\b", "\\a/b", "a/b\\c", "a\\b/c",
+        "/../secret", "/a/../secret", "/a/./b", "\\a\\..\\secret", "/a/", "/C:secret",
+        "/file:stream", "/a?", "/a/*/b"};
+    for (size_t i = 0; i < sizeof(rejected)/sizeof(*rejected); ++i) {
+        size_t n = path_bytes(rejected[i], wire);
+        assert(wire_path(wire, n, 0, output) == STATUS_OBJECT_NAME_INVALID);
+    }
+}
+
+int main(void){wire_separator_tests();protocol_owner=pthread_self();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}

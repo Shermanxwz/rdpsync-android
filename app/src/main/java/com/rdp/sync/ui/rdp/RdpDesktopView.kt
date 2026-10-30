@@ -32,6 +32,23 @@ import kotlin.math.roundToInt
 // This view is constructed by AndroidView with a session-scoped input dependency, never XML.
 @SuppressLint("ViewConstructor")
 class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : View(context), Choreographer.FrameCallback {
+    /** Opt-in fixture diagnostics: numeric lengths/lifecycle only, never input content.
+     * No observer is installed by production callers. Observer failures cannot alter input. */
+    data class ImeDiagnostic(val connection: Long, val operation: String, val argumentLength: Int,
+                             val composingBefore: Int, val composingAfter: Int)
+    private var imeConnectionSequence = 0L
+    private var imeDiagnosticCount = 0
+    var imeDiagnosticDropped = 0
+        private set
+    var imeDiagnosticObserver: ((ImeDiagnostic) -> Unit)? = null
+        set(value) { field = value; imeDiagnosticCount = 0; imeDiagnosticDropped = 0 }
+    private fun traceIme(connection: Long, operation: String, argumentLength: Int, before: Int, after: Int) {
+        val observer = imeDiagnosticObserver ?: return
+        if (imeDiagnosticCount >= 128) { imeDiagnosticDropped++; return }
+        imeDiagnosticCount++
+        runCatching { observer(ImeDiagnostic(connection, operation, argumentLength, before, after)) }
+    }
+
     private val viewport = ViewportTransform()
     private val destination = RectF()
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -293,16 +310,23 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN
+        val connection = ++imeConnectionSequence
+        traceIme(connection, "create", 0, 0, 0)
         return object : BaseInputConnection(this, false) {
             private val buffer = RemoteImeBuffer(input::enqueueText, input::enqueueKeyStroke)
-            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean { buffer.compose(text?.toString().orEmpty()); return true }
-            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean { buffer.commit(text?.toString().orEmpty()); return true }
-            override fun finishComposingText(): Boolean { buffer.finish(); return true }
-            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean { buffer.deleteCodeUnits(beforeLength, afterLength); return true }
-            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean { buffer.deleteCodePoints(beforeLength, afterLength); return true }
-            override fun closeConnection() { buffer.clear(); super.closeConnection() }
-            override fun performEditorAction(editorAction: Int): Boolean { input.enqueueKeyStroke(0x1C); return true }
-            override fun sendKeyEvent(event: KeyEvent): Boolean = this@RdpDesktopView.dispatchKeyEvent(event)
+            private inline fun <T> observed(operation: String, argumentLength: Int = 0, block: () -> T): T {
+                val before = buffer.composing.length
+                try { return block() }
+                finally { traceIme(connection, operation, argumentLength, before, buffer.composing.length) }
+            }
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean = observed("compose", text?.length ?: -1) { buffer.compose(text?.toString().orEmpty()); true }
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean = observed("commit", text?.length ?: -1) { buffer.commit(text?.toString().orEmpty()); true }
+            override fun finishComposingText(): Boolean = observed("finish") { buffer.finish(); true }
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean = observed("delete-code-units", beforeLength) { buffer.deleteCodeUnits(beforeLength, afterLength); true }
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean = observed("delete-code-points", beforeLength) { buffer.deleteCodePoints(beforeLength, afterLength); true }
+            override fun closeConnection() = observed("close") { buffer.clear(); super.closeConnection() }
+            override fun performEditorAction(editorAction: Int): Boolean = observed("editor-action") { input.enqueueKeyStroke(0x1C); true }
+            override fun sendKeyEvent(event: KeyEvent): Boolean = observed(if (event.action == KeyEvent.ACTION_DOWN) "key-down" else if (event.action == KeyEvent.ACTION_UP) "key-up" else "key-other") { this@RdpDesktopView.dispatchKeyEvent(event) }
             override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence = buffer.composing.takeLast(n.coerceAtLeast(0))
             override fun getTextAfterCursor(n: Int, flags: Int): CharSequence = ""
             override fun getSelectedText(flags: Int): CharSequence = ""

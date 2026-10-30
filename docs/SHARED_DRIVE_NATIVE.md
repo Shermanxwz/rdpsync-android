@@ -27,9 +27,11 @@ Windows/DOS wildcard or Unicode collation behavior.
 
 Directory path checks use the broker's current canonical handle identity,
 including local rename/move, not a second cached namespace. Invalid UTF-16,
-embedded NUL, alternate streams, traversal, slash aliases, wildcard parent
-components and ambiguous/reserved names fail closed. A single terminal wire NUL
-is accepted for the xrdp rename request. Own JNI/wire conversions use one strict
+embedded NUL, alternate streams, traversal, repeated or mixed separators, wildcard
+parent components and ambiguous/reserved names fail closed. Homogeneous backslash
+(Windows) or forward-slash (xrdp open) paths use the same confined relative
+namespace: at most one device-root prefix is stripped before broker traversal;
+it never becomes an OS absolute path. A single terminal wire NUL is accepted. Own JNI/wire conversions use one strict
 scalar codec, avoiding modified UTF-8 and attached-thread JNI-local accumulation.
 
 Unsupported requests/classes/options return defined errors, not fake success:

@@ -106,19 +106,28 @@ static DriveHandle* find_handle(RdpDrive* d, uint32_t id) {
     return NULL;
 }
 
-/* Strict UTF-16 wire decoding. Only one leading separator and one optional
- * final NUL are accepted. No alternate streams, malformed surrogates, '..',
- * empty components, slash aliases, or non-final wildcard components. */
+/* Strict UTF-16 wire decoding. Accept homogeneous Windows or POSIX separators
+ * (pinned xrdp open sends POSIX paths), with one optional device-root prefix
+ * and final NUL. Canonicalize only separators, never traversal/empty components.
+ * Mixed separators, alternate streams and malformed Unicode remain rejected. */
 static uint32_t wire_path(const BYTE* p, size_t bytes, int wildcard, char output[RDP_WS_MAX_PATH + 1]) {
     if (bytes % 2 || bytes / 2 > DRIVE_MAX_UTF16) return STATUS_OBJECT_NAME_INVALID;
     size_t units = bytes / 2;
     if (units && get16(p + (units - 1) * 2) == 0) --units;
     WCHAR wide[DRIVE_MAX_UTF16 + 1];
     size_t begin = 0, count = 0;
-    if (units && get16(p) == '\\') begin = 1;
+    uint16_t separator = 0;
+    for (size_t i = 0; i < units; ++i) {
+        uint16_t ch = get16(p + i * 2);
+        if (ch == '\\' || ch == '/') {
+            if (separator && separator != ch) return STATUS_OBJECT_NAME_INVALID;
+            separator = ch;
+        }
+    }
+    if (units && separator && get16(p) == separator) begin = 1;
     for (size_t i = begin; i < units; ++i) {
         uint16_t ch = get16(p + i * 2);
-        if (!ch || ch < 32 || ch == '/' || ch == ':' || ch == '|' || ch == '<' || ch == '>' || ch == '"')
+        if (!ch || ch < 32 || ch == ':' || ch == '|' || ch == '<' || ch == '>' || ch == '"')
             return STATUS_OBJECT_NAME_INVALID;
         if (ch >= 0xd800 && ch <= 0xdbff) {
             if (i + 1 >= units) return STATUS_OBJECT_NAME_INVALID;
@@ -359,7 +368,7 @@ static uint32_t process_directory(RdpDrive* d, IRP* irp) {
         if (status) return status;
         char* slash = strrchr(path, '/');
         const char* pattern = slash ? slash + 1 : path;
-        if (slash || (path_length > 2 && get16(p + 32) == '\\')) {
+        if (slash || (path_length > 2 && (get16(p + 32) == '\\' || get16(p + 32) == '/'))) {
             if (slash) *slash = 0;
             bool matches = false;
             status = rdp_ws_handle_path_matches(d->workspace, d->owner, irp->FileId, slash ? path : "", &matches);

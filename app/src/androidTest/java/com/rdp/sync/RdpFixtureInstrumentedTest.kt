@@ -1191,11 +1191,24 @@ class RdpFixtureInstrumentedTest {
         measurements.put("software_keyboard_view_key_receipts", receipts)
             .put("key_receipt_limitation", "Nonconsuming OnKeyListener observes dispatched KeyEvents only; commitText/editor actions bypass it")
         var observedView: RdpDesktopView? = null
+        val connectionReceipts = JSONArray()
+        measurements.put("software_keyboard_connection_receipts", connectionReceipts)
+            .put("software_keyboard_connection_trace_limit", 128)
+        var previousObserver: ((RdpDesktopView.ImeDiagnostic) -> Unit)? = null
         try {
             compose.runOnUiThread {
                 // This fresh fixture-owned View and pinned Compose1.7.2 install no
                 // OnKeyListener. Restore that known null state on this same View.
                 observedView = desktop().also { view ->
+                    previousObserver = view.imeDiagnosticObserver
+                    view.imeDiagnosticObserver = { event ->
+                        synchronized(connectionReceipts) {
+                            connectionReceipts.put(clockSnapshot().put("connection", event.connection)
+                                .put("operation", event.operation).put("argument_length", event.argumentLength)
+                                .put("composing_before", event.composingBefore).put("composing_after", event.composingAfter)
+                                .put("view_identity", System.identityHashCode(view)))
+                        }
+                    }
                     view.setOnKeyListener { actualView, code, event ->
                         synchronized(receipts) {
                             if (receipts.length() >= 128) receiptOverflow++
@@ -1270,7 +1283,13 @@ class RdpFixtureInstrumentedTest {
             runCatching { screenshot("04d4-ime-key-failure-before-hide") }
             throw failure
         } finally {
-            compose.runOnUiThread { observedView?.setOnKeyListener(null) }
+            compose.runOnUiThread {
+                observedView?.let { view ->
+                    measurements.put("software_keyboard_connection_trace_dropped", view.imeDiagnosticDropped)
+                    view.imeDiagnosticObserver = previousObserver
+                    view.setOnKeyListener(null)
+                }
+            }
             synchronized(receipts) { measurements.put("software_keyboard_key_receipt_overflow", receiptOverflow) }
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
         }
