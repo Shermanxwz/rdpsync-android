@@ -22,6 +22,8 @@ import java.security.MessageDigest
 /**
  * DIAGNOSTIC ONLY: real staged-file/JNI/CLIPRDR/FUSE bytes, without Android UI or SAF.
  * The separately required ClipboardTransferScenario remains the physical picker acceptance test.
+ * XRDP uses its windowless X11 selection peer; this diagnostic does not cover input.
+ * GNOME retains its Wayland clipboard-owner focus setup, not a user-input acceptance claim.
  */
 abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixturePeer) {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
@@ -61,7 +63,12 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
             assertTrue(active.capability().available)
             assertEquals(TRANSFER_SEND_BUDGET_BYTES, active.remainingSendBytes())
             measurements.put("generation", generation).put("exact_pin_matched", true).put("explicit_file_opt_in", true)
-            focusFixedPeerSurface()
+            if (peer == ClipboardFixturePeer.XRDP) {
+                measurements.put("input_coverage", false)
+                awaitWindowlessXrdpPeer()
+            } else {
+                focusFixedPeerSurface()
+            }
             assertGeneration(generation)
 
             val sentinelBytes = "Original private snapshot must remain unchanged\n".toByteArray()
@@ -195,6 +202,44 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
                     SystemClock.elapsedRealtime() >= deadline) throw failure
                 SystemClock.sleep(25)
             }
+        }
+    }
+
+    private fun awaitWindowlessXrdpPeer() {
+        // xrdp_file_session.py runs this GTK/X11 selection owner separately from
+        // the Tk input desktop. X11 selections are server-global: neither fixed
+        // /transfer action depends on focusing or clicking the unrelated window.
+        // Observe only readiness here; preserve the ONE POST per transaction below.
+        val readiness = JSONObject().put("started_elapsed_ms", SystemClock.elapsedRealtime())
+            .put("fixed_transfer_port", peer.transferPort)
+        measurements.put("windowless_xrdp_peer_readiness", readiness)
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        var attempts = 0
+        var refused = 0
+        while (true) {
+            attempts++
+            try {
+                val observed = request("GET", "/transfer")
+                check(SystemClock.elapsedRealtime() <= deadline) { "Fixed transfer peer readiness deadline exceeded" }
+                val identity = observed.getString("peer")
+                val phase = observed.getString("phase")
+                val operation = observed.getLong("operation")
+                val pid = observed.getLong("pid")
+                readiness.put("peer", identity).put("phase", phase).put("operation", operation).put("pid", pid)
+                assertEquals("Fixed native X11 transfer peer identity", "xrdp", identity)
+                assertTrue("Windowless transfer peer must have a live process identity", pid > 0)
+                assertEquals("Diagnostic requires a fresh transfer peer, not an old transaction", "idle", phase)
+                assertEquals("Diagnostic must precede any peer action", 0L, operation)
+                readiness.put("ready_elapsed_ms", SystemClock.elapsedRealtime()).put("refused_before_ready", refused)
+                return
+            } catch (failure: ConnectException) {
+                val errno = generateSequence(failure as Throwable) { it.cause }
+                    .filterIsInstance<ErrnoException>().firstOrNull()?.errno
+                if (errno != OsConstants.ECONNREFUSED || SystemClock.elapsedRealtime() >= deadline) throw failure
+                refused++
+                readiness.put("refused_before_ready", refused).put("last_refused_elapsed_ms", SystemClock.elapsedRealtime())
+                SystemClock.sleep(50)
+            } finally { readiness.put("get_attempts", attempts) }
         }
     }
 

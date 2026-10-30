@@ -4,6 +4,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 OUT=build/emulator-evidence
 mkdir -p "$OUT"
+python3 scripts/fixtures/emulator_boot_health.py "$OUT/boot-health"
 adb logcat -c
 adb shell settings put system accelerometer_rotation 0
 adb shell settings put system user_rotation 0

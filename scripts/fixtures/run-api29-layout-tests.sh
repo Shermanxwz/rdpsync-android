@@ -29,6 +29,7 @@ sha256sum "$APP_APK" "$TEST_APK" app/src/main/jniLibs/x86_64/*.so \
 "${ADB[@]}" shell getprop ro.build.fingerprint >"$OUT/emulator-fingerprint.txt"
 "${ADB[@]}" shell wm size >"$OUT/wm-size.txt"
 "${ADB[@]}" shell wm density >"$OUT/wm-density.txt"
+python3 scripts/fixtures/emulator_boot_health.py "$OUT/boot-health"
 "${ADB[@]}" logcat -c
 STARTED=false
 COLLECTED=false
