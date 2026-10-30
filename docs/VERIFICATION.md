@@ -13,7 +13,7 @@ source-pin tests are likewise scoped snapshots, not new Android/RDPDR acceptance
 
 Required evidence is the actual xrdp filesystem mount/IRPs and byte hashes,
 read-only/explicit-RW consent, concurrent local operations and identity-safe SAF
-selection, stalled-peer plateau/resume/cancel, truthful GNOME unsupported status,
+selection, stalled-peer plateau/resume/cancel, truthful GNOME non-acceptance status (explicit rejection/unsupported versus unconfirmed),
 existing security/input/rendering gates, and the finite rendered UI matrix. Final
 CI must bind the new exact commit and Preview 3 APK; no persistent signing key or
 user-server configuration is introduced. See [design contract](SHARED_DRIVE_DESIGN.md).
@@ -27,7 +27,7 @@ user-server configuration is introduced. See [design contract](SHARED_DRIVE_DESI
 - RDPDR/autodetect requires the RDPSND `sys:fake` protocol dependency. Only that fake backend is built; real audio backends and microphone input are disabled, and the actual post-load settings must retain no playback/capture or redirected devices.
 - Remote desktop scale is currently fixed at 100%; resolution and local zoom are independently adjustable, but there is no separate remote DPI selector.
 - Sessions default to immersive fullscreen with one accessible 48dp menu handle. Bordered tools are opt-in; in landscape they retain the compact 56dp layout. Cutouts and non-hideable caption bars stay excluded. Temporary system-bar/IME occlusion changes only local crop and control placement, not the remote fit size. Original bar visibility/behavior is restored when leaving the session.
-- Follow-up preview application ID `com.rdp.sync.preview2`, versionCode 14, versionName `1.1.1-preview-debug`, ARM64 user APK; x86_64 separately built for emulator tests.
+- Current Preview 3 candidate application ID `com.rdp.sync.preview3`, versionCode 15, versionName `1.2.0-preview.3-debug`, ARM64 user APK; x86_64 separately built for emulator tests.
 - Development signing only. `verify-apk.py` records package/version/ABIs/SHA256/signing certificate and verifies all defined JNI symbols, ELF architectures, dependency closure, 16 KiB ELF and ZIP alignment.
 
 FreeRDP was upgraded rather than shipping the old 3.9.0 pin: vendor [GHSA-rrp5-666j-g6gp](https://github.com/FreeRDP/FreeRDP/security/advisories/GHSA-rrp5-666j-g6gp) covers a relevant DRDYNVC allocation issue fixed in [3.32.2](https://github.com/FreeRDP/FreeRDP/releases/tag/3.32.2). OpenSSL's [official downloads](https://openssl-library.org/source/) identify 3.5 as the supported LTS series.

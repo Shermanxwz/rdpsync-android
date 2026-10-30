@@ -96,7 +96,7 @@ class XrdpSharedDriveInstrumentedTest {
             documents.seedSources(originals)
             openMenu(R.string.space_title)
             scrollBrowserTo(hasText(label(R.string.space_import))); click(R.string.space_import)
-            documents.cancelPicker()
+            documents.cancelImportPicker()
             browserIdle(); scrollBrowserTo(hasText(label(R.string.space_picker_cancelled))); compose.onNodeWithText(label(R.string.space_picker_cancelled)).assertIsDisplayed()
             assertEquals(offGeneration, RdpConnector.sessionGeneration())
             originals.keys.forEach { assertTrue(compose.onAllNodesWithText(it).fetchSemanticsNodes().isEmpty()) }
@@ -155,7 +155,7 @@ class XrdpSharedDriveInstrumentedTest {
             val action = label(R.string.space_file_actions, "remote-roundtrip.bin")
             scrollBrowserTo(hasContentDescription(action)); compose.onNodeWithContentDescription(action).performClick()
             click(R.string.export_action)
-            documents.cancelPicker()
+            documents.cancelExportTreePicker()
             browserIdle(); scrollBrowserTo(hasText(label(R.string.space_picker_cancelled))); compose.onNodeWithText(label(R.string.space_picker_cancelled)).assertIsDisplayed()
             assertEquals(1, documents.destinationHashes().size)
             measurements.put("actual_export_picker_cancel_no_copy", true)

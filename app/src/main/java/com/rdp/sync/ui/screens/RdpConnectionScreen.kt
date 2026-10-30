@@ -558,6 +558,11 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
     val context = LocalContext.current
     var showTools by remember { mutableStateOf(false) }
     val menuScroll = rememberScrollState()
+    val menuDensity = LocalDensity.current
+    val menuInsets = WindowInsets.safeDrawing
+    val menuViewportHeight = (LocalConfiguration.current.screenHeightDp.dp - with(menuDensity) {
+        (menuInsets.getTop(menuDensity) + menuInsets.getBottom(menuDensity)).toDp()
+    } - 48.dp).coerceAtLeast(48.dp)
     val menuScope = rememberCoroutineScope()
     // Nonfocusable popup keeps the IME owner; handle Back locally instead of
     // letting an open session menu accidentally navigate away from the desktop.
@@ -581,6 +586,10 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
                         if (fullscreen) context.getString(R.string.session_menu) else context.getString(R.string.session_tools))
                 }
                 DropdownMenu(expanded = showTools, onDismissRequest = { showTools = false },
+                    // Keep the popup inside the safe viewport. Remaining commands
+                    // stay reachable through its existing scroll state, including
+                    // compact windows, large text and the on-screen keyboard.
+                    modifier = Modifier.heightIn(max = menuViewportHeight),
                     scrollState = menuScroll, properties = PopupProperties(focusable = false)) {
                     if (fullscreen) DropdownMenuItem(text = { Text(context.getString(R.string.toggle_keyboard)) }, enabled = connected,
                         onClick = { showTools = false; onKeyboard() })

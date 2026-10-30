@@ -1,4 +1,15 @@
-## Unreleased — 1.1.0 preview
+# Changelog
+
+## 1.2.0 Preview 3 — candidate
+
+- Added an opt-in RDPDR filesystem for the persistent app-private Shared space, with read-only default and separate read/write consent. The app and remote peer access the same confined workspace; explicit Android file-picker import/export copies do not synchronize phone folders.
+- Added app-side browsing, create/rename/delete, bounded storage and remote backpressure, conflicting-handle errors, revocation and reconnect persistence. Remote access never includes other app files or arbitrary phone directories.
+- Refreshed connection screens, forms, settings and sharing dialogs with coherent English/Chinese, light/dark design and accessible interaction targets, preserving fullscreen desktop and IME behavior.
+- Kept clipboard file transfer as a separate negotiated fallback, with honest unconfirmed/unsupported/rejected/accepted drive states.
+- Uses a distinct development-signed `com.rdp.sync.preview3` package, versionCode 15. Preview 2 and its data remain untouched; no automatic migration or future signer compatibility is promised.
+- Acceptance is commit-specific. See `docs/PRODUCT_UI_ACCEPTANCE.md`, `docs/SHARED_DRIVE_DESIGN.md` and `docs/VERIFICATION.md`; candidate descriptions are not a claim of completed Windows, physical-device or final runtime certification.
+
+## 1.1.0 previews — historical implementation notes
 
 - Touch-first sessions with an explicit temporary touchpad toggle; preserved device profiles with transactional credential encryption migration.
 - Real Display Control negotiation with requested/actual resolution tracking, aspect-preserving window sizing, profile/HD/FHD choices, timeout/unsupported fallback and deliberate reconnect.
@@ -10,11 +21,9 @@
 - Reproducible native APK CI, native production-source sanitizer fixtures, Kotlin regressions, and standard hosted Android emulator plus isolated xrdp fixture.
 - Mandatory TLS certificate pinning with explicit first-use/changed-certificate approval before login; stale trust decisions rejected.
 - Android Keystore AES-GCM local password storage, non-destructive legacy migration and visible key-loss recovery. Default password-free WebDAV file separate from explicit legacy/password-inclusive sync.
-- Side-by-side development-signed `com.rdp.sync.preview` package. No production signing key, GitHub release, merge or store deployment.
+- Side-by-side development-signed `com.rdp.sync.preview` package; later Preview 2 uses `com.rdp.sync.preview2`. Published historical APKs remain unchanged. No production signing key or app-store deployment.
 
 Known limitations: first-use fingerprints need independent verification; explicitly selected legacy WebDAV sync contains plaintext passwords (not end-to-end encryption); no H.264/RDPGFX acceleration or physical-device parity claim. See docs/VERIFICATION.md.
-
-# Changelog
 
 ## 1.0.11 - 2026-07-01
 

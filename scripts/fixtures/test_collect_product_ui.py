@@ -18,6 +18,7 @@ def ledger(method):
             'package': 'com.rdp.sync.preview3', 'sdk': 35, 'synthetic_ui_only': True,
             'credential_screenshots': False, 'physical_foldable_test': False,
             'locale': spec['locale'], 'dark': spec['dark'], 'font_scale': spec['font_scale'],
+            'activity_locale': spec['locale'], 'activity_font_scale': spec['font_scale'],
             'device_width_dp': 640 if method == 'expandedWidth' else 320,
             'started_at_epoch_ms': 1001000, 'expected_files': expected,
             'captured_files': [{'filename': name, 'sha256': 'b' * 64, 'captured_at_epoch_ms': 1002000,
@@ -46,6 +47,20 @@ class UiCollectorTest(unittest.TestCase):
             with self.assertRaises(AssertionError): self.check(item)
         item = ledger('englishLight'); item['physical_foldable_test'] = True
         with self.assertRaises(AssertionError): self.check(item)
+
+    def test_missing_or_wrong_activity_locale_fails(self):
+        for value in [None, '', 'en', 'zh-CN']:
+            item = ledger('chineseLight')
+            if value is None: del item['activity_locale']
+            else: item['activity_locale'] = value
+            with self.assertRaises((AssertionError, KeyError)): self.check(item, 'chineseLight')
+
+    def test_missing_or_wrong_activity_font_scale_fails(self):
+        for value in [None, 1.0, True, '1.5']:
+            item = ledger('narrowLargeText')
+            if value is None: del item['activity_font_scale']
+            else: item['activity_font_scale'] = value
+            with self.assertRaises((AssertionError, KeyError)): self.check(item, 'narrowLargeText')
 
     def test_actual_narrow_window_required(self):
         item = ledger('narrowLargeText'); item['device_width_dp'] = 411

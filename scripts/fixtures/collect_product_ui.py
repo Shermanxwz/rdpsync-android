@@ -48,6 +48,10 @@ def validate(value, method, spec, commit, started):
     assert value['credential_screenshots'] is False and value['physical_foldable_test'] is False
     assert value['locale'] == spec['locale'] and value['dark'] == spec['dark']
     assert value['font_scale'] == spec['font_scale']
+    # Dialogs use the Activity resource context, not only CompositionLocals.
+    assert value['activity_locale'] == spec['locale']
+    assert type(value['activity_font_scale']) in (int, float)
+    assert value['activity_font_scale'] == spec['font_scale']
     assert value['device_width_dp'] >= 600 if method == 'expandedWidth' else value['device_width_dp'] == 320
     assert value['started_at_epoch_ms'] >= started * 1000
     assert set(value['expected_files']) == expected and len(value['expected_files']) == len(expected)

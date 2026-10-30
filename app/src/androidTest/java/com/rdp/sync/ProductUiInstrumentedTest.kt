@@ -78,6 +78,7 @@ class ProductUiInstrumentedTest {
 
     private fun matrix(language: String, dark: Boolean, fontScale: Float, constrainedWidth: Int? = null) {
         val base = compose.activity
+        val originalResourcesConfiguration = Configuration(base.resources.configuration)
         val config = Configuration(base.resources.configuration).apply {
             setLocale(Locale.forLanguageTag(language)); this.fontScale = fontScale
             uiMode = (uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or if (dark) Configuration.UI_MODE_NIGHT_YES else Configuration.UI_MODE_NIGHT_NO
@@ -132,6 +133,20 @@ class ProductUiInstrumentedTest {
         var primaryFailure: Throwable? = null
         try {
         compose.runOnUiThread {
+            // Dialog and Popup create Android view roots whose resource context is
+            // the Activity, not the parent CompositionLocal. Configure that actual
+            // test Activity too; otherwise Chinese pages show English dialogs.
+            // This is fixture-local and restored below, never a device setting.
+            val activityConfiguration = Configuration(originalResourcesConfiguration).apply {
+                setLocale(Locale.forLanguageTag(language))
+                this.fontScale = fontScale
+                uiMode = config.uiMode
+            }
+            @Suppress("DEPRECATION")
+            base.resources.updateConfiguration(activityConfiguration, base.resources.displayMetrics)
+            assertEquals(language, base.resources.configuration.locales[0].language)
+            report.put("activity_locale", base.resources.configuration.locales[0].toLanguageTag())
+                .put("activity_font_scale", base.resources.configuration.fontScale)
             val bars = WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView)
             originalBarAppearance = bars.isAppearanceLightStatusBars to bars.isAppearanceLightNavigationBars
             // Match the explicit UI-only theme variant. Record actual flags and restore
@@ -317,7 +332,7 @@ class ProductUiInstrumentedTest {
         compose.onNodeWithContentDescription(label(R.string.session_menu)).assertHeightIsAtLeast(48.dp).performClick()
         compose.onNodeWithText(label(R.string.toggle_keyboard)).assertIsDisplayed()
         screenshot("$prefix-session-menu-open")
-        compose.onNodeWithText("Ctrl+Alt+Del").performScrollTo().assertExists()
+        compose.onNodeWithText("Ctrl+Alt+Del").performScrollTo().assertIsDisplayed()
         screenshot("$prefix-session-menu-shortcuts")
         show("locked")
         compose.onNodeWithText(label(R.string.save_connection)).performScrollTo().assertIsNotEnabled()
@@ -432,30 +447,58 @@ class ProductUiInstrumentedTest {
             }
             throw failure
         } finally {
-            syntheticInput.shutdown()
-            if (primaryFailure != null) runCatching { screenshot("$prefix-failure", force = true) }
-            report.put("captured_files", JSONArray(capturedFiles))
-            File(evidence, "$prefix.json").writeText(report.toString(2))
-            // UTP may uninstall the app and erase externalFiles. Export only synthetic
-            // fixture evidence using the shell identity; no production storage permission.
-            require(evidence.absolutePath.matches(Regex("[A-Za-z0-9_./-]+")))
+            // Restoration surrounds every cleanup operation, including screenshot,
+            // report creation and export. A failed evidence write cannot bypass it.
+            var cleanupFailure: Throwable? = null
             try {
-                // executeShellCommand is argv-based, not a shell parser: no &&/pipes.
+                syntheticInput.shutdown()
+                if (primaryFailure != null) runCatching { screenshot("$prefix-failure", force = true) }
+                report.put("captured_files", JSONArray(capturedFiles))
+                File(evidence, "$prefix.json").writeText(report.toString(2))
+                // UTP may uninstall the app and erase externalFiles. Export only
+                // synthetic fixture evidence with the shell identity.
+                require(evidence.absolutePath.matches(Regex("[A-Za-z0-9_./-]+")))
                 shell("mkdir -p /sdcard/Download/rdpsync-product-ui")
                 shell("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-product-ui/")
                 val exported = shell("cat /sdcard/Download/rdpsync-product-ui/$prefix.json")
                 assertEquals("UI evidence must survive test APK uninstall", report.toString(2), exported)
-            } catch (exportFailure: Throwable) {
-                if (primaryFailure != null) primaryFailure.addSuppressed(exportFailure) else throw exportFailure
+            } catch (failure: Throwable) {
+                cleanupFailure = failure
+                if (primaryFailure != null) primaryFailure.addSuppressed(failure) else throw failure
             } finally {
-                runCatching { compose.runOnUiThread {
-                    originalBarAppearance?.let { (status, navigation) ->
-                        WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView).apply {
-                            isAppearanceLightStatusBars = status
-                            isAppearanceLightNavigationBars = navigation
+                try {
+                    compose.runOnUiThread {
+                        var restoreFailure: Throwable? = null
+                        try {
+                            @Suppress("DEPRECATION")
+                            base.resources.updateConfiguration(originalResourcesConfiguration, base.resources.displayMetrics)
+                            val restored = base.resources.configuration
+                            assertEquals("Restore Activity locale", originalResourcesConfiguration.locales, restored.locales)
+                            assertEquals("Restore Activity font scale", originalResourcesConfiguration.fontScale, restored.fontScale, 0f)
+                            assertEquals("Restore Activity UI mode", originalResourcesConfiguration.uiMode, restored.uiMode)
+                        } catch (failure: Throwable) {
+                            restoreFailure = failure
                         }
+                        // Attempt bar restoration even if resource restoration failed.
+                        try {
+                            originalBarAppearance?.let { (status, navigation) ->
+                                WindowInsetsControllerCompat(compose.activity.window, compose.activity.window.decorView).apply {
+                                    isAppearanceLightStatusBars = status
+                                    isAppearanceLightNavigationBars = navigation
+                                    assertEquals("Restore status bar appearance", status, isAppearanceLightStatusBars)
+                                    assertEquals("Restore navigation bar appearance", navigation, isAppearanceLightNavigationBars)
+                                }
+                            }
+                        } catch (failure: Throwable) {
+                            val previous = restoreFailure
+                            if (previous != null) previous.addSuppressed(failure) else restoreFailure = failure
+                        }
+                        restoreFailure?.let { throw it }
                     }
-                } }
+                } catch (failure: Throwable) {
+                    val previous = primaryFailure ?: cleanupFailure
+                    if (previous != null) previous.addSuppressed(failure) else throw failure
+                }
             }
         }
     }

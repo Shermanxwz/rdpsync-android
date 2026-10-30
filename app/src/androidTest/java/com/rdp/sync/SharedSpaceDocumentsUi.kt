@@ -125,11 +125,32 @@ internal class SharedSpaceDocumentsUi(
         awaitAppReturn()
     }
 
-    fun cancelPicker() {
+    fun cancelImportPicker() = cancelPicker(tree = false)
+
+    fun cancelExportTreePicker() = cancelPicker(tree = true)
+
+    private fun cancelPicker(tree: Boolean) {
         awaitPicker()
         val record = JSONObject().put("started_elapsed_ms", SystemClock.elapsedRealtime())
         val records = measurements.optJSONArray("shared_space_picker_back") ?: JSONArray().also { measurements.put("shared_space_picker_back", it) }
         records.put(record)
+        // DocumentsUI restores the previous directory across picker invocations.
+        // Back there navigates to its parent; it is not a cancellation. Select
+        // the observed Downloads root first, then prove we are at that root
+        // before issuing the one cancellation gesture. No picker data is reset.
+        record.put("initial_breadcrumbs", JSONArray(documentBreadcrumbs()))
+        if (tree) {
+            navigateToTreeRoot(record)
+        } else {
+            tapDocumentAction("cancel-picker-show-roots") {
+                it.contentDescription?.toString() in setOf("Show roots", "Open navigation drawer")
+            }
+            tapDocumentLabel("Downloads", ancestorResourceSuffix = "/roots_list")
+            waitFor("Downloads root before one picker cancellation", 15_000) {
+                documentBreadcrumbs() == listOf("Downloads")
+            }
+        }
+        record.put("cancel_root_breadcrumbs", JSONArray(documentBreadcrumbs()))
         sendSystemBack(record) // Exactly one physical down/up pair; no retry.
         awaitAppReturn()
         record.put("observed_app_return_elapsed_ms", SystemClock.elapsedRealtime()).put("documentsui_absent", true)
@@ -281,6 +302,38 @@ internal class SharedSpaceDocumentsUi(
                 } }))
             ordered.map { requireNotNull(it.text).toString() }
         } finally { nodes.forEach { it.recycle() } }
+    }
+
+    private fun navigateToTreeRoot(record: JSONObject) {
+        // ACTION_OPEN_DOCUMENT_TREE has no roots drawer on this pinned image.
+        // Navigate only observed ancestors, one Back per proven depth change;
+        // these are navigation gestures, never retries of a failed cancellation.
+        val rootTitle = shell("settings get global device_name")
+        require(rootTitle.isNotBlank() && rootTitle != "null")
+        var crumbs = emptyList<String>()
+        fun relative(path: List<String>) = if (path.firstOrNull() == rootTitle) path.drop(1) else path
+        waitFor("unambiguous tree-picker path before cancellation", 15_000) {
+            crumbs = documentBreadcrumbs()
+            crumbs == listOf(rootTitle) || (relative(crumbs).let { it.size in 1..3 && it.first() == "Download" && it.distinct().size == it.size })
+        }
+        val navigation = JSONArray().also { record.put("tree_root_navigation", it) }
+        repeat(3) {
+            if (crumbs == listOf(rootTitle)) return
+            val before = relative(crumbs)
+            val expectedParent = before.dropLast(1)
+            val step = JSONObject().put("before_breadcrumbs", JSONArray(crumbs))
+            navigation.put(step)
+            sendSystemBack(step)
+            waitFor("tree picker moved to the exact observed parent", 15_000) {
+                val current = documentBreadcrumbs()
+                val matched = if (expectedParent.isEmpty()) current == listOf(rootTitle)
+                    else current == expectedParent || current == listOf(rootTitle) + expectedParent
+                if (matched) crumbs = current
+                matched
+            }
+            step.put("after_breadcrumbs", JSONArray(crumbs))
+        }
+        assertEquals("Tree cancellation only at verified storage root", listOf(rootTitle), crumbs)
     }
 
     private fun navigateObservedTreeDestination() {
