@@ -12,6 +12,8 @@ mkdir -p build/gnome-evidence/gfx-reference
 CLIENT=$(cat build/reference-freerdp/client-path.txt)
 "$CLIENT" /buildconfig >build/gnome-evidence/gfx-reference/buildconfig.txt 2>&1
 cp build/reference-freerdp/source-revision.txt build/gnome-evidence/gfx-reference/
+ldd "$CLIENT" >build/gnome-evidence/gfx-reference/linked-libraries.txt
+{ sha256sum "$CLIENT"; ldd "$CLIENT" | awk '$3 ~ /^\// {print $3}' | sort -u | xargs sha256sum; } >build/gnome-evidence/gfx-reference/linked-libraries-sha256.txt
 export DISPLAY=:96 HOME="$ROOT/build/gnome-private/gfx-reference-home"
 mkdir -p "$HOME"
 Xvfb "$DISPLAY" -screen 0 1600x1200x24 -nolisten tcp >build/gnome-evidence/gfx-reference/xvfb.log 2>&1 &
@@ -19,4 +21,6 @@ XPID=$!
 trap 'kill "$XPID" 2>/dev/null || true; wait "$XPID" 2>/dev/null || true' EXIT
 for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep .1; done
 xdpyinfo >/dev/null
+python3 scripts/fixtures/gnome/test_calibrate_pixels.py
 python3 scripts/fixtures/gnome/gfx-oracle.py
+python3 scripts/fixtures/gnome/calibrate_pixels.py build/gnome-evidence/gfx-reference

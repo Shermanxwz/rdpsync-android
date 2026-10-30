@@ -14,9 +14,11 @@ cleanup() {
 }
 trap cleanup EXIT
 touch "$OUT/instrumentation-start.marker"
+CALIBRATION=$(base64 -w0 "$OUT/gfx-reference/pixel-calibration.json")
 ./gradlew --no-daemon -PnativeAbis=x86_64 \
   -Pandroid.testInstrumentationRunnerArguments.gnomeFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.gnomeFixtureMode="$GNOME_FIXTURE_MODE" \
+  -Pandroid.testInstrumentationRunnerArguments.gnomePixelCalibration="$CALIBRATION" \
   -Pandroid.testInstrumentationRunnerArguments.gnomeFixtureFingerprint="$GNOME_FIXTURE_FINGERPRINT" \
   -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.GnomeFixtureInstrumentedTest \
   :app:connectedDebugAndroidTest

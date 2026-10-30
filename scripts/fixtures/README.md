@@ -210,3 +210,15 @@ and View InputConnection text. Actual Gboard key/IME/crop/fullscreen interaction
 remains covered by the separate mandatory full xrdp UI scenario. Software
 progressive graphics is not H264 or hardware decoding. No GNOME pass is claimed
 until actual runtime artifacts have been inspected.
+
+The GNOME Progressive gate now uses a **same-run reference-decoder calibration**,
+not ideal-source RGB equality or a global tolerance. The official pinned GFX
+client must deliver real frames/input, every source probe color (including all
+three text markers), and headless DISP resize. Finalized logs must identify
+codec 9 after the owned process is joined, avoiding stdout-buffer races. Linked
+ELF hashes, source/build configuration, PNG hashes and sampled pixels bind the
+calibration. Repeated uniform patches must be stable and source deviation must
+stay within the independently observed two-level-per-channel bound; missing colors,
+wrong codec/source, tampered PNGs and inconsistent samples fail closed. Android
+then compares **exactly** to those reference values, recording source, reference
+and actual RGB. Existing classic/native exact-color and alpha gates are unchanged.

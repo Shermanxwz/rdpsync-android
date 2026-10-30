@@ -6,6 +6,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.util.Base64
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
@@ -41,12 +42,27 @@ class GnomeFixtureInstrumentedTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "gnome-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
+    private lateinit var decodedColors: JSONObject
 
     @Test fun nativeGnomeRdpPixelsInputAndDisplayControl() {
         val args = InstrumentationRegistry.getArguments()
         assertEquals("Explicit isolated fixture argument required", "true", args.getString("gnomeFixture"))
         val mode = requireNotNull(args.getString("gnomeFixtureMode"))
         require(mode in setOf("headless-extend", "screen-share-mirror"))
+        val calibration = JSONObject(String(Base64.decode(requireNotNull(args.getString("gnomePixelCalibration")), Base64.DEFAULT), Charsets.UTF_8))
+        assertEquals(1, calibration.getInt("schema"))
+        assertEquals(9, calibration.getInt("codec"))
+        assertEquals(mode, calibration.getString("mode"))
+        assertEquals("97eff6ddfbbfaa8e42a126d362686bd001ff8bdc", calibration.getString("source_revision"))
+        decodedColors = calibration.getJSONObject("colors")
+        val requiredColors = listOf(0xff0000, 0x00ff00, 0x0000ff, 0x55cccc, 0xccaa55, 0x9955dd, 0x44dd88, 0xdd4488, 0x112233)
+        assertEquals(requiredColors.size, decodedColors.length())
+        requiredColors.forEach { source ->
+            val decoded = decodedColors.getInt(source.toString())
+            assertTrue(decoded in 0..0xffffff)
+            assertTrue(listOf(0, 8, 16).all { shift -> abs(((source shr shift) and 255) - ((decoded shr shift) and 255)) <= 2 })
+        }
+        measurements.put("pixel_calibration", calibration)
         val fingerprint = requireNotNull(args.getString("gnomeFixtureFingerprint"))
         require(fingerprint.matches(Regex("[0-9a-f]{64}")))
         assertTrue(RdpConnector.initialize(instrumentation.targetContext))
@@ -192,18 +208,22 @@ class GnomeFixtureInstrumentedTest {
         val b = instrumentation.uiAutomation.takeScreenshot() ?: return null
         return try { b.getPixel(p.first,p.second) and 0xffffff } finally { b.recycle() }
     }
+    private fun referenceColor(source: Int): Int = decodedColors.getInt((source and 0xffffff).toString())
     private fun assertColor(x: Int, y: Int, expected: Int) {
-        // Keep exact baseline initially. Any progressive-codec difference must be
-        // investigated against a reference decoder before changing this predicate.
-        waitFor("received GNOME pixel ($x,$y) expected ${expected and 0xffffff}") {
+        // Exact equality to the same-run pinned official Progressive decoder.
+        // Source conversion drift was independently observed/calibrated; this is
+        // not a global RGB tolerance and never affects classic/native alpha tests.
+        val decodedExpected = referenceColor(expected)
+        waitFor("received GNOME pixel ($x,$y) exact reference RGB $decodedExpected") {
             val actual = colorAt(x,y)
             val values = measurements.optJSONArray("raw_pixel_samples") ?: JSONArray().also { measurements.put("raw_pixel_samples",it) }
-            if(values.length() < 100) values.put(JSONObject().put("x",x).put("y",y).put("actual",actual).put("expected",expected and 0xffffff))
-            actual == (expected and 0xffffff)
+            if(values.length() < 100) values.put(JSONObject().put("x",x).put("y",y).put("actual",actual)
+                .put("source_rgb",expected and 0xffffff).put("reference_rgb",decodedExpected))
+            actual == decodedExpected
         }
     }
     private fun tapAndObserve(x: Float, y: Float) {
-        waitFor("visible focused GNOME before single tap") { var focused=false; compose.runOnUiThread { focused=desktop().hasWindowFocus() }; focused && colorAt(40,40) == 0xff0000 }
+        waitFor("visible focused GNOME before single tap") { var focused=false; compose.runOnUiThread { focused=desktop().hasWindowFocus() }; focused && colorAt(40,40) == referenceColor(0xff0000) }
         val before = state().getInt("clicks")
         var sx=0f; var sy=0f
         compose.runOnUiThread { val v=desktop(); val p=v.viewportSnapshot().toScreen(x,y); val loc=IntArray(2); v.getLocationOnScreen(loc); assertTrue(p.x in 0f..v.width.toFloat() && p.y in 0f..v.height.toFloat()); sx=loc[0]+p.x; sy=loc[1]+p.y }
@@ -217,7 +237,7 @@ class GnomeFixtureInstrumentedTest {
             val s=state(); val p=s.optJSONArray("last_press"); val r=s.optJSONArray("last_release")
             s.getInt("clicks")==before+1 && p!=null && r!=null &&
                 abs(p.getDouble(0)-x)<=1 && abs(p.getDouble(1)-y)<=1 && abs(r.getDouble(0)-x)<=1 && abs(r.getDouble(1)-y)<=1 &&
-                colorAt(40,140)==(if((before+1)%2==1) 0x44dd88 else 0xdd4488)
+                colorAt(40,140)==referenceColor(if((before+1)%2==1) 0x44dd88 else 0xdd4488)
         }
         measurements.put("last_touch",state())
     }

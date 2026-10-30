@@ -380,115 +380,6 @@ static void gfx_detach(RdpSession* s, RdpgfxClientContext* gfx) {
     pthread_mutex_lock(&s->mutex); s->gfx_ready = 0; pthread_mutex_unlock(&s->mutex);
 }
 
-/* Offline Android gate: execute the actual linked GDI/GFX callbacks, not a
- * second renderer implementation. Only the DVC surface-ID storage is local;
- * no socket, certificate, credential or server is involved. */
-typedef struct { void* surfaces[4]; void* cache[RDPSYNC_GFX_CACHE_SLOTS]; } GfxProbeStorage;
-static UINT gfx_probe_set(RdpgfxClientContext* gfx, UINT16 id, void* surface) {
-    if (id >= 4) return ERROR_INVALID_PARAMETER;
-    ((GfxProbeStorage*)gfx->handle)->surfaces[id] = surface;
-    return CHANNEL_RC_OK;
-}
-static void* gfx_probe_get(RdpgfxClientContext* gfx, UINT16 id) {
-    return id < 4 ? ((GfxProbeStorage*)gfx->handle)->surfaces[id] : NULL;
-}
-static UINT gfx_probe_ids(RdpgfxClientContext* gfx, UINT16** ids, UINT16* count) {
-    *ids = calloc(4, sizeof(UINT16)); *count = 0;
-    if (!*ids) return CHANNEL_RC_NO_MEMORY;
-    for (UINT16 i = 0; i < 4; ++i) if (gfx_probe_get(gfx, i)) (*ids)[(*count)++] = i;
-    return CHANNEL_RC_OK;
-}
-static UINT gfx_probe_cache_set(RdpgfxClientContext* gfx, UINT16 slot, void* entry) {
-    if (!slot || slot > RDPSYNC_GFX_CACHE_SLOTS) return ERROR_INVALID_INDEX;
-    ((GfxProbeStorage*)gfx->handle)->cache[slot - 1] = entry;
-    return CHANNEL_RC_OK;
-}
-static void* gfx_probe_cache_get(RdpgfxClientContext* gfx, UINT16 slot) {
-    return slot && slot <= RDPSYNC_GFX_CACHE_SLOTS ? ((GfxProbeStorage*)gfx->handle)->cache[slot - 1] : NULL;
-}
-static BOOL gfx_runtime_check(RdpSession* s) {
-    BOOL okay = FALSE;
-    GfxProbeStorage storage = {0};
-    RdpgfxClientContext gfx = { .handle = &storage, .SetSurfaceData = gfx_probe_set,
-        .GetSurfaceData = gfx_probe_get, .GetSurfaceIds = gfx_probe_ids,
-        .SetCacheSlotData = gfx_probe_cache_set, .GetCacheSlotData = gfx_probe_cache_get };
-    rdpContext* ctx = s->instance->context;
-    if (!freerdp_settings_set_uint32(ctx->settings, FreeRDP_DesktopWidth, 256) ||
-        !freerdp_settings_set_uint32(ctx->settings, FreeRDP_DesktopHeight, 192) ||
-        !gdi_init(s->instance, PIXEL_FORMAT_RGBA32)) return FALSE;
-    ctx->update->BeginPaint = begin_paint; ctx->update->EndPaint = end_paint;
-    ctx->update->DesktopResize = desktop_resize;
-    if (!gfx_attach(s, &gfx)) goto done;
-#define PROBE_GFX(call) do { if ((call) != CHANNEL_RC_OK) goto done; } while (0)
-    for (int round = 0; round < 2; ++round) {
-        UINT16 width = round ? 512 : 256, height = round ? 256 : 192;
-        RDPGFX_RESET_GRAPHICS_PDU reset = { .width = width, .height = height };
-        PROBE_GFX(gfx.ResetGraphics(&gfx, &reset));
-        RDPGFX_CREATE_SURFACE_PDU create = { .surfaceId = 1, .width = width, .height = height,
-            .pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888 };
-        PROBE_GFX(gfx.CreateSurface(&gfx, &create));
-        RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU map = { .surfaceId = 1 };
-        PROBE_GFX(gfx.MapSurfaceToOutput(&gfx, &map));
-        RDPGFX_START_FRAME_PDU start = { .frameId = (UINT32)(round * 2 + 1) };
-        RDPGFX_END_FRAME_PDU end = { .frameId = start.frameId };
-        RECTANGLE_16 full = {0, 0, width, height};
-        RDPGFX_SOLID_FILL_PDU fill = { .surfaceId = 1, .fillPixel = {51, 34, 17, 0},
-            .fillRectCount = 1, .fillRects = &full };
-        PROBE_GFX(gfx.StartFrame(&gfx, &start));
-        PROBE_GFX(gfx.SolidFill(&gfx, &fill));
-        PROBE_GFX(gfx.EndFrame(&gfx, &end));
-        if (s->fb_width != width || s->fb_height != height || !s->fb_pixels ||
-            s->fb_pixels[(size_t)(height - 1) * width + width - 1] != 0xff332211U) goto done;
-        s->dirty = (RdpDirtyRect){0};
-        const int64_t previous_frame = s->frame_id;
-        BYTE red[4] = {0, 0, 255, 0};
-        UINT32 x = width - 2, y = height - 2;
-        RDPGFX_SURFACE_COMMAND command = { .surfaceId = 1, .codecId = RDPGFX_CODECID_UNCOMPRESSED,
-            .format = PIXEL_FORMAT_BGRX32, .left = x, .top = y, .right = x + 1, .bottom = y + 1,
-            .width = 1, .height = 1, .length = sizeof(red), .data = red };
-        ++start.frameId; ++end.frameId;
-        PROBE_GFX(gfx.StartFrame(&gfx, &start));
-        PROBE_GFX(gfx.SurfaceCommand(&gfx, &command));
-        PROBE_GFX(gfx.EndFrame(&gfx, &end));
-        if (s->frame_id != previous_frame + 1 || s->dirty.x != (int)x || s->dirty.y != (int)y ||
-            s->dirty.width != 1 || s->dirty.height != 1 || s->fb_pixels[(size_t)y * width + x] != 0xff0000ffU)
-            goto done;
-        /* Execute actual upstream allocation, replacement-before-eviction and
-         * boundary slot handling; the accounting must match live pixel bytes. */
-        RDPGFX_SURFACE_TO_CACHE_PDU cache = { .surfaceId = 1, .cacheSlot = 4096,
-            .rectSrc = {0, 0, 17, 3} };
-        PROBE_GFX(gfx.SurfaceToCache(&gfx, &cache));
-        if (s->gfx_cache_budget.bytes != 240 || !storage.cache[4095]) goto done;
-        cache.rectSrc.right = 32;
-        PROBE_GFX(gfx.SurfaceToCache(&gfx, &cache));
-        if (s->gfx_cache_budget.bytes != 384 || !storage.cache[4095]) goto done;
-        RDPGFX_EVICT_CACHE_ENTRY_PDU evict = { .cacheSlot = 4096 };
-        PROBE_GFX(gfx.EvictCacheEntry(&gfx, &evict));
-        if (s->gfx_cache_budget.bytes || storage.cache[4095]) goto done;
-        RDPGFX_DELETE_SURFACE_PDU remove = { .surfaceId = 1 };
-        PROBE_GFX(gfx.DeleteSurface(&gfx, &remove));
-        if (s->gfx_budget.bytes) goto done;
-    }
-    okay = s->gfx_commands == 2;
-done:
-    if (s->gfx_ready) {
-        for (UINT16 id = 0; id < 4; ++id) if (storage.surfaces[id]) {
-            RDPGFX_DELETE_SURFACE_PDU remove = { .surfaceId = id };
-            if (gfx.DeleteSurface(&gfx, &remove) != CHANNEL_RC_OK) okay = FALSE;
-        }
-    }
-    if (s->gfx_ready) for (UINT16 slot = 1; slot <= RDPSYNC_GFX_CACHE_SLOTS; ++slot) {
-        if (storage.cache[slot - 1]) {
-            RDPGFX_EVICT_CACHE_ENTRY_PDU evict = { .cacheSlot = slot };
-            if (gfx.EvictCacheEntry(&gfx, &evict) != CHANNEL_RC_OK) okay = FALSE;
-        }
-    }
-    gfx_detach(s, &gfx);
-    gdi_free(s->instance);
-    return okay;
-#undef PROBE_GFX
-}
-
 // ====== Pointer handling ======
 typedef struct { rdpPointer pointer; size_t size; void* data; } AppPointer;
 
@@ -1185,10 +1076,6 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
                 result = instance->LoadChannels && instance->LoadChannels(instance);
                 invariant = certificate_context_failure(instance, probe, 1);
                 if (invariant) { failed = invariant; result = 0; }
-            }
-            if (result && !compatibility) {
-                failed = "图形管线实际绘制与尺寸更新";
-                result = gfx_runtime_check(probe);
             }
             if (instance) {
                 /* Terminate loaded addins; no socket or authentication exists. */

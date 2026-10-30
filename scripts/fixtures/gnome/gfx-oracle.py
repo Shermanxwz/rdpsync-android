@@ -38,13 +38,16 @@ def wait(predicate,seconds=30):
         time.sleep(.2)
     raise AssertionError('Official GFX oracle observable readiness timed out')
 
-def capture(window,name):
+def capture(window,name,width=1024,height=768):
     path=OUT/f'{name}.png'
     subprocess.run(['import','-window',window,str(path)],check=True,timeout=5)
     im=Image.open(path).convert('RGB')
-    assert im.size==(1024,768),im.size
-    points=[(40,40),(136,40),(232,40),(336,40),(40,140),(900,600)]
-    samples=[{'point':pt,'rgb':im.getpixel(pt)} for pt in points]
+    assert im.size==(width,height),im.size
+    current=state()
+    points=[(40,40),(136,40),(232,40),(336,40),(40,140),(1200,600) if width>1024 else (900,600)]
+    expected=[(255,0,0),(0,255,0),(0,0,255),[(85,204,204),(204,170,85),(153,85,221)][len(current['text'])%3],
+              (68,221,136) if current['clicks']%2 else (221,68,136),(17,34,51)]
+    samples=[{'point':pt,'rgb':im.getpixel(pt),'source_rgb':rgb} for pt,rgb in zip(points,expected)]
     return {'file':path.name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'dimensions':im.size,'samples':samples}
 
 try:
@@ -62,6 +65,7 @@ try:
         # three independently colored source blocks are actually visible.
         rgb=[x['rgb'] for x in f['samples'][:3]]
         return f if all(v[i]>max(v[j] for j in range(3) if j!=i) for i,v in enumerate(rgb)) else None
+    assert initial['text']=='', 'Oracle requires a pristine synthetic text state'
     first=wait(painted)
     result['frames'].append(first);result['initial_server']=initial
     subprocess.run(['xdotool','mousemove','--window',window,'400','300','click','1'],check=True,timeout=5)
@@ -77,11 +81,27 @@ try:
     result['frames'].append(second);result['after_click_server']=after
     assert (after['session_id'],after['desktop_pid'])==(initial['session_id'],initial['desktop_pid'])
     result['client_alive_after_actual_input_and_frame']=p.poll() is None
-    decoder_log=(OUT/'client.log').read_text(errors='replace')
-    assert 'Got GFX RDPGFX_CODECID_CAPROGRESSIVE' in decoder_log, 'No observed actual Progressive command'
-    assert 'context->SurfaceCommand failed' not in decoder_log, 'Official decoder reported failure'
-    result['observed_codec']='RDPGFX_CODECID_CAPROGRESSIVE (9)'
-    result['success']=True
+    # Calibrate every text-marker source color through actual remote keyboard
+    # input, not guessed conversion constants or a blanket Android tolerance.
+    for key,expected_text,name in [('a','a','text-a'),('Return','a\n','text-newline')]:
+        old_text_rgb=result['frames'][-1]['samples'][3]['rgb']
+        subprocess.run(['xdotool','key','--window',window,key],check=True,timeout=5)
+        wait(lambda: state()['text']==expected_text)
+        def text_painted():
+            f=capture(window,name)
+            return f if f['samples'][3]['rgb']!=old_text_rgb else None
+        result['frames'].append(wait(text_painted))
+    mode=(ROOT/'build/gnome-evidence/mode.txt').read_text().strip()
+    if mode=='headless-extend':
+        subprocess.run(['xdotool','windowsize',window,'1280','720'],check=True,timeout=5)
+        wait(lambda: state()['width']==1280 and state()['height']==720)
+        def resized_painted():
+            f=capture(window,'resized',1280,720)
+            return f if all(f['samples'][i]['rgb']==first['samples'][i]['rgb'] for i in range(3)) and f['samples'][-1]['rgb']==first['samples'][-1]['rgb'] else None
+        result['frames'].append(wait(resized_painted))
+    assert p.poll() is None, 'Official client exited after final paint'
+    result['client_alive_after_actual_input_and_frame']=True
+    result['live_gates_passed']=True
 finally:
     if p.poll() is None:
         p.terminate()
@@ -89,4 +109,11 @@ finally:
         except subprocess.TimeoutExpired:p.kill();p.wait(timeout=5)
     log.close()
     result['cleanup_returncode']=p.returncode
+    # WLog stdout may be block-buffered while connected. Inspect only after the
+    # owned client is joined and the file closed, without weakening live gates.
+    decoder_log=(OUT/'client.log').read_text(errors='replace')
+    result['observed_codec']=9 if 'Got GFX RDPGFX_CODECID_CAPROGRESSIVE' in decoder_log else None
+    result['decoder_error']='context->SurfaceCommand failed' in decoder_log
+    result['success']=bool(result.get('live_gates_passed') and result['observed_codec']==9 and not result['decoder_error'])
     (OUT/'result.json').write_text(json.dumps(result,indent=2))
+assert result['success'], 'Finalized log must prove actual Progressive decoding with all live gates'
