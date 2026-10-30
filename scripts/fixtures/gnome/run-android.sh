@@ -10,6 +10,7 @@ adb shell getprop ro.build.fingerprint >"$OUT/emulator-fingerprint.txt"
 cleanup() {
   adb logcat -d >"$OUT/android-logcat.txt" || true
   adb pull /sdcard/Download/rdpsync-gnome-evidence "$OUT/" || true
+  adb pull /sdcard/Download/rdpsync-gnome-transfer-evidence "$OUT/" || true
   adb exec-out screencap -p >"$OUT/final-emulator.png" || true
 }
 trap cleanup EXIT
@@ -20,7 +21,7 @@ CALIBRATION=$(base64 -w0 "$OUT/gfx-reference/pixel-calibration.json")
   -Pandroid.testInstrumentationRunnerArguments.gnomeFixtureMode="$GNOME_FIXTURE_MODE" \
   -Pandroid.testInstrumentationRunnerArguments.gnomePixelCalibration="$CALIBRATION" \
   -Pandroid.testInstrumentationRunnerArguments.gnomeFixtureFingerprint="$GNOME_FIXTURE_FINGERPRINT" \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.GnomeFixtureInstrumentedTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.NativeRuntimeInstrumentedTest,com.rdp.sync.transfer.TransferStorageInstrumentedTest,com.rdp.sync.GnomeFixtureInstrumentedTest,com.rdp.sync.GnomeTransferInstrumentedTest \
   :app:connectedDebugAndroidTest
 python3 - <<'PY'
 import collections,json,pathlib,xml.etree.ElementTree as ET
@@ -36,6 +37,7 @@ for p in reports:
         assert not any(c.find(k) is not None for k in ('failure','error','skipped'))
         identity=(c.get('classname'),c.get('name')); assert identity not in identities
         identities.add(identity);classes[identity[0]]+=1
-assert classes=={'com.rdp.sync.NativeRuntimeInstrumentedTest':1,'com.rdp.sync.GnomeFixtureInstrumentedTest':1},classes
-(out/'verified-android-tests.json').write_text(json.dumps(dict(tests=2,failures=0,errors=0,skipped=0,classes=classes),indent=2))
+assert classes=={'com.rdp.sync.NativeRuntimeInstrumentedTest':1,'com.rdp.sync.GnomeFixtureInstrumentedTest':1,
+                'com.rdp.sync.GnomeTransferInstrumentedTest':1,'com.rdp.sync.transfer.TransferStorageInstrumentedTest':3},classes
+(out/'verified-android-tests.json').write_text(json.dumps(dict(tests=6,failures=0,errors=0,skipped=0,classes=classes),indent=2))
 PY

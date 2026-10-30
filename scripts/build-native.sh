@@ -7,7 +7,7 @@ bash "$PROJECT_DIR/scripts/build-freerdp-android.sh"
     -Wno-unused-parameter -Werror=implicit-function-declaration -Werror=incompatible-function-pointer-types \
     -I"$BUILD_DIR/freerdp-src/include" -I"$BUILD_DIR/freerdp-src/winpr/include" \
     -I"$BUILD_OUT/include" -I"$BUILD_OUT/winpr/include" -I"$OPENSSL_OUT/include" \
-    -L"$JNILIBS" -L"$OPENSSL_OUT/lib" "$PROJECT_DIR/app/src/main/cpp/freerdp_bridge.c" \
+    -L"$JNILIBS" -L"$OPENSSL_OUT/lib" "$PROJECT_DIR/app/src/main/cpp/freerdp_bridge.c" "$PROJECT_DIR/app/src/main/cpp/rdpsync_transfer.c" \
     -lfreerdp-client3 -lfreerdp3 -lwinpr3 -lssl -lcrypto -ljnigraphics -llog -landroid -lz \
     -Wl,-rpath-link="$JNILIBS" -Wl,-z,max-page-size=16384 -Wl,--no-undefined
 # Resolve libc++ only when a dependency needs it. Never rely on device-global C++ runtime.

@@ -50,7 +50,7 @@ For Gradle-only checks after native libraries are present:
 ./gradlew --no-daemon :app:testDebugUnitTest
 ```
 
-`build-apk.sh` runs unit tests, lint, preview packaging and ELF/JNI/dependency/signature/16 KiB alignment checks. Debug builds have package suffix `.preview`, preserving the installed app and its data. Never claim a fresh debug signer can upgrade existing releases. The emulator workflow builds x86_64 and uses an isolated loopback-only xrdp fixture on a standard GitHub-hosted runner; never point it at a user host.
+`build-apk.sh` runs unit tests, lint, preview packaging and ELF/JNI/dependency/signature/16 KiB alignment checks. This follow-up's debug builds have package suffix `.preview2`, preserving both the original app and the older `.preview` release. Never claim a fresh debug signer can upgrade existing releases. Emulator workflows build x86_64 and use isolated synthetic xrdp/GNOME fixtures on standard GitHub-hosted runners; never point them at a user host.
 
 ## RDP Debugging Notes
 
@@ -76,6 +76,6 @@ Documentation should describe current behavior accurately. In particular, do not
 
 - Build public APKs from the same commit that is tagged.
 - Keep release notes aligned with the tagged source.
-- Attach release APKs only; do not attach debug APKs to public GitHub releases.
+- Stable releases require a reviewed release build and update-compatible signing identity. An explicitly authorized development preview may attach a debug-signed APK only as a clearly labelled prerelease with a separate package and disclosed update/data limitations; never present it as a stable or production-signed build.
 - Verify the APK contains the native `arm64-v8a` FreeRDP/OpenSSL libraries before publishing.
 - Do one final secret scan for real hosts, usernames, passwords, WebDAV URLs, access tokens, and private keys.

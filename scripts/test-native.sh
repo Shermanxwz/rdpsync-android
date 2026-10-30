@@ -12,6 +12,17 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
 "$OUT/geometry_test"
 "$HOST_CC" "${FLAGS[@]}" -Wall -Wextra -Werror "$ROOT/app/src/test/cpp/gfx_policy_test.c" -o "$OUT/gfx_policy_test"
 "$OUT/gfx_policy_test"
+"$HOST_CC" "${FLAGS[@]}" -pthread -Wno-deprecated-declarations \
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
+    "$ROOT/app/src/test/cpp/transfer_test.c" -o "$OUT/transfer_test"
+"$OUT/transfer_test"
+
+"$HOST_CC" "${FLAGS[@]}" -pthread -Wno-deprecated-declarations \
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
+    "$ROOT/app/src/test/cpp/transfer_stall_test.c" -o "$OUT/transfer_stall_test"
+"$OUT/transfer_stall_test"
 [[ -f "$GENERATED/include/freerdp/settings_keys.h" ]] || {
     echo 'Configure/build native dependencies first (scripts/build-native.sh).' >&2; exit 1;
 }
@@ -20,7 +31,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/bridge_frame_test.c" -o "$OUT/bridge_frame_test"
+    "$ROOT/app/src/test/cpp/bridge_frame_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/bridge_frame_test"
 "$OUT/bridge_frame_test"
 
 # Exercise production GFX guards/rollback with deterministic failure delegates.
@@ -28,8 +39,16 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/gfx_bridge_test.c" -o "$OUT/gfx_bridge_test"
+    "$ROOT/app/src/test/cpp/gfx_bridge_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/gfx_bridge_test"
+
 "$OUT/gfx_bridge_test"
+
+"$HOST_CC" "${FLAGS[@]}" -pthread -Wno-deprecated-declarations \
+    -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
+    "$ROOT/app/src/test/cpp/transfer_ingress_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/transfer_ingress_test"
+"$OUT/transfer_ingress_test"
 
 # The certificate fixture generates ephemeral self-signed test certificates in
 # memory and links the host OpenSSL development library (no saved private keys).
@@ -37,7 +56,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/certificate_test.c" -o "$OUT/certificate_test" -lcrypto
+    "$ROOT/app/src/test/cpp/certificate_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/certificate_test" -lcrypto
 "$OUT/certificate_test"
 
 # Execute the actual JNI private HOME/XDG bootstrap without creating a network
@@ -46,7 +65,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/runtime_test.c" -o "$OUT/runtime_test"
+    "$ROOT/app/src/test/cpp/runtime_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/runtime_test"
 "$OUT/runtime_test"
 
 # Clang -O2 once removed the session-tail store when the factory returned only

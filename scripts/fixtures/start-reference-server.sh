@@ -25,7 +25,10 @@ if [[ "$variant" == upstream-0.10.6.1 ]]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     git build-essential autoconf automake libtool pkg-config nasm libssl-dev libpam0g-dev \
     libx11-dev libxfixes-dev libxrandr-dev libxfont-dev xserver-xorg-dev
-  WORK="$ROOT/build/reference-server"
+  # Fresh purpose-specific trees: Android classic coverage must never reuse a
+  # default-GFX reference build. The independent comparison stays unchanged.
+  WORK="$ROOT/build/reference-server-$purpose"
+  [[ ! -e "$WORK/xrdp" && ! -e "$WORK/xorgxrdp" ]] || { echo 'Refuse stale server build/configuration' >&2; exit 2; }
   mkdir -p "$WORK"
   # Immutable upstream releases; recursive submodule commits are fixed by xrdp's tree.
   git clone --depth 1 --branch v0.10.6.1 --recurse-submodules --shallow-submodules \
@@ -41,9 +44,13 @@ if [[ "$variant" == upstream-0.10.6.1 ]]; then
   (
     cd "$WORK/xrdp"
     ./bootstrap
+    codec_options=()
+    if [[ "$purpose" == android-acceptance ]]; then codec_options+=(--disable-rfxcodec); fi
     ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --runstatedir=/run \
       --libdir=/usr/lib/x86_64-linux-gnu --enable-pam --enable-pam-config=debian \
-      --with-socketdir=/run/xrdp --with-systemdsystemunitdir=/lib/systemd/system
+      --with-socketdir=/run/xrdp --with-systemdsystemunitdir=/lib/systemd/system "${codec_options[@]}"
+    ./config.status --config >"$OUT/server-configure-options.txt"
+    if [[ "$purpose" == android-acceptance ]]; then grep -q -- '--disable-rfxcodec' "$OUT/server-configure-options.txt"; fi
     make -j4
     sudo make install
     # Use this version's actual generated units/config, not old distribution protocol defaults.
@@ -77,13 +84,13 @@ sha256sum /usr/sbin/xrdp /usr/sbin/xrdp-sesman >"$OUT/server-binaries.sha256"
 printf '%s\n' "$variant" >"$OUT/server-variant.txt"
 git -C "$ROOT" rev-parse HEAD >"$OUT/tested-sha.txt"
 if [[ "$purpose" == android-acceptance ]]; then
-  # The exact same pinned setup passed the independent unmodified-client matrix.
-  # Android must still prove its own frames/resize/input/trust assertions; neither
-  # that comparison nor this successful setup is an Android acceptance pass.
+  # Same pinned sources/version as the independent client matrix, but an
+  # intentionally different classic-only codec build. Android must prove its own
+  # frames/resize/input/trust assertions; neither setup nor reference is a pass.
   cp "$OUT/active-xrdp-version.txt" "$ROOT/build/emulator-evidence/xrdp-version.txt"
-  cp "$OUT/"{original-package-versions.txt,upstream-source-commits.txt,server-binaries.sha256,server-variant.txt} \
+  cp "$OUT/"{original-package-versions.txt,upstream-source-commits.txt,server-binaries.sha256,server-variant.txt,server-configure-options.txt} \
     "$ROOT/build/emulator-evidence/"
-  printf '%s\n' 'Pinned current server; full Android 14-test acceptance is mandatory. Original apt0.9.24 classic-resize incompatibility is retained separately.' \
+  printf '%s\n' 'Pinned current server, explicit --disable-rfxcodec for classic GDI exact-RGB/DISP coverage; normal production client still advertises automatic GFX. Full Android 14-test acceptance mandatory. Separate GNOME GFX9 gate mandatory; upstream reference server configuration unchanged.' \
     >"$ROOT/build/emulator-evidence/server-scope.txt"
 else
   printf '%s\n' 'Reference resize comparison only; Android certificate/auth security assertions are not executed here.' >"$OUT/scope.txt"

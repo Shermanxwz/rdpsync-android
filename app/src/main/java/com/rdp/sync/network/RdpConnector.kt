@@ -19,6 +19,20 @@ object RdpConnector {
     external fun nativeConnect3(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean): Int
     external fun nativeConnect4(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean): Int
     external fun nativeConnect5(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String): Int
+    external fun nativeConnect6(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String, fileTransferEnabled: Boolean): Int
+    external fun nativeFileTransferState(): LongArray
+    /** Owned readonly CLOEXEC fd; only app-private UUID staging IDs are accepted. */
+    external fun nativeFileTransferOpenStaged(directoryId: String, fileId: String, expectedSize: Long): Int
+    external fun nativeFileTransferOffer(expectedSessionGeneration: Long, names: Array<String>, sizes: LongArray, fds: IntArray): Long
+    external fun nativeFileTransferOfferRetained(token: Long): Boolean
+    external fun nativeFileTransferCancel(token: Long): Int
+    external fun nativeFileTransferRequestList(expectedSessionGeneration: Long): Long
+    external fun nativeFileTransferNames(token: Long): Array<String>?
+    external fun nativeFileTransferSizes(token: Long): LongArray?
+    external fun nativeFileTransferRequestChunk(token: Long, index: Int, offset: Long, length: Int): Int
+    external fun nativeFileTransferTakeChunk(token: Long): ByteArray?
+    external fun nativeFileTransferFinishReceive(token: Long): Int
+    fun sessionGeneration(): Long = safeNative("sessionGeneration", 0L) { nativeGetTelemetry().getOrElse(11) { 0L } }
     external fun nativeGetCertificateChallenge(): Array<String>?
     external fun nativeDisconnect(): Int
     external fun nativeIsConnected(): Boolean
@@ -153,7 +167,7 @@ object RdpConnector {
 
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
-    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = ""): Boolean {
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = "", fileTransferEnabled: Boolean = false): Boolean {
         if (!nativeInitialized) {
             lastKotlinError = "远程桌面运行目录未初始化，请重新打开应用并检查本机存储空间。"
             return false
@@ -172,9 +186,9 @@ object RdpConnector {
             rdpeiConnected = false
             rdpeiDisabled = !enableTouchInput
             touchFailedCode = 0
-            val result = nativeConnect5(
+            val result = nativeConnect6(
                 host.trim(), port, username.trim(), password, domain.trim(), rdpServerName.trim(),
-                width, height, enableTouchInput, compatibilityMode, expectedFingerprint
+                width, height, enableTouchInput, compatibilityMode, expectedFingerprint, fileTransferEnabled
             )
             Log.d(TAG, "Connect result: $result")
             result == 1

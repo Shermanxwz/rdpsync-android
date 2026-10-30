@@ -9,9 +9,9 @@ RdpSync is an open Android RDP client that combines remote desktop connections, 
 [![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-## 1.1 preview: display and input overhaul
+## 1.1 preview: display, input and compatibility
 
-The GNOME/software-GFX and default-fullscreen follow-up below is **not included in the existing `v1.1.0-preview` APK**. Its exact-commit runtime checks are tracked separately in [verification notes](docs/VERIFICATION.md).
+The GNOME/software-GFX, default-fullscreen and explicit file-transfer follow-up below is **not included in the existing `v1.1.0-preview` APK**. Its exact-commit runtime checks are tracked separately in [verification notes](docs/VERIFICATION.md).
 
 The preview starts every session in **direct-touch, fullscreen mode**. The small **会话菜单** handle opens keyboard, disconnect, input and display controls; choose **显示工具栏** for bordered tools and **进入全屏** to return. Android system bars can be revealed with an edge swipe. Fullscreen is a fresh-session default, not a saved override. Touchpad mode remains a temporary session toggle. Display settings offer **fit window**, saved profile dimensions, 1280×720 and 1920×1080, with economy/balanced/sharp quality ceilings and opt-in adaptive quality.
 
@@ -25,7 +25,7 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 - New/changed TLS certificates stop before login and require explicit fingerprint trust. Saved passwords migrate to device-bound Android Keystore AES-GCM; unavailable credentials remain visible and require deliberate re-entry.
 - Default WebDAV sync uses password-free `rdpsync_profiles.json`; explicit legacy sync uses the separate secret-bearing `rdpsync_devices.json`, without silently overwriting old backups.
 
-**Install safely:** CI produces `RdpSync Preview` (`com.rdp.sync.preview`), signed with a development key. It installs alongside the existing app; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged. Development keys can differ between CI runs, so one preview APK is not guaranteed to update another preview APK. Do not uninstall either app as a workaround; preserve its saved profiles and credentials.
+**Install safely:** This follow-up CI produces `RdpSync Preview 2` (`com.rdp.sync.preview2`), signed with a development key. It installs alongside both the original app and the previously released `com.rdp.sync.preview`; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged. Development keys can differ between CI runs. The separate Preview 2 identity avoids replacing the old preview, but future Preview 2 APKs are not guaranteed to update each other unless their signing certificates match. Do not uninstall either app as a workaround; preserve its saved profiles and credentials.
 
 **Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/hardware video decoding is not enabled; RDPGFX uses software decoding rather than a zero-copy video surface; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. GNOME per-user desktop sharing/headless sessions and GDM system Remote Login are distinct: server redirection remains blocked rather than forwarding credentials to an untrusted target. First-use certificate trust requires independent fingerprint verification; local passwords use Android Keystore encryption, while explicitly selected legacy WebDAV sync still contains plaintext passwords and is not end-to-end encrypted. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
 
@@ -85,6 +85,15 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 - The connection test validates collection creation and read/write/delete behavior.
 - URLs are normalized so a mistakenly entered file URL can be treated as its parent collection.
 - Merge uses a stable connection/account key including host, port, username, domain and server name. Omitted passwords preserve matching local secrets; imports retain unmatched local profiles.
+
+### Explicit File Transfer (Preview 2)
+
+- Open **会话菜单 → 发送文件 / 接收文件**. File transfer is off by default. Its first activation requires an explicit reconnect confirmation because the file-only clipboard channel is negotiated at connection start. This is not automatic text clipboard synchronization or phone-drive redirection.
+- **Send:** select regular files using Android's system picker, stage private snapshots, then explicitly choose **提供给远程剪贴板**. Paste in the remote file manager. Serving bytes is not proof that the remote application saved them; confirm the remote files yourself.
+- **Receive:** copy files in the remote file manager, choose **读取远程文件列表**, then confirm receipt. Contents are downloaded only after confirmation. Export each complete file by selecting a destination directory; the app creates a new name and does not overwrite existing files.
+- The initial send allowance is **32 MiB cumulatively per RDP connection**, including repeated range requests. Remaining allowance is shown before publishing; cancelling or replacing an offer does not reset it. Reconnecting is always an explicit choice and withdraws the old offer. Incoming files are limited to 128 MiB each, 64 files and 256 MiB total private staging, with a 64 MiB free-space reserve. These are safety limits, not Windows App large-file parity.
+- Only ordinary files are supported; folders, shortcuts and virtual documents are rejected. Closing the file dialog does not withdraw an explicitly published snapshot; **停止共享**, leaving the session or disconnecting does. A recipient may already have copied bytes, which cannot be recalled.
+- Support depends on the server and remote file manager. Unsupported file-clipboard capability is reported; there is no fallback that exposes a phone directory. Actual GNOME, xrdp and Windows results must be distinguished in the [verification notes](docs/VERIFICATION.md).
 
 ## Architecture
 
@@ -154,7 +163,7 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 Get the latest APK from the project's GitHub Releases page.
 
-- Current preview version: `1.1.0-preview` (development-only, not a tagged release)
+- Existing published preview: `v1.1.0-preview`; the follow-up source identifies as `1.1.1-preview` and is not included in that older APK.
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 

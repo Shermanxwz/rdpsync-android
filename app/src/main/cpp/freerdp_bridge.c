@@ -39,6 +39,7 @@
 #include "rdpsync_certificate.h"
 #include "rdpsync_context.h"
 #include "rdpsync_gfx_policy.h"
+#include "rdpsync_transfer.h"
 
 #define TAG "FreeRDP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -73,6 +74,10 @@ struct RdpSession {
     int resize_pending, resize_width, resize_height, resize_scale;
     int touch_available;
     RdpgfxClientContext* gfx;
+    RdpTransfer* transfer;
+    int file_transfer_enabled;
+    RdpTransferIngress transfer_ingress;
+    pReceiveChannelData receive_channel_data;
     int gfx_ready, gfx_last_codec;
     int64_t gfx_commands;
     RdpGfxBudget gfx_budget;
@@ -461,6 +466,8 @@ static void channel_connected(void* context, const ChannelConnectedEventArgs* ev
             atomic_store(&s->terminating, 1);
             freerdp_abort_connect_context(s->instance->context);
         }
+    } else if (strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) {
+        rdpsync_transfer_attach(s->transfer, event->pInterface);
     } else freerdp_client_OnChannelConnectedEventHandler(context, event);
     if (strcmp(event->name, DISP_DVC_CHANNEL_NAME) == 0) {
         s->disp = event->pInterface;
@@ -489,12 +496,39 @@ static void channel_disconnected(void* context, const ChannelDisconnectedEventAr
         pthread_mutex_lock(&s->mutex); s->touch_available = 0; pthread_mutex_unlock(&s->mutex);
     }
     if (strcmp(event->name, RDPGFX_DVC_CHANNEL_NAME) == 0) gfx_detach(s, event->pInterface);
+    else if (strcmp(event->name, CLIPRDR_SVC_CHANNEL_NAME) == 0) rdpsync_transfer_detach(s->transfer, event->pInterface);
     else freerdp_client_OnChannelDisconnectedEventHandler(context, event);
     pthread_mutex_unlock(&s->channel_mutex);
 }
+/* Bound the opted-in clipboard message BEFORE upstream fragment reassembly.
+ * This is independent of file-parser checks, and leaves every other channel's
+ * existing receive delegate untouched. No arbitrary clipboard text is fetched. */
+static BOOL receive_channel_data(freerdp* instance, UINT16 id, const BYTE* data,
+    size_t size, UINT32 flags, size_t total) {
+    RdpSession* s = s_from_ctx(instance->context);
+    const char* name = freerdp_channels_get_name_by_id(instance, id);
+    if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 &&
+        (!s || !rdpsync_transfer_ingress(&s->transfer_ingress, size, flags, total))) {
+        s_error(s, "文件传输通道消息超出安全限制");
+        return FALSE;
+    }
+    if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 &&
+        (flags & CHANNEL_FLAG_FIRST) && !(flags & (CHANNEL_FLAG_SUSPEND | CHANNEL_FLAG_RESUME)) &&
+        !rdpsync_transfer_admit_incoming(s->transfer, data, size, total)) {
+        s_error(s, "文件传输通道收到未请求或超额的数据");
+        return FALSE;
+    }
+    return s && s->receive_channel_data && s->receive_channel_data(instance, id, data, size, flags, total);
+}
 static BOOL pre_connect(freerdp* instance) {
     RdpSession* s = s_from_ctx(instance->context);
-    if (s) s_diag(s, "connection=pre-connect");
+    if (s) {
+        s_diag(s, "connection=pre-connect");
+        if (instance->ReceiveChannelData != receive_channel_data) {
+            s->receive_channel_data = instance->ReceiveChannelData;
+            instance->ReceiveChannelData = receive_channel_data;
+        }
+    }
     if (PubSub_SubscribeChannelConnected(instance->context->pubSub, channel_connected) != CHANNEL_RC_OK ||
         PubSub_SubscribeChannelDisconnected(instance->context->pubSub, channel_disconnected) != CHANNEL_RC_OK)
         return FALSE;
@@ -527,6 +561,8 @@ static BOOL post_connect(freerdp* instance) {
 static void post_final_disconnect(freerdp* instance) {
     /* Core invokes this only AFTER closing dynamic channels, whose GFX
      * surface/codec cleanup still references the primary GDI context. */
+    RdpSession* session = s_from_ctx(instance->context);
+    if (session) rdpsync_transfer_detach(session->transfer, NULL);
     gdi_free(instance);
     PubSub_UnsubscribeChannelConnected(instance->context->pubSub, channel_connected);
     PubSub_UnsubscribeChannelDisconnected(instance->context->pubSub, channel_disconnected);
@@ -703,9 +739,22 @@ static BOOL configure_session_profile(rdpSettings* settings, int width, int heig
 #undef PROFILE_SETTING
     return TRUE;
 }
+static BOOL configure_transfer_profile(rdpSettings* settings, BOOL enabled) {
+    return freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, enabled) &&
+        freerdp_settings_set_uint32(settings, FreeRDP_ClipboardFeatureMask,
+            enabled ? CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES : 0);
+}
 static BOOL load_session_channels(freerdp* instance) {
     if (!freerdp_client_load_channels(instance)) return FALSE;
     const rdpSettings* settings = instance->context->settings;
+    RdpSession* owner = s_from_ctx(instance->context);
+    const BOOL transfer_enabled = owner && owner->file_transfer_enabled;
+    if (freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard) != transfer_enabled ||
+        freerdp_settings_get_uint32(settings, FreeRDP_ClipboardFeatureMask) !=
+            (transfer_enabled ? CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES : 0)) {
+        LOGE("Channel loading unexpectedly changed file-only clipboard policy");
+        return FALSE;
+    }
     /* Check AFTER upstream dependency expansion, not only our initial options.
      * A duplicate load can turn fake rdpsnd into AudioPlayback=TRUE. */
     if (freerdp_settings_get_bool(settings, FreeRDP_AudioPlayback) ||
@@ -932,6 +981,7 @@ static void* thread_fn(void* arg) {
     atomic_store(&s->connected, 1);
     s_status(s, "已连接");
     while (!atomic_load(&s->terminating)) {
+        if (rdpsync_transfer_pump(s->transfer) != CHANNEL_RC_OK) { s_error(s, "文件传输通道发送失败"); break; }
         if (!process_commands(s)) { s_error(s, "输入发送失败，连接已停止"); break; }
         HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {0};
         DWORD count = freerdp_get_event_handles(instance->context, handles, MAXIMUM_WAIT_OBJECTS - 1);
@@ -967,6 +1017,7 @@ static void session_destroy(RdpSession* s) {
     if (s->wake_event) CloseHandle(s->wake_event);
     pthread_mutex_destroy(&s->channel_mutex);
     pthread_mutex_destroy(&s->mutex);
+    rdpsync_transfer_free(s->transfer);
     free(s->fb_pixels); free(s);
 }
 static int enqueue_input(InputCommand command) {
@@ -1007,7 +1058,7 @@ unlock:
     return result;
 }
 
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean,jstring);
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean,jstring,jboolean);
 JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeInitialize(
     JNIEnv* env, jobject obj, jstring jhome, jstring jcache) {
     (void)obj;
@@ -1046,10 +1097,13 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
         result = 1;
         /* Test normal (DISP/RDPEI/autodetect/RDPDR) and compatibility profiles.
          * No connect() call or credentials: addins are loaded but not connected. */
-        for (int compatibility = 0; compatibility < 2 && result; ++compatibility) {
+        for (int profile = 0; profile < 4 && result; ++profile) {
+            const int compatibility = profile % 2;
+            const BOOL transfer_enabled = profile >= 2;
             failed = "诊断会话内存";
             RdpSession* probe = calloc(1, sizeof(RdpSession));
             if (!probe) { result = 0; break; }
+            probe->file_transfer_enabled = transfer_enabled;
             pthread_mutex_init(&probe->mutex, NULL);
             pthread_mutex_init(&probe->channel_mutex, NULL);
             atomic_init(&probe->connected, 0); atomic_init(&probe->terminating, 0);
@@ -1067,7 +1121,8 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
             }
             if (result) {
                 failed = "通道设置";
-                result = configure_session_profile(instance->context->settings, 1280, 720, TRUE, compatibility);
+                result = configure_session_profile(instance->context->settings, 1280, 720, TRUE, compatibility) &&
+                    configure_transfer_profile(instance->context->settings, transfer_enabled);
                 invariant = certificate_context_failure(instance, probe, 1);
                 if (invariant) { failed = invariant; result = 0; }
             }
@@ -1101,10 +1156,10 @@ JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetLibDir(JN
     /* FreeRDP uses WinPR's WITH_INTERNAL_MD4 implementation. Do not cast raw
      * MD4_CTX functions to EVP_MD_CTX callbacks: those structures are unrelated. */
 }
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(
     JNIEnv* env, jobject obj, jstring jhost, jint port, jstring juser, jstring jpassword,
     jstring jdomain, jstring jserver_name, jint width, jint height, jboolean touch, jboolean compatibility,
-    jstring jexpected_fingerprint) {
+    jstring jexpected_fingerprint, jboolean transfer_enabled) {
     (void)obj;
     /* Even a rejected new request invalidates an earlier UI trust challenge. */
     pthread_mutex_lock(&g_lock);
@@ -1147,6 +1202,10 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     session->endpoint_port = port;
     session->expected_pin_state = rdpsync_normalize_pin(expected_pin, session->expected_fingerprint);
     pthread_mutex_lock(&g_lock); session->generation = ++g_next_generation; pthread_mutex_unlock(&g_lock);
+    failure_stage = "文件传输会话";
+    session->file_transfer_enabled = transfer_enabled;
+    session->transfer = rdpsync_transfer_new(session->generation, transfer_enabled);
+    if (!session->transfer) { session_destroy(session); goto failure; }
     failure_stage = "唤醒事件";
     session->wake_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!session->wake_event) { session_destroy(session); goto failure; }
@@ -1170,7 +1229,8 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     if (invariant) { failure_stage = invariant; session_destroy(session); goto failure; }
     s_diag(session, "certificate=security-settings-ready");
     failure_stage = "显示与通道设置";
-    if (!configure_session_profile(settings, width, height, touch, compatibility)) {
+    if (!configure_session_profile(settings, width, height, touch, compatibility) ||
+        !configure_transfer_profile(settings, transfer_enabled)) {
         session_destroy(session); goto failure;
     }
     invariant = certificate_context_failure(session->instance, session, 1);
@@ -1205,6 +1265,9 @@ release:
     if (server_name) (*env)->ReleaseStringUTFChars(env, jserver_name, server_name);
     if (expected_pin) (*env)->ReleaseStringUTFChars(env, jexpected_fingerprint, expected_pin);
     return result;
+}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(JNIEnv* e,jobject o,jstring h,jint p,jstring u,jstring pw,jstring d,jstring n,jint w,jint hh,jboolean t,jboolean compat,jstring pin) {
+    return Java_com_rdp_sync_network_RdpConnector_nativeConnect6(e,o,h,p,u,pw,d,n,w,hh,t,compat,pin,JNI_FALSE);
 }
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect4(JNIEnv* e,jobject o,jstring h,jint p,jstring u,jstring pw,jstring d,jstring n,jint w,jint hh,jboolean t,jboolean compat) {
     /* Legacy API is intentionally untrusted, never a certificate-ignore escape. */
@@ -1497,5 +1560,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUnicodeC
 }
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendClipboardText(JNIEnv* e,jobject o,jstring text) {
     (void)e; (void)o; (void)text;
-    return -2; /* Clipboard channel is not built; do not claim a successful paste. */
+    return -2; /* Text clipboard is disabled; optional CLIPRDR is files-only. */
 }
+
+#include "rdpsync_transfer_jni.inc"

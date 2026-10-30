@@ -13,7 +13,7 @@ elseif(ANDROID_ABI STREQUAL "x86_64")
 else()
     message(FATAL_ERROR "Unsupported Android ABI: ${ANDROID_ABI}")
 endif()
-add_library(rdpsync SHARED freerdp_bridge.c)
+add_library(rdpsync SHARED freerdp_bridge.c rdpsync_transfer.c)
 target_include_directories(rdpsync PRIVATE
     "${RDPSYNC_DEPS_DIR}/freerdp-src/include"
     "${RDPSYNC_DEPS_DIR}/freerdp-src/winpr/include"

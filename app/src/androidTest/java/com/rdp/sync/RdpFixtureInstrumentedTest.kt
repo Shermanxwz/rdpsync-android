@@ -82,7 +82,12 @@ class RdpFixtureInstrumentedTest {
                 RdpConnector.getDiag().contains("connection=compatibility-retry"))
             measurements.put("latency_method", "Android injected touch (40ms hold) to matching synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
+            measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
+                { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
+                { measurements.put("system_immersive_coachmark", it) }))
             assertFullscreenDefault("initial_fullscreen")
+            assertClassicFixtureCodec()
+            measurements.put("renderer_scope", "Explicit classic xrdp server build; normal production client auto-GFX unchanged; separate GNOME Progressive gate required")
             assertColor(40, 40, Color.RED)
             assertColor(136, 40, Color.GREEN)
             assertColor(232, 40, Color.BLUE)
@@ -266,6 +271,7 @@ class RdpFixtureInstrumentedTest {
             measurements.put("adaptive_state_weak", RdpConnector.pollDisplayStatus().adaptiveReason)
             measurements.put("adaptive_quality_weak", RdpConnector.pollDisplayStatus().quality.name)
             screenshot("05-weak-link-live-session")
+            assertClassicFixtureCodec()
             measurements.put("fixture_final_state", fixtureState())
 
             // A server/session without DISP must keep working at its negotiated size.
@@ -1074,6 +1080,12 @@ class RdpFixtureInstrumentedTest {
         return try { if (sx in 0 until shot.width && sy in 0 until shot.height) shot.getPixel(sx, sy) else null } finally { shot.recycle() }
     }
     private fun sameColor(actual: Int, expected: Int) = Color.red(actual) == Color.red(expected) && Color.green(actual) == Color.green(expected) && Color.blue(actual) == Color.blue(expected)
+    private fun assertClassicFixtureCodec() {
+        val diag = RdpConnector.getDiag()
+        assertTrue("Classic fixture must not negotiate GFX: $diag", diag.contains("gfx=not-negotiated\n"))
+        assertTrue("Classic fixture must decode no GFX codec: $diag", diag.contains("gfx-last-codec=0\n"))
+        assertTrue("Classic fixture must decode no GFX commands: $diag", diag.contains("gfx-decoded-commands=0\n"))
+    }
     private fun assertColor(x: Int, y: Int, expected: Int) = waitFor("exact RGB pixel $x,$y") { colorAt(x, y)?.let { sameColor(it, expected) } == true }
     private fun screenshot(name: String) {
         val shot = instrumentation.uiAutomation.takeScreenshot()

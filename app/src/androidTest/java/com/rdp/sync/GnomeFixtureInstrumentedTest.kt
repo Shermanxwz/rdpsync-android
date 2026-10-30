@@ -94,6 +94,9 @@ class GnomeFixtureInstrumentedTest {
                 diag.contains("gfx=software-ready") && diag.contains("gfx-last-codec=9") &&
                     Regex("gfx-decoded-commands=([0-9]+)").find(diag)?.groupValues?.get(1)?.toLongOrNull()?.let { it > 0 } == true
             }
+            measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
+                { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
+                { measurements.put("system_immersive_coachmark", it) }))
             assertEquals("GdkWaylandDisplay", state().getString("backend"))
             assertColor(40, 40, Color.RED)
             assertColor(136, 40, Color.GREEN)
@@ -188,18 +191,20 @@ class GnomeFixtureInstrumentedTest {
         s.getOutputStream().write("GET /state HTTP/1.0\r\nHost: localhost\r\n\r\n".toByteArray())
         JSONObject(s.getInputStream().bufferedReader().readText().substringAfter("\r\n\r\n"))
     }
-    private fun desktop(): RdpDesktopView {
+    private fun desktopOrNull(): RdpDesktopView? {
         fun find(v: View): RdpDesktopView? {
             if (v is RdpDesktopView) return v
             if (v is ViewGroup) for (i in 0 until v.childCount) find(v.getChildAt(i))?.let { return it }
             return null
         }
-        return requireNotNull(find(compose.activity.window.decorView))
+        return find(compose.activity.window.decorView)
     }
+    private fun desktop(): RdpDesktopView = requireNotNull(desktopOrNull())
     private fun colorAt(x: Int, y: Int): Int? {
         var point: Pair<Int,Int>? = null
         compose.runOnUiThread {
-            val view = desktop(); val mapped = view.viewportSnapshot().toScreen(x.toFloat(),y.toFloat())
+            val view = desktopOrNull() ?: return@runOnUiThread
+            val mapped = view.viewportSnapshot().toScreen(x.toFloat(),y.toFloat())
             val loc = IntArray(2); view.getLocationOnScreen(loc)
             if (mapped.x >= 0 && mapped.y >= 0 && mapped.x < view.width && mapped.y < view.height)
                 point = Pair(loc[0] + mapped.x.toInt(),loc[1] + mapped.y.toInt())

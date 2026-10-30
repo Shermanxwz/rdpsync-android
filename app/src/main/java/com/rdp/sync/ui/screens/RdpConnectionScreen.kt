@@ -58,6 +58,10 @@ import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.rdp.SessionSystemBars
 import com.rdp.sync.ui.rdp.SessionUiDefaults
 import com.rdp.sync.ui.rdp.SessionViewportLayout
+import com.rdp.sync.transfer.TransferController
+import com.rdp.sync.ui.transfer.FileTransferDirection
+import com.rdp.sync.ui.transfer.SessionFileTransferUi
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -94,6 +98,12 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     val endpoint = remember(device.id, device.host, device.port, device.rdpServerName) {
         CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName)
     }
+    // Static CLIPRDR is opt-in for this route only. Protocol activation grants no
+    // access to phone files; every picker, publication and receive is still explicit.
+    var fileTransferEnabled by remember(endpoint) { mutableStateOf(false) }
+    var showFileEnable by remember(endpoint) { mutableStateOf(false) }
+    var showFileTransfer by remember(endpoint) { mutableStateOf(false) }
+    var fileDirection by remember(endpoint) { mutableStateOf(FileTransferDirection.SEND) }
     val credentialsUnavailable = device.credentialUnavailable
     val attemptNonce = remember(endpoint, attempt, credentialsUnavailable) { UUID.randomUUID().toString() }
     val trustGuard = remember(endpoint, attempt, credentialsUnavailable) { CertificateAttemptGuard() }
@@ -117,6 +127,8 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     var diagnostics by remember { mutableStateOf("") }
     var showReconnect by remember { mutableStateOf(false) }
     var desktopView by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf<RdpDesktopView?>(null) }
+    var transferController by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf<TransferController?>(null) }
+    var transferSetupError by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
     val clipboard = LocalClipboardManager.current
     val density = LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
@@ -133,6 +145,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
 
     LaunchedEffect(settings) { RdpConnector.configureDisplay(settings) }
     LaunchedEffect(endpoint, attempt, credentialsUnavailable) {
+        val connectionFileTransferEnabled = fileTransferEnabled
         if (credentialsUnavailable) {
             status = if (device.passwordFormat == 2) "此配置未包含密码。请返回编辑设备，输入密码后再连接。"
                 else "保存的凭据无法解密。请返回编辑设备，重新输入密码后再连接。"
@@ -157,7 +170,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 val connectionDomain = device.domain
                 suspend fun connect(touch: Boolean, compatibility: Boolean) = withContext(Dispatchers.IO) {
                     RdpConnector.connectDevice(connectionEndpoint.host, connectionEndpoint.port, connectionUsername, connectionPassword,
-                        connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height, touch, compatibility, expectedFingerprint.orEmpty())
+                        connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height, touch, compatibility, expectedFingerprint.orEmpty(), fileTransferEnabled = connectionFileTransferEnabled)
                 }
                 if (!connect(true, false)) {
                     status = withContext(Dispatchers.IO) { RdpConnector.getStatus() }
@@ -167,6 +180,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 }
                 var compatibilityRetried = false
                 var previouslyConnected = false
+                var transferSetupTried = false
                 while (isActive) {
                     val snapshot = withContext(Dispatchers.IO) { Triple(RdpConnector.getStatus(), RdpConnector.isConnected(), RdpConnector.certificateChallenge()) }
                     status = snapshot.first
@@ -189,7 +203,30 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                         displaySummary = display.summary
                         adaptiveReason = display.adaptiveReason
                         reconnectRequired = display.reconnectRequired
-                    } else if (previouslyConnected || status.contains("失败")) connecting = false
+                        if (connectionFileTransferEnabled && !transferSetupTried) {
+                            transferSetupTried = true
+                            try {
+                                // Assign inside IO so cancellation on returning to the UI
+                                // cannot orphan a private staging root before finally closes it.
+                                withContext(Dispatchers.IO) {
+                                    transferController = TransferController.create(context.applicationContext,
+                                        RdpConnector.sessionGeneration(), attemptNonce)
+                                }
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { transferSetupError = "无法初始化文件传输，请重新连接后重试。" }
+                        }
+                        try { transferController?.refreshCapability() }
+                        catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) {
+                            transferController?.close()
+                            transferController = null
+                            transferSetupError = "文件传输能力检查失败；远程桌面连接仍保留，请重连后重试。"
+                        }
+                    } else {
+                        transferController?.close()
+                        transferController = null
+                        if (previouslyConnected || status.contains("失败")) connecting = false
+                    }
                     // Retain the existing, narrowly scoped RDPEI activation compatibility retry.
                     if (challenge == null && !isConnected && !previouslyConnected && !compatibilityRetried &&
                         (status.contains("0x0002001c", ignoreCase = true) || status.contains("Timeout waiting for activation", ignoreCase = true))) {
@@ -203,6 +240,8 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             } finally {
                 // Cancellation of the Compose scope must not cancel key releases/disconnect.
                 withContext(NonCancellable + Dispatchers.IO) {
+                    transferController?.close()
+                    transferController = null
                     input.shutdownAndJoin()
                     RdpConnector.disconnect()
                 }
@@ -217,6 +256,8 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             .putString("resolution_mode", value.resolution.name).putBoolean("adaptive_quality", value.adaptive).apply()
     }
     fun reconnect() {
+        transferController?.close()
+        transferController = null
         trustGuard.invalidate()
         pendingTrust = null
         desktopView?.hideKeyboard()
@@ -226,10 +267,17 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     }
 
     fun exitSession() {
+        transferController?.close()
+        transferController = null
         trustGuard.invalidate()
         pendingTrust = null
         input.shutdown()
         onBack()
+    }
+    fun openFiles(direction: FileTransferDirection) {
+        desktopView?.hideKeyboard()
+        fileDirection = direction
+        if (fileTransferEnabled) showFileTransfer = true else showFileEnable = true
     }
     fun dismissCertificate() {
         dismissedCertificateGeneration = pendingTrust?.challenge?.generation ?: -1L
@@ -342,9 +390,30 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 onKeyboard = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() },
                 onPointerMode = { pointerMode = !pointerMode },
                 onChromeMode = { fullscreen = !fullscreen }, onSettings = { showSettings = true },
-                onPaste = { showPaste = true }, onResetZoom = { desktopView?.resetZoom() }, onExit = ::exitSession)
+                onPaste = { showPaste = true }, onResetZoom = { desktopView?.resetZoom() },
+                onSendFiles = { openFiles(FileTransferDirection.SEND) },
+                onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) }, onExit = ::exitSession)
         }
     )
+    transferController?.let { controller ->
+        SessionFileTransferUi(controller, showFileTransfer, fileDirection,
+            onReconnect = { showFileTransfer = false; showReconnect = true },
+            onDismiss = { showFileTransfer = false })
+    }
+    if (showFileTransfer && isConnected && transferController == null && transferSetupError.isNotBlank()) {
+        AlertDialog(onDismissRequest = { showFileTransfer = false }, title = { Text("文件传输不可用") },
+            text = { Text(transferSetupError) }, confirmButton = { TextButton(onClick = { showFileTransfer = false }) { Text("关闭") } })
+    }
+    if (showFileEnable) AlertDialog(onDismissRequest = { showFileEnable = false },
+        title = { Text("启用文件传输并重新连接？") },
+        text = { Text("文件协议需要在连接开始时启用，因此会短暂断开当前连接；请先保存远程工作。此操作仅开启文件协议，不会访问手机文件或监听剪贴板。之后仍需逐次选择文件、确认提供或接收。当前仅支持普通文件，不支持文件夹。") },
+        confirmButton = { TextButton(onClick = {
+            showFileEnable = false
+            fileTransferEnabled = true
+            showFileTransfer = true
+            reconnect()
+        }) { Text("启用并重新连接") } },
+        dismissButton = { TextButton(onClick = { showFileEnable = false }) { Text("取消") } })
     pendingTrust?.let { pending ->
         CertificateTrustDialog(pending, savingTrust, trustError, onCancel = ::dismissCertificate, onTrust = {
             if (!savingTrust && pendingTrust == pending && endpoint == pending.endpoint && trustGuard.isActive()) {
@@ -368,6 +437,9 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     if (showSettings) DisplaySettingsDialog(settings, device,
         sessionInfo = displaySummary.ifBlank { status }, adaptiveInfo = adaptiveReason,
         inputWarning = inputWarning, reconnectRequired = reconnectRequired,
+        fileTransferConnected = isConnected,
+        onSendFiles = { showSettings = false; openFiles(FileTransferDirection.SEND) },
+        onReceiveFiles = { showSettings = false; openFiles(FileTransferDirection.RECEIVE) },
         onReconnect = { showSettings = false; showReconnect = true },
         onChange = ::saveSettings, onDismiss = { showSettings = false }, onDiagnostics = {
         diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true
@@ -388,7 +460,8 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
 @Composable
 private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boolean, imeVisible: Boolean,
     pointerMode: Boolean, connected: Boolean, onKeyboard: () -> Unit, onPointerMode: () -> Unit,
-    onChromeMode: () -> Unit, onSettings: () -> Unit, onPaste: () -> Unit, onResetZoom: () -> Unit, onExit: () -> Unit) {
+    onChromeMode: () -> Unit, onSettings: () -> Unit, onPaste: () -> Unit, onResetZoom: () -> Unit,
+    onSendFiles: () -> Unit, onReceiveFiles: () -> Unit, onExit: () -> Unit) {
     var showTools by remember { mutableStateOf(false) }
     val menuScroll = rememberScrollState()
     val menuScope = rememberCoroutineScope()
@@ -423,6 +496,8 @@ private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boole
                     DropdownMenuItem(text = { Text(if (pointerMode) "切换到直接触摸" else "切换到触控板") }, enabled = connected,
                         onClick = { showTools = false; onPointerMode() })
                     DropdownMenuItem(text = { Text("显示与网络设置") }, onClick = { showTools = false; onSettings() })
+                    DropdownMenuItem(text = { Text("发送文件") }, enabled = connected, onClick = { showTools = false; onSendFiles() })
+                    DropdownMenuItem(text = { Text("接收文件") }, enabled = connected, onClick = { showTools = false; onReceiveFiles() })
                     DropdownMenuItem(text = { Text("发送文字") }, enabled = connected, onClick = { showTools = false; onPaste() })
                     DropdownMenuItem(text = { Text("复位视图") }, enabled = connected, onClick = { showTools = false; onResetZoom() })
                     DropdownMenuItem(text = { Text("Esc") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x01) })
@@ -440,7 +515,8 @@ private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boole
 
 @Composable
 private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Device, sessionInfo: String, adaptiveInfo: String, inputWarning: String,
-    reconnectRequired: Boolean, onReconnect: () -> Unit, onChange: (SessionDisplaySettings) -> Unit, onDismiss: () -> Unit, onDiagnostics: () -> Unit) {
+    reconnectRequired: Boolean, fileTransferConnected: Boolean, onSendFiles: () -> Unit, onReceiveFiles: () -> Unit,
+    onReconnect: () -> Unit, onChange: (SessionDisplaySettings) -> Unit, onDismiss: () -> Unit, onDiagnostics: () -> Unit) {
     AlertDialog(onDismissRequest = onDismiss, title = { Text("显示与网络") }, text = {
         Column(Modifier.verticalScroll(rememberScrollState())) {
             Text("会话状态", style = MaterialTheme.typography.titleSmall)
@@ -448,6 +524,13 @@ private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Devi
             Text(if (settings.adaptive) "自适应状态：$adaptiveInfo" else "自适应已关闭", style = MaterialTheme.typography.bodySmall)
             if (inputWarning.isNotBlank()) Text(inputWarning, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             if (reconnectRequired) TextButton(onClick = onReconnect) { Text("按当前设置重新连接") }
+            Spacer(Modifier.height(8.dp))
+            Text("文件传输", style = MaterialTheme.typography.titleSmall)
+            Row {
+                TextButton(onClick = onSendFiles, enabled = fileTransferConnected) { Text("发送文件") }
+                TextButton(onClick = onReceiveFiles, enabled = fileTransferConnected) { Text("接收文件") }
+            }
+            Text("仅传输明确选择的普通文件；首次启用需确认重连，不会共享手机目录。", style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             Text("远程分辨率", style = MaterialTheme.typography.titleSmall)
             ResolutionMode.entries.forEach { mode ->

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic native Wayland surface for the disposable GNOME RDP fixture."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import threading
@@ -16,9 +17,15 @@ from gi.repository import Gdk, GLib, Gtk
 OUT = Path(os.environ['GNOME_FIXTURE_EVIDENCE'])
 state = dict(session_id=str(uuid.uuid4()), desktop_pid=os.getpid(), ready=False,
              backend='GdkWaylandDisplay', width=0, height=0, monitor_width=0, monitor_height=0,
+             mapped=False, visible=False, paint_count=0,
              clicks=0, presses=0, releases=0, last_press=None, last_release=None, text='', keys=[],
              resizes=[], started_monotonic=time.monotonic())
 lock = threading.Lock()
+ROOT = Path(__file__).resolve().parents[3]
+spec = importlib.util.spec_from_file_location('transfer_fixture', Path(__file__).with_name('transfer-fixture.py'))
+transfer_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(transfer_module)
+transfer = transfer_module.TransferFixture(ROOT, OUT, Gtk, Gdk, GLib)
 
 
 def snapshot():
@@ -28,11 +35,28 @@ def snapshot():
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path != '/state':
+        if self.path not in ('/state', '/transfer'):
             self.send_error(404)
             return
-        data = json.dumps(snapshot()).encode()
+        data = json.dumps(snapshot() if self.path == '/state' else transfer.snapshot()).encode()
         self.send_response(200)
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_POST(self):
+        # Fixed synthetic actions only. No supplied paths, commands, file bytes,
+        # arbitrary clipboard formats, or access to a user's session.
+        if self.path not in ('/transfer/offer-server-files', '/transfer/read-android-files') or self.headers.get('Content-Length', '0') != '0':
+            self.send_error(400)
+            return
+        try:
+            data = json.dumps(transfer.action(self.path.rsplit('/', 1)[1])).encode()
+        except ValueError:
+            self.send_error(409)
+            return
+        self.send_response(202)
         self.send_header('Content-Length', str(len(data)))
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
@@ -45,7 +69,6 @@ class Handler(BaseHTTPRequestHandler):
 threading.Thread(target=ThreadingHTTPServer(('127.0.0.1', 8768), Handler).serve_forever, daemon=True).start()
 window = Gtk.Window(title='RdpSync GNOME native fixture')
 window.set_decorated(False)
-window.fullscreen()
 area = Gtk.DrawingArea()
 area.set_can_focus(True)
 area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.KEY_PRESS_MASK)
@@ -53,6 +76,8 @@ window.add(area)
 
 
 def paint(_, cr):
+    with lock:
+        state['paint_count'] += 1
     cr.set_source_rgb(17 / 255, 34 / 255, 51 / 255)
     cr.paint()
     for x, rgb in [(16, (1, 0, 0)), (112, (0, 1, 0)), (208, (0, 0, 1))]:
@@ -71,14 +96,15 @@ def paint(_, cr):
 def resized(_, allocation):
     display = Gdk.Display.get_default()
     assert 'Wayland' in display.__class__.__name__, 'Fixture must use native Wayland, never X11'
-    monitor = display.get_monitor_at_window(window.get_window()) if window.get_window() else None
+    monitor = display.get_monitor_at_window(window.get_window()) if display.get_n_monitors() > 0 and window.get_window() else None
     geo = monitor.get_geometry() if monitor else None
     with lock:
         if (state['width'], state['height']) != (allocation.width, allocation.height):
             state['resizes'].append([allocation.width, allocation.height])
         state.update(width=allocation.width, height=allocation.height,
                      monitor_width=geo.width if geo else 0, monitor_height=geo.height if geo else 0,
-                     ready=bool(geo and allocation.width == geo.width and allocation.height == geo.height))
+                     mapped=window.get_mapped(), visible=window.get_visible(),
+                     ready=bool(geo and window.get_mapped() and allocation.width == geo.width and allocation.height == geo.height))
     save()
 
 
@@ -117,7 +143,31 @@ area.connect('button-press-event', event)
 area.connect('button-release-event', event)
 window.connect('key-press-event', event)
 window.connect('destroy', Gtk.main_quit)
-window.show_all()
-area.grab_focus()
-GLib.timeout_add(250, lambda: (resized(area, area.get_allocation()), True)[1])
+
+
+def reconcile_monitor(*_):
+    # Per-user headless GRD has NO monitor until a real client creates one.
+    # Mapping/fullscreen before that output exists can leave GTK allocated but
+    # absent from Mutter's captured desktop. Keep the same Window/process/state,
+    # and remap only on a real zero->nonzero monitor transition.
+    if Gdk.Display.get_default().get_n_monitors() == 0:
+        if window.get_visible():
+            window.hide()
+        with lock:
+            state.update(ready=False, mapped=False, visible=False, monitor_width=0, monitor_height=0)
+        save()
+    elif not window.get_visible():
+        window.show_all()
+        window.fullscreen()
+        window.present()
+        area.grab_focus()
+        area.queue_draw()
+    return False
+
+
+display = Gdk.Display.get_default()
+display.connect('monitor-added', lambda *_: GLib.idle_add(reconcile_monitor))
+display.connect('monitor-removed', lambda *_: GLib.idle_add(reconcile_monitor))
+reconcile_monitor()
+GLib.timeout_add(250, lambda: (reconcile_monitor(), resized(area, area.get_allocation()), True)[2])
 Gtk.main()

@@ -13,7 +13,14 @@ chmod 700 "$PRIVATE" "$PRIVATE/home" "$PRIVATE/runtime"
 # These packages/services belong only to this disposable runner, never a user host.
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends gnome-remote-desktop mutter pipewire wireplumber \
-  python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 dbus-x11 libgl1-mesa-dri socat openssl iproute2
+  python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 libgtk-3-dev build-essential fuse3 dbus-x11 libgl1-mesa-dri socat openssl iproute2
+[[ -c /dev/fuse && -r /dev/fuse && -w /dev/fuse ]] || { echo 'Real GNOME file clipboard requires accessible /dev/fuse' >&2; exit 1; }
+stat /dev/fuse >"$OUT/fuse-device.txt"
+fusermount3 --version >"$OUT/fuse-version.txt"
+cc -shared -fPIC -Wall -Wextra -Werror scripts/fixtures/gnome/clipboard-provider.c \
+  $(pkg-config --cflags --libs gtk+-3.0) -o "$PRIVATE/clipboard-provider.so"
+sha256sum "$PRIVATE/clipboard-provider.so" >"$OUT/clipboard-provider-sha256.txt"
+python3 scripts/fixtures/gnome/test_transfer_fixture.py
 # A distro package may auto-start its system Remote Login service. This test uses
 # only its private per-user daemon, not GDM and not the system service.
 sudo systemctl stop gnome-remote-desktop.service 2>/dev/null || true

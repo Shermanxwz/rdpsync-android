@@ -41,6 +41,14 @@ Android backup/data transfer of app data is disabled because device-bound encryp
 
 ## Build and Remaining Boundaries
 
-Preview APKs are development-signed, side-by-side test builds (`com.rdp.sync.preview`). They do not overwrite the original app or automatically copy its profiles. No production signing key is created or replaced by this project change. A dedicated release key and a reviewed distribution/update process remain necessary for production releases.
+Preview APKs are development-signed, side-by-side test builds. The existing release uses `com.rdp.sync.preview`; the compatibility/file-transfer follow-up uses `com.rdp.sync.preview2` so a different CI signer does not replace it. Neither copies saved profiles automatically. Do not uninstall an app to bypass a signature mismatch. No production signing key is created or replaced by this project change. A dedicated release key and a reviewed distribution/update process remain necessary for production releases.
 
 The pinned FreeRDP/OpenSSL build, tests and known coverage limits are documented in [verification notes](docs/VERIFICATION.md). Neither automated emulator testing nor these security improvements constitute a complete security audit or Microsoft Windows App parity certification.
+
+## Optional File Clipboard Boundary
+
+File transfer is off by default, separately negotiated after deliberate consent, and limited to regular-file snapshots. Drive/home-directory redirection remains disabled. Native code receives immutable read-only file descriptors, not peer-selected local paths. Incoming names, counts, lengths, tokens, stream IDs and ranges are validated; stale offers and unsolicited bodies are rejected. Android exports require a proven newly created child of the selected tree, never an existing file. Providers that cannot establish this relationship fail closed.
+
+The initial outbound file-data admission budget is 32 MiB **per connection lifetime**, with a separate finite 1 MiB metadata/control-response budget. Rereads consume allowance; cancellation and re-offering do not restore it. Limits are checked before admitting CLIPRDR output, rather than inferring socket drain from queued-byte counters. Abuse/exhaustion can terminate transfer or the connection instead of generating unbounded error replies. This is not a claim that total native, TLS, codec and Android memory is 8 MiB or that admitted bytes have reached durable remote storage.
+
+Private staging has file/count/disk-space limits and is not the credential-encrypted store. User cancellation is cooperative and cannot undo remote copies; native leases are closed before local snapshot cleanup. Export errors may leave only a newly created partial copy, with the complete staged source retained until session end. Process death, hostile document providers and filesystem remnants remain relevant boundaries; see [privacy notes](PRIVACY.md). Folder trees and large-file parity are deliberately outside this initial implementation.

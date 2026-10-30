@@ -4,6 +4,17 @@
 
 The runner builds pinned xrdp **0.10.6.1** (`80c52879fead585d6347df5b3c587718adf8f5a5`) and xorgxrdp **0.10.5** (`c2d3cbafebe00be3221f985c06ef6b97f1c63790`), then creates a disposable `rdpfixture` desktop. The shared versioned setup reuses the distribution fixture's account/certificate/desktop but explicitly replaces its server/backend before testing; actual versions and source/binary hashes are retained. Its documented test-only password belongs only to that ephemeral VM. RDP (`3389`), state inspection (`8765`), and the weak-link proxy (`3390`) bind **only to runner loopback**. The emulator reaches that loopback through Android's `10.0.2.2` alias. Nothing connects to a saved user device, production host, or external RDP service. The versioned setup refuses to run outside a disposable GitHub-hosted runner.
 
+The 14-test Android xrdp fixture is explicitly **classic GDI/DISP coverage**:
+only its server build adds upstream `--disable-rfxcodec`. In pinned xrdp,
+`XRDP_RFXCODEC` gates GFX capability acceptance (`libxrdp/xrdp_sec.c`), so the test
+asserts actual no-GFX negotiation/zero decoded GFX commands while preserving the
+normal production client's automatic GFX advertisement and real DISP resize.
+Exact RGB/alpha checks are not relaxed for a lossy codec. Server build trees are
+fresh and purpose-specific, and configure flags are retained. The independent
+official-client reference comparison keeps its original server configuration;
+the separate mandatory GNOME jobs prove actual software Progressive codec9.
+Historical GFX-enabled/coachmark-obscured failures remain retained, not rewritten.
+
 ## Assertions
 
 - A separate `NativeRuntimeInstrumentedTest` initializes app-private WinPR/FreeRDP runtime paths idempotently and allocates/frees a genuine native client context without any network connection.
@@ -222,3 +233,42 @@ stay within the independently observed two-level-per-channel bound; missing colo
 wrong codec/source, tampered PNGs and inconsistent samples fail closed. Android
 then compares **exactly** to those reference values, recording source, reference
 and actual RGB. Existing classic/native exact-color and alpha gates are unchanged.
+
+### Explicit files-only transfer gate
+
+The next-stage GNOME jobs also execute `GnomeTransferInstrumentedTest` and the three
+`TransferStorageInstrumentedTest` framework-provider/native-FD tests: **six required tests
+per GNOME mode**, with zero skips/errors/failures. The independent xrdp 14-test
+scenario remains unchanged. This is file clipboard streaming, not drive mapping,
+text clipboard synchronization, or GDM login.
+
+The GTK3 fixture loads a tiny audited URI-list provider into its existing native
+Wayland process. Its loopback/private-namespace control endpoint accepts only two
+fixed, empty-body synthetic actions: offer three generated server files, or read
+three expected Android files through GNOME's actual FUSE clipboard mount. It
+accepts no supplied paths, commands, or arbitrary bytes. Binary, zero-length and
+Unicode-named files are checked against independently generated SHA-256 manifests.
+The provider is compiled with warnings-as-errors; thirteen host safety tests reject
+foreign paths/URIs, symlink escapes, duplicates, bad lengths/content, overwrite and
+missing/wrong-type/non-containing mount metadata. Real reads require and retain
+only matching owned FUSE entries from actual `/proc/self/mountinfo`, plus an
+increase in bytes served by the current native offer. Host tests inject explicitly
+labelled synthetic metadata and never claim to have mounted or read real FUSE.
+The runner fails if real `/dev/fuse` is unavailable instead of substituting a mock.
+
+Android drives the actual DocumentsUI multi-selection and directory-grant dialogs
+with single physical taps of observed accessibility bounds. Sources and the
+chosen destination subfolder are disposable test-owned Downloads children; the
+Downloads root is never granted. A preexisting same-name sentinel must remain
+byte-identical while three new exported children match the remote originals.
+System-shell hashes independently inspect the resulting test-owned files; this
+is not a fabricated activity result or an invented URI grant. Separate provider
+unit/instrumentation tests do not count as this actual picker evidence.
+
+The test proves the channel starts disabled, cancellation leaves the generation
+unchanged, explicit approval reconnects, closing the transfer dialog retains an
+outbound offer for a real peer read, Stop Sharing revokes it without disconnect,
+and route Back disposes/revokes a fresh offer. Already copied remote files are not
+claimed to be remotely erased. Artifacts retain original/received/export hashes,
+actual native capability state, picker bounds/screenshots and exact test counts.
+Runtime success remains pending until these new tests actually execute.

@@ -20,4 +20,12 @@ Only user-selected RDP connections and WebDAV operations send application data:
 
 Local render/network statistics support optional adaptive display quality; they are not uploaded to a project telemetry endpoint. Automated CI screenshots and logs use an isolated synthetic test desktop, not user servers.
 
+## Explicit File Transfer
+
+Preview 2 offers optional, session-scoped file clipboard transfer to the already selected RDP server. It does not watch Android's clipboard, synchronize text automatically, redirect a phone drive, or upload files to a project-operated service. Initial activation requires explicit reconnection; selecting files and publishing them are separate actions.
+
+Only files selected through Android's document picker are read for sending. Private temporary snapshots retain the chosen names, lengths and contents while offered. The remote server can read a published snapshot until it is withdrawn or the session closes; closing the dialog alone does not withdraw it. Downloading remote file contents requires explicit confirmation after viewing the list, and writing outside private staging requires a separately selected export directory. No permanent document-access grant is requested.
+
+Temporary file contents are not encrypted by the credential-storage feature. Normal teardown closes native file handles before cleanup; process interruption can leave app-private cache remnants until a later cleanup or Android cache eviction. Neither deletion nor cancellation is forensic erasure, and cancellation cannot recall bytes already received by the peer. Failed exports can leave a newly created incomplete file in the selected directory; existing destination files are not intentionally overwritten. Filenames, document URIs and raw provider exceptions must not be added to diagnostic logs.
+
 Do not publish sync files, credentials, private hostnames or screenshots of private desktops in bug reports.

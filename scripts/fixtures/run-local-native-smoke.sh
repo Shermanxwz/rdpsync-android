@@ -27,6 +27,14 @@ for port in map(int, sys.argv[1:]):
         s.bind(('127.0.0.1', port))
 PORTCHECK
 CLASSES="${RDP_SMOKE_CLASSES:-com.rdp.sync.NativeRuntimeInstrumentedTest}"
+AAPT=$(find "$ANDROID_HOME/build-tools" -mindepth 2 -maxdepth 2 -name aapt -type f | sort -V | tail -1)
+[[ -n "$AAPT" ]]
+APP_PACKAGE=$("$AAPT" dump badging "$APP_APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+TEST_PACKAGE=$("$AAPT" dump badging "$TEST_APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+[[ $APP_PACKAGE =~ ^com\.rdp\.sync(\.preview[0-9]*)?$ && $TEST_PACKAGE == "$APP_PACKAGE.test" ]]
+"$AAPT" dump xmltree "$TEST_APK" AndroidManifest.xml >"$OUT/test-manifest.txt"
+grep -q "android:targetPackage.*\"$APP_PACKAGE\"" "$OUT/test-manifest.txt"
+printf '%s\n%s\n' "$APP_PACKAGE" "$TEST_PACKAGE" >"$OUT/package-identities.txt"
 git -C "$ROOT" rev-parse HEAD >"$OUT/tested-sha.txt"
 git -C "$ROOT" status --porcelain >"$OUT/source-status.txt"
 sha256sum "$APP_APK" "$TEST_APK" >"$OUT/apk-sha256.txt"
@@ -97,7 +105,7 @@ fi
 TEST_ARGS=()
 if [[ "${RDP_SMOKE_TLS_FIXTURE:-false}" == true ]]; then TEST_ARGS+=(-e rdpTlsFixture true); fi
 timeout 180 "${ADB_CMD[@]}" -s "$SERIAL" shell am instrument -w -r -e class "$CLASSES" "${TEST_ARGS[@]}" \
-    com.rdp.sync.preview.test/androidx.test.runner.AndroidJUnitRunner >"$OUT/instrumentation.log" 2>&1
+    "$TEST_PACKAGE/androidx.test.runner.AndroidJUnitRunner" >"$OUT/instrumentation.log" 2>&1
 cat "$OUT/instrumentation.log"
 # adb/am can return exit0 when JUnit failed. Require the actual runner result.
 grep -Eq '^OK \([1-9][0-9]* tests?\)' "$OUT/instrumentation.log"
