@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Diagnostic comparison only: never replaces the mandatory Android fixture silently.
+# Shared versioned fixture setup. The caller explicitly chooses the tested server.
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || {
   echo 'Reference server setup requires a disposable GitHub-hosted runner.' >&2; exit 1;
 }
 variant=${1:?apt-0.9.24 or upstream-0.10.6.1}
 [[ "$variant" == apt-0.9.24 || "$variant" == upstream-0.10.6.1 ]] || exit 2
+purpose=${RDP_FIXTURE_PURPOSE:-reference-comparison}
+[[ "$purpose" == reference-comparison || "$purpose" == android-acceptance ]] || exit 2
+[[ "$purpose" != android-acceptance || "$variant" == upstream-0.10.6.1 ]] || exit 2
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/build/reference-evidence"
 mkdir -p "$OUT"
@@ -73,5 +76,15 @@ xrdp --version >"$OUT/active-xrdp-version.txt" 2>&1
 sha256sum /usr/sbin/xrdp /usr/sbin/xrdp-sesman >"$OUT/server-binaries.sha256"
 printf '%s\n' "$variant" >"$OUT/server-variant.txt"
 git -C "$ROOT" rev-parse HEAD >"$OUT/tested-sha.txt"
-# The old auth-log marker is deliberately NOT used to assert trust on the newer server.
-printf '%s\n' 'Reference resize comparison only; Android certificate/auth security assertions are not executed here.' >"$OUT/scope.txt"
+if [[ "$purpose" == android-acceptance ]]; then
+  # The exact same pinned setup passed the independent unmodified-client matrix.
+  # Android must still prove its own frames/resize/input/trust assertions; neither
+  # that comparison nor this successful setup is an Android acceptance pass.
+  cp "$OUT/active-xrdp-version.txt" "$ROOT/build/emulator-evidence/xrdp-version.txt"
+  cp "$OUT/"{original-package-versions.txt,upstream-source-commits.txt,server-binaries.sha256,server-variant.txt} \
+    "$ROOT/build/emulator-evidence/"
+  printf '%s\n' 'Pinned current server; full Android 14-test acceptance is mandatory. Original apt0.9.24 classic-resize incompatibility is retained separately.' \
+    >"$ROOT/build/emulator-evidence/server-scope.txt"
+else
+  printf '%s\n' 'Reference resize comparison only; Android certificate/auth security assertions are not executed here.' >"$OUT/scope.txt"
+fi

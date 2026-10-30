@@ -33,6 +33,16 @@ A workflow definition or compiled test is **not** a passing emulator result. Con
 
 The optional local X.224/TLS fixture exercises the actual Android FreeRDP certificate callback with disposable certificates: unknown/changed pins must send no TLS application data; a matching pin may reach the deliberately terminated MCS boundary. This focused test does **not** complete authentication, render a desktop, or replace the hosted real-RDP scenario. See [fixture instructions](../scripts/fixtures/README.md).
 
+## Classic resize interoperability evidence
+
+The original Ubuntu xrdp **0.9.24** fixture resized its X server from 1024×768 to 1280×720, then the client rejected an UPDATE while still waiting for reactivation synchronization. This failed the Android resized-framebuffer assertion; server dimensions alone were not accepted as success.
+
+A [controlled upstream-client comparison](https://github.com/Shermanxwz/rdpsync-android/actions/runs/40981333137) at commit `25236532c0e0dcab21bcda5a9567661d0827d5dc` reproduced that failure outside the app with unmodified FreeRDP **3.32.2 X11**, classic GDI/32bpp, no GFX or smart sizing. All four combinations of output-flush waiting and synchronous dynamic channels failed against 0.9.24. With pinned xrdp **0.10.6.1** (`80c52879fead585d6347df5b3c587718adf8f5a5`) and xorgxrdp **0.10.5** (`c2d3cbafebe00be3221f985c06ef6b97f1c63790`), all four passed: same server session/PID, actual 1280×720 client pixels, exact RGB including a newly exposed region, and a post-resize input-painted response while the client remained alive. The reference keeps upstream internal channel build defaults, including AINPUT; it is not a byte-identical Android client profile.
+
+This demonstrates a version-specific interoperability boundary, not exclusive server fault or universal server compatibility. The diagnostic run remains failed overall because its old-server cases genuinely failed; those results are not silently reclassified as passing tests. Earlier reference build failures and the development-logging initial-frame timeout are not resize evidence. The mandatory Android fixture now uses the verified pinned current server pair, but its **own exact-commit Android results** remain the acceptance gate. No production synchronization/state checks were relaxed. For old servers affected by this boundary, use a fixed resolution and reconnect deliberately rather than relying on live resize.
+
+The event-driven native transport keeps `WaitForOutputBufferFlush=FALSE` to avoid waiting inside each write for a stalled peer before the owner thread can process lifecycle events. This is a lifecycle design choice, **not a measured FPS improvement**, a strict disconnect-time guarantee, or a bound on the transport BIO's memory. The four-way comparison shows this setting is not necessary for the old-server resize failure.
+
 ## Adaptive semantics
 
 - Off by default; explicit opt-in. Manual fixed resolutions remain exact when off.

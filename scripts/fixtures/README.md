@@ -2,7 +2,7 @@
 
 `Android emulator RDP integration` runs on a **standard `ubuntu-24.04` GitHub-hosted runner** with an API 35 x86_64 Android emulator and KVM. It builds the real JNI/FreeRDP dependencies for x86_64; it does not use stub frames or mock the RDP transport.
 
-The runner installs xrdp + xorgxrdp and creates a disposable `rdpfixture` account. Its documented test-only password belongs only to that ephemeral VM. RDP (`3389`), state inspection (`8765`), and the weak-link proxy (`3390`) bind **only to runner loopback**. The emulator reaches that loopback through Android's `10.0.2.2` alias. Nothing connects to a saved user device, production host, or external RDP service. `start-rdp-fixture.sh` refuses to run outside GitHub Actions.
+The runner builds pinned xrdp **0.10.6.1** (`80c52879fead585d6347df5b3c587718adf8f5a5`) and xorgxrdp **0.10.5** (`c2d3cbafebe00be3221f985c06ef6b97f1c63790`), then creates a disposable `rdpfixture` desktop. The shared versioned setup reuses the distribution fixture's account/certificate/desktop but explicitly replaces its server/backend before testing; actual versions and source/binary hashes are retained. Its documented test-only password belongs only to that ephemeral VM. RDP (`3389`), state inspection (`8765`), and the weak-link proxy (`3390`) bind **only to runner loopback**. The emulator reaches that loopback through Android's `10.0.2.2` alias. Nothing connects to a saved user device, production host, or external RDP service. The versioned setup refuses to run outside a disposable GitHub-hosted runner.
 
 ## Assertions
 
@@ -111,4 +111,17 @@ post-resize click with the correct visible marker. All profile outcomes/logs are
 retained, including failures. The job terminates only its own newly created fixture
 account's session between profiles; this cleanup is not a reconnect-latency metric.
 Current-server auth-log markers are not used to claim certificate/authentication
-coverage here. The original Android fixture and its strict assertions are unchanged.
+coverage in this reference diagnostic. The mandatory Android run separately retains
+the pre-trust unchanged-auth-counter assertion and a required positive increment
+after explicit approval; the current server's ordinary DEBUG login marker was also
+observed in the reference logs. No missing marker can silently pass the positive control.
+
+The controlled comparison at commit `25236532c0e0dcab21bcda5a9567661d0827d5dc`
+([run 40981333137](https://github.com/Shermanxwz/rdpsync-android/actions/runs/40981333137))
+passed all four current-server profiles, including received resized pixels and
+post-resize input. All four original xrdp 0.9.24 profiles instead resized the X
+desktop then disconnected at `FINALIZATION_CLIENT_SYNC`, matching the Android
+failure. These old failures are preserved, not relabeled as passes. The mandatory
+Android workflow therefore explicitly uses the pinned current pair with the same
+strict 14-test suite; the reference success itself does **not** validate Android,
+Windows/NLA interoperability, physical-phone performance, or older-server support.

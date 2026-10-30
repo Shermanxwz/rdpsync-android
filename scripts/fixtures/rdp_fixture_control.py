@@ -32,7 +32,8 @@ def state():
     log = pathlib.Path('/var/log/xrdp.log').read_text(errors='replace')
     return {'fingerprint': fingerprint(),
             'auth_requests': log.lower().count('sending login info to session manager'),
-            'successful_logins': log.lower().count('login successful for user'),
+            'successful_logins': (log.lower().count('login successful for user') +
+                                  log.lower().count('login was successful - creating session')),
             'failed_logins': log.lower().count('login failed for user')}
 
 
