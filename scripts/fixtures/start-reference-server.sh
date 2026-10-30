@@ -40,7 +40,7 @@ if [[ "$variant" == upstream-0.10.6.1 ]]; then
     ./bootstrap
     ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --runstatedir=/run \
       --libdir=/usr/lib/x86_64-linux-gnu --enable-pam --enable-pam-config=debian \
-      --enable-devel-logging --with-socketdir=/run/xrdp --with-systemdsystemunitdir=/lib/systemd/system
+      --with-socketdir=/run/xrdp --with-systemdsystemunitdir=/lib/systemd/system
     make -j4
     sudo make install
     # Use this version's actual generated units/config, not old distribution protocol defaults.

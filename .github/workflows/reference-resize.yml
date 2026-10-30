@@ -40,7 +40,11 @@ jobs:
         run: |
           mkdir -p build/reference-evidence
           sudo cp /var/log/xrdp.log /var/log/xrdp-sesman.log build/reference-evidence/ 2>/dev/null || true
-          sudo cp /home/rdpfixture/.xorgxrdp.*.log build/reference-evidence/ 2>/dev/null || true
+          if id rdpfixture >/dev/null 2>&1; then
+            while IFS= read -r xlog; do
+              sudo cp "$xlog" "build/reference-evidence/xorg-${xlog##*/}"
+            done < <(sudo find /home/rdpfixture -maxdepth 1 -type f -name '.xorgxrdp.*.log')
+          fi
           sudo systemctl status xrdp xrdp-sesman --no-pager >build/reference-evidence/service-status.txt 2>&1 || true
           sudo chown -R "$(id -u):$(id -g)" build/reference-evidence
           if test -f build/reference-evidence/owned-fixture-uid; then
