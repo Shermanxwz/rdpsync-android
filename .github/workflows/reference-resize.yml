@@ -1,0 +1,57 @@
+name: RDP upstream resize comparison
+
+on:
+  pull_request:
+    branches: [main, master]
+    paths:
+      - '.github/workflows/reference-resize.yml'
+      - 'scripts/fixtures/*reference*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rdp-reference-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream-classic-gdi:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        server: [apt-0.9.24, upstream-0.10.6.1]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Build pinned unmodified official client
+        run: |
+          mkdir -p build/reference-evidence
+          bash scripts/fixtures/build-reference-client.sh >build/reference-evidence/client-build.log 2>&1
+      - name: Start versioned disposable loopback server
+        run: bash scripts/fixtures/start-reference-server.sh '${{ matrix.server }}' >build/reference-evidence/server-build.log 2>&1
+      - name: Compare flush and synchronous-channel settings, no GFX
+        run: bash scripts/fixtures/run-reference-matrix.sh
+      - name: Collect and clean only this job's fixture
+        if: always()
+        run: |
+          mkdir -p build/reference-evidence
+          sudo cp /var/log/xrdp.log /var/log/xrdp-sesman.log build/reference-evidence/ 2>/dev/null || true
+          sudo cp /home/rdpfixture/.xorgxrdp.*.log build/reference-evidence/ 2>/dev/null || true
+          sudo systemctl status xrdp xrdp-sesman --no-pager >build/reference-evidence/service-status.txt 2>&1 || true
+          sudo chown -R "$(id -u):$(id -g)" build/reference-evidence
+          if test -f build/reference-evidence/owned-fixture-uid; then
+            uid=$(cat build/reference-evidence/owned-fixture-uid)
+            if test "$(id -u rdpfixture)" = "$uid" && test "$uid" -gt 0; then sudo pkill -TERM -u "$uid" || true; fi
+          fi
+          if test -f build/emulator-evidence/control.pid; then sudo kill "$(cat build/emulator-evidence/control.pid)" || true; fi
+          sudo systemctl stop xrdp xrdp-sesman || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rdp-reference-${{ matrix.server }}-${{ github.event.pull_request.head.sha || github.sha }}
+          retention-days: 14
+          path: build/reference-evidence/

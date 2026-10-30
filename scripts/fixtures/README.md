@@ -93,3 +93,22 @@ optional `RDP_TLS_PEM_PROBE` executable can diagnose the exact Android FreeRDP/O
 PEM export path; only the public leaf certificate and native libraries are copied
 to the isolated emulator, never private keys. These test certificates authorize no
 real RDP host.
+
+### Upstream classic-GDI resize comparison
+
+`RDP upstream resize comparison` is a separate diagnostic, not a replacement or
+waiver for Android acceptance. It compares the unmodified official FreeRDP 3.32.2
+X11 client against the original Ubuntu xrdp 0.9.24 fixture and pinned upstream
+xrdp 0.10.6.1 / xorgxrdp 0.10.5. The latter is a matched server/backend version
+pair; differences cannot be attributed to the server alone without further evidence.
+Each server runs four explicit output-flush / synchronous-DVC profiles. GFX is
+disabled both in the client build and settings so the comparison exercises classic
+GDI Deactivate/Reactivate, not a GFX resize shortcut.
+
+An actual 1024×768 → 1280×720 resize must retain the server UUID, keep the client
+alive, paint RGB probes and a pixel outside the old framebuffer, and respond to a
+post-resize click with the correct visible marker. All profile outcomes/logs are
+retained, including failures. The job terminates only its own newly created fixture
+account's session between profiles; this cleanup is not a reconnect-latency metric.
+Current-server auth-log markers are not used to claim certificate/authentication
+coverage here. The original Android fixture and its strict assertions are unchanged.
