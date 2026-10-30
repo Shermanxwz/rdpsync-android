@@ -7,8 +7,8 @@ set -euo pipefail
 variant=${1:?apt-0.9.24 or upstream-0.10.6.1}
 [[ "$variant" == apt-0.9.24 || "$variant" == upstream-0.10.6.1 ]] || exit 2
 purpose=${RDP_FIXTURE_PURPOSE:-reference-comparison}
-[[ "$purpose" == reference-comparison || "$purpose" == android-acceptance ]] || exit 2
-[[ "$purpose" != android-acceptance || "$variant" == upstream-0.10.6.1 ]] || exit 2
+[[ "$purpose" == reference-comparison || "$purpose" == android-acceptance || "$purpose" == android-file-transfer ]] || exit 2
+[[ "$purpose" == reference-comparison || "$variant" == upstream-0.10.6.1 ]] || exit 2
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="$ROOT/build/reference-evidence"
 mkdir -p "$OUT"
@@ -25,6 +25,12 @@ if [[ "$variant" == upstream-0.10.6.1 ]]; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     git build-essential autoconf automake libtool pkg-config nasm libssl-dev libpam0g-dev \
     libx11-dev libxfixes-dev libxrandr-dev libxfont-dev xserver-xorg-dev
+  if [[ "$purpose" == android-file-transfer ]]; then
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libfuse3-dev fuse3 libgtk-3-dev python3-gi gir1.2-gtk-3.0
+    [[ -c /dev/fuse ]] && sudo -u rdpfixture test -r /dev/fuse && sudo -u rdpfixture test -w /dev/fuse
+    stat /dev/fuse >"$OUT/fuse-device.txt"
+    fusermount3 --version >"$OUT/fuse-version.txt"
+  fi
   # Fresh purpose-specific trees: Android classic coverage must never reuse a
   # default-GFX reference build. The independent comparison stays unchanged.
   WORK="$ROOT/build/reference-server-$purpose"
@@ -45,12 +51,14 @@ if [[ "$variant" == upstream-0.10.6.1 ]]; then
     cd "$WORK/xrdp"
     ./bootstrap
     codec_options=()
-    if [[ "$purpose" == android-acceptance ]]; then codec_options+=(--disable-rfxcodec); fi
+    if [[ "$purpose" != reference-comparison ]]; then codec_options+=(--disable-rfxcodec); fi
+    if [[ "$purpose" == android-file-transfer ]]; then codec_options+=(--enable-fuse); fi
     ./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --runstatedir=/run \
       --libdir=/usr/lib/x86_64-linux-gnu --enable-pam --enable-pam-config=debian \
       --with-socketdir=/run/xrdp --with-systemdsystemunitdir=/lib/systemd/system "${codec_options[@]}"
     ./config.status --config >"$OUT/server-configure-options.txt"
-    if [[ "$purpose" == android-acceptance ]]; then grep -q -- '--disable-rfxcodec' "$OUT/server-configure-options.txt"; fi
+    if [[ "$purpose" != reference-comparison ]]; then grep -q -- '--disable-rfxcodec' "$OUT/server-configure-options.txt"; fi
+    if [[ "$purpose" == android-file-transfer ]]; then grep -q -- '--enable-fuse' "$OUT/server-configure-options.txt"; fi
     make -j4
     sudo make install
     # Use this version's actual generated units/config, not old distribution protocol defaults.
@@ -83,15 +91,20 @@ xrdp --version >"$OUT/active-xrdp-version.txt" 2>&1
 sha256sum /usr/sbin/xrdp /usr/sbin/xrdp-sesman >"$OUT/server-binaries.sha256"
 printf '%s\n' "$variant" >"$OUT/server-variant.txt"
 git -C "$ROOT" rev-parse HEAD >"$OUT/tested-sha.txt"
-if [[ "$purpose" == android-acceptance ]]; then
+if [[ "$purpose" != reference-comparison ]]; then
   # Same pinned sources/version as the independent client matrix, but an
   # intentionally different classic-only codec build. Android must prove its own
   # frames/resize/input/trust assertions; neither setup nor reference is a pass.
   cp "$OUT/active-xrdp-version.txt" "$ROOT/build/emulator-evidence/xrdp-version.txt"
   cp "$OUT/"{original-package-versions.txt,upstream-source-commits.txt,server-binaries.sha256,server-variant.txt,server-configure-options.txt} \
     "$ROOT/build/emulator-evidence/"
-  printf '%s\n' 'Pinned current server, explicit --disable-rfxcodec for classic GDI exact-RGB/DISP coverage; normal production client still advertises automatic GFX. Full Android 14-test acceptance mandatory. Separate GNOME GFX9 gate mandatory; upstream reference server configuration unchanged.' \
-    >"$ROOT/build/emulator-evidence/server-scope.txt"
+  if [[ "$purpose" == android-acceptance ]]; then
+    printf '%s\n' 'Pinned current server, explicit --disable-rfxcodec for classic GDI exact-RGB/DISP coverage; normal production client still advertises automatic GFX. Full Android 14-test acceptance mandatory. Separate GNOME GFX9 gate mandatory; upstream reference server configuration unchanged.' \
+      >"$ROOT/build/emulator-evidence/server-scope.txt"
+  else
+    printf '%s\n' 'Separate xrdp file-transfer peer: explicit --enable-fuse and classic --disable-rfxcodec; original fourteen-test scenario and default-codec reference matrix unchanged. Actual CLIPRDR/SAF byte and hash assertions mandatory; not Windows OS/NLA proof.' \
+      >"$ROOT/build/emulator-evidence/server-scope.txt"
+  fi
 else
   printf '%s\n' 'Reference resize comparison only; Android certificate/auth security assertions are not executed here.' >"$OUT/scope.txt"
 fi

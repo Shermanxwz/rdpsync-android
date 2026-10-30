@@ -1,0 +1,94 @@
+name: xrdp file clipboard Android integration
+
+on:
+  pull_request:
+    branches: [main, master]
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xrdp-files-emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  xrdp-native-file-clipboard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
+      - name: Install native toolchain
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager 'platforms;android-35' 'build-tools;35.0.0' 'ndk;28.0.13004108' 'cmake;3.22.1'
+      - uses: actions/cache/restore@v4
+        id: native-cache
+        with:
+          path: |
+            build/freerdp-android
+            app/src/main/jniLibs/x86_64
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          restore-keys: |
+            rdp-native-x86_64-${{ runner.os }}-
+      - name: Build genuine Android native runtime and instrumentation
+        env:
+          ABI: x86_64
+          JOBS: '4'
+        run: |
+          bash scripts/build-native.sh >native-build.log 2>&1
+          ./gradlew --no-daemon -PnativeAbis=x86_64 :app:assembleDebug :app:assembleDebugAndroidTest
+          unzip -l app/build/outputs/apk/debug/app-debug.apk | grep 'lib/x86_64/librdpsync.so'
+      - uses: actions/cache/save@v4
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            build/freerdp-android
+            app/src/main/jniLibs/x86_64
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+      - name: Build pinned xrdp with actual FUSE and isolated file peer
+        run: bash scripts/fixtures/start-xrdp-file-fixture.sh >xrdp-file-start.log 2>&1
+      - name: Enable KVM on disposable standard hosted runner
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Actual system SAF and bidirectional native xrdp CLIPRDR bytes
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          ram-size: 2048M
+          heap-size: 512M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          script: bash scripts/fixtures/run-xrdp-file-tests.sh
+      - name: Stop only owned fixture processes
+        if: always()
+        run: bash scripts/fixtures/stop-xrdp-file-fixture.sh >xrdp-file-cleanup.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xrdp-file-clipboard-${{ github.event.pull_request.head.sha || github.sha }}
+          retention-days: 14
+          path: |
+            build/xrdp-file-evidence/
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+            native-build.log
+            xrdp-file-start.log
+            xrdp-file-cleanup.log

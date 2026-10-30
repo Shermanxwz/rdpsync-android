@@ -1,12 +1,16 @@
 package com.rdp.sync.ui.rdp
 
+import android.os.Build
 import android.view.View
+import android.view.ViewTreeObserver
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.captionBar
 import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
@@ -16,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -52,8 +57,12 @@ internal fun SessionViewportLayout(
     val composeFullscreenSafe = WindowInsets.displayCutout.union(WindowInsets.captionBar)
     val composeVisibleSafe = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     val composeIme = WindowInsets.ime
+    val composeStatus = WindowInsets.statusBars
+    val composeNavigation = WindowInsets.navigationBars
     val root = host.rootView
     var rootSize by remember(root) { mutableStateOf(IntSize(root.width, root.height)) }
+    val legacyHideMask = View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+    var legacyUiVisibility by remember(root) { mutableIntStateOf(root.windowSystemUiVisibility and legacyHideMask) }
     var layoutOrigin by remember(root) { mutableStateOf(IntOffset.Zero) }
     // Presentation only: unplaced children still publish Compose semantics. This
     // state follows measurement, but must never feed back into viewport geometry.
@@ -64,7 +73,19 @@ internal fun SessionViewportLayout(
             rootSize = IntSize(right - left, bottom - top)
         }
         root.addOnLayoutChangeListener(listener)
-        onDispose { root.removeOnLayoutChangeListener(listener) }
+        val observer = root.viewTreeObserver
+        val visibilityListener = ViewTreeObserver.OnPreDrawListener {
+            // Insets can stay byte-for-byte identical while legacy hide flags change.
+            // Observe only those two bits; never force a rehide or replace an inset listener.
+            val flags = root.windowSystemUiVisibility and legacyHideMask
+            if (flags != legacyUiVisibility) legacyUiVisibility = flags
+            true
+        }
+        if (Build.VERSION.SDK_INT < 30) observer.addOnPreDrawListener(visibilityListener)
+        onDispose {
+            root.removeOnLayoutChangeListener(listener)
+            if (Build.VERSION.SDK_INT < 30 && observer.isAlive) observer.removeOnPreDrawListener(visibilityListener)
+        }
     }
     Layout(modifier = Modifier.fillMaxSize().onGloballyPositioned {
         val position = it.positionInWindow()
@@ -91,9 +112,27 @@ internal fun SessionViewportLayout(
             if (fullscreen) WindowInsetsCompat.Type.captionBar() else WindowInsetsCompat.Type.systemBars()
         val platformSafe = insets?.getInsetsIgnoringVisibility(logicalTypes)
         val safe = platformSafe?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) } ?: fallbackSafe
-        val visibleSafe = insets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+        val visibleSafe = if (Build.VERSION.SDK_INT < 30) {
+            val status = insets?.getInsets(WindowInsetsCompat.Type.statusBars())
+                ?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) }
+                ?: SessionSafeInsets(composeStatus.getLeft(this, layoutDirection), composeStatus.getTop(this),
+                    composeStatus.getRight(this, layoutDirection), composeStatus.getBottom(this))
+            val navigation = insets?.getInsets(WindowInsetsCompat.Type.navigationBars())
+                ?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) }
+                ?: SessionSafeInsets(composeNavigation.getLeft(this, layoutDirection), composeNavigation.getTop(this),
+                    composeNavigation.getRight(this, layoutDirection), composeNavigation.getBottom(this))
+            val permanent = insets?.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.displayCutout() or WindowInsetsCompat.Type.captionBar())
+                ?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) }
+                ?: SessionSafeInsets(composeFullscreenSafe.getLeft(this, layoutDirection), composeFullscreenSafe.getTop(this),
+                    composeFullscreenSafe.getRight(this, layoutDirection), composeFullscreenSafe.getBottom(this))
+            SessionInsetPolicy.visibleInsets(Build.VERSION.SDK_INT, legacyUiVisibility, status, navigation, permanent)
+        } else insets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             ?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) } ?: fallbackVisibleSafe
         val localSafe = if (fullscreen) visibleSafe else safe
+        val stableControlSafe = insets?.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            ?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) }
+            ?: SessionSafeInsets(composeSafe.getLeft(this, layoutDirection), composeSafe.getTop(this),
+                composeSafe.getRight(this, layoutDirection), composeSafe.getBottom(this))
         val animatedIme = composeIme.getBottom(this)
         val ime = if (animatedIme > 0) animatedIme else insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
         // The full decor extent is independent of IME visibility/order. Older
@@ -117,7 +156,14 @@ internal fun SessionViewportLayout(
             desktopPlaceable.place(geometry.left, geometry.desktopTop)
             if (fullscreen || geometry.imeOccluded) {
                 // Only this small overlay owns hit targets; no full-screen gesture layer.
-                controlsPlaceable.place(geometry.left + (geometry.width - controlsPlaceable.width).coerceAtLeast(0),
+                if (fullscreen && Build.VERSION.SDK_INT < 30) {
+                    // IMMERSIVE_STICKY transient bars need not clear legacy hide bits.
+                    // Reserve their stable envelope for this tiny handle, NOT the desktop.
+                    val controlSafe = SessionInsetPolicy.controlInsets(Build.VERSION.SDK_INT, true, stableControlSafe, visibleSafe)
+                    val position = SessionInsetPolicy.controlPosition(geometry, controlsPlaceable.width, controlsPlaceable.height,
+                        windowWidth, windowHeight, originX, originY, controlSafe, ime)
+                    controlsPlaceable.place(position.first, position.second)
+                } else controlsPlaceable.place(geometry.left + (geometry.width - controlsPlaceable.width).coerceAtLeast(0),
                     geometry.desktopTop + (geometry.localDesktopHeight - controlsPlaceable.height).coerceAtLeast(0))
             } else {
                 headerPlaceable.place(geometry.left, geometry.top)

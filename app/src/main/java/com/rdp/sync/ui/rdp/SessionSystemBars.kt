@@ -3,6 +3,7 @@ package com.rdp.sync.ui.rdp
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.os.Build
 import android.view.ViewTreeObserver
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -22,8 +23,10 @@ internal fun SessionSystemBars(fullscreen: Boolean) {
     val controller = remember(window) { WindowCompat.getInsetsController(window, decor) }
     val original = remember(window) {
         val insets = ViewCompat.getRootWindowInsets(decor)
-        OriginalBars(insets?.isVisible(WindowInsetsCompat.Type.statusBars()) ?: true,
-            insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true,
+        val visibility = SessionInsetPolicy.barVisibility(Build.VERSION.SDK_INT, decor.windowSystemUiVisibility,
+            insets?.isVisible(WindowInsetsCompat.Type.statusBars()) ?: true,
+            insets?.isVisible(WindowInsetsCompat.Type.navigationBars()) ?: true)
+        OriginalBars(visibility.first, visibility.second,
             insets?.isVisible(WindowInsetsCompat.Type.captionBar()) ?: false, controller.systemBarsBehavior)
     }
     DisposableEffect(window) {

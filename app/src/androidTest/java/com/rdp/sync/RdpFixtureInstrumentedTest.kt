@@ -394,6 +394,10 @@ class RdpFixtureInstrumentedTest {
             val insets = requireNotNull(ViewCompat.getRootWindowInsets(compose.activity.window.decorView))
             result.put("status", insets.isVisible(WindowInsetsCompat.Type.statusBars()))
                 .put("navigation", insets.isVisible(WindowInsetsCompat.Type.navigationBars()))
+                .put("window_system_ui_visibility", compose.activity.window.decorView.windowSystemUiVisibility)
+                .put("decor_system_ui_visibility", compose.activity.window.decorView.systemUiVisibility)
+                .put("window_flags", compose.activity.window.attributes.flags)
+                .put("window_focus", compose.activity.window.decorView.hasWindowFocus())
         }
         return result
     }
@@ -426,21 +430,47 @@ class RdpFixtureInstrumentedTest {
         val x = bounds.getInt("window_left") + bounds.getInt("window_width") / 2f
         val top = bounds.getInt("window_top") + 1f
         val distance = minOf(200f, bounds.getInt("window_height") * 0.2f)
+        val resources = compose.activity.resources
+        val thresholdId = resources.getIdentifier("system_gestures_distance_threshold", "dimen", "android")
+        assertTrue("Actual platform swipe threshold must be observable", thresholdId != 0)
+        val threshold = resources.getDimensionPixelSize(thresholdId)
+        assertTrue("One existing edge gesture must exceed the actual platform threshold", distance > threshold)
+        measurements.put("transient_system_bar_gesture_contract", JSONObject()
+            .put("distance_px", distance).put("platform_threshold_px", threshold)
+            .put("density", resources.displayMetrics.density).put("maximum_crossing_ms_exclusive", 500)
+            .put("step_delay_ms", 5).put("cadence_source", "AndroidX UiAutomator 2.3.0 InteractionController")
+            .put("before", systemBarVisibility()))
         val events = JSONArray()
         measurements.put("transient_system_bar_swipe", events)
         val down = SystemClock.uptimeMillis()
+        var thresholdCrossedAt: Long? = null
         fun event(action: Int, y: Float) {
-            val e = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0).apply { source = InputDevice.SOURCE_TOUCHSCREEN }
+            val e = fixtureFingerEvent(down, SystemClock.uptimeMillis(), action, x, y)
+            val observation = JSONObject().put("action", action).put("x", x).put("y", y)
+                .put("event_time_ms", e.eventTime).put("down_time_ms", e.downTime)
+                .put("wall_ms", System.currentTimeMillis()).put("tool_type", e.getToolType(0))
+                .put("source", e.source).put("device_id", e.deviceId)
+            events.put(observation)
+            if (action == MotionEvent.ACTION_MOVE && y > top + threshold && thresholdCrossedAt == null)
+                thresholdCrossedAt = e.eventTime - e.downTime
             try {
                 val accepted = instrumentation.uiAutomation.injectInputEvent(e, true)
-                events.put(JSONObject().put("action", action).put("x", x).put("y", y).put("accepted", accepted))
+                observation.put("accepted", accepted).put("completed_uptime_ms", SystemClock.uptimeMillis())
                 assertTrue("System edge swipe injection must be accepted", accepted)
+            } catch (failure: Throwable) {
+                observation.put("injection_exception", failure.javaClass.name)
+                throw failure
             } finally { e.recycle() }
         }
-        event(MotionEvent.ACTION_DOWN, top)
         try {
-            for (i in 1..8) { SystemClock.sleep(20); event(MotionEvent.ACTION_MOVE, top + distance * i / 8) }
+            event(MotionEvent.ACTION_DOWN, top)
+            // UiAutomator 2.3.0's documented injection cadence, not backdated
+            // event timestamps. The platform rejects edge crossings >=500ms.
+            for (i in 1..8) { SystemClock.sleep(5); event(MotionEvent.ACTION_MOVE, top + distance * i / 8) }
         } finally { event(MotionEvent.ACTION_UP, top + distance) }
+        measurements.put("transient_system_bar_threshold_crossing_ms", thresholdCrossedAt)
+        assertTrue("Harness edge gesture must cross the real platform threshold within500ms; no retry: $events",
+            thresholdCrossedAt?.let { it < 500 } == true)
         val observations = JSONArray()
         measurements.put("transient_system_bar_observations", observations)
         var everChanged = false
