@@ -81,7 +81,7 @@ class RdpFixtureInstrumentedTest {
             measurements.put("initial_display_control_state", RdpConnector.nativeGetDisplayControlState())
             assertFalse("normal fixture session must not silently downgrade to compatibility mode: ${RdpConnector.getDiag()}",
                 RdpConnector.getDiag().contains("connection=compatibility-retry"))
-            measurements.put("latency_method", "Single async FINGER touch (nominal 40ms hold; actual event-time duration recorded and required below 500ms) to exact synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
+            measurements.put("latency_method", "One public zero-duration stationary FINGER swipe (actual View DOWN/UP event-time span recorded and required below 500ms) to exact synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
             measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
                 { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
@@ -977,7 +977,7 @@ class RdpFixtureInstrumentedTest {
         val point = requireNotNull(remoteScreenPoint(remoteX, remoteY)) { "Touch target is outside the actual cropped viewport" }
         attempt.put("screen_x", point.x).put("screen_y", point.y).put("remote_x", remoteX).put("remote_y", remoteY)
             .put("server_clicks_before", before).put("server_before", beforeState)
-        compose.runOnUiThread {
+        val revalidate = {
             val view = desktop(); val location = IntArray(2); view.getLocationOnScreen(location)
             assertTrue("The same observed desktop must receive this one tap", view === observedView)
             assertTrue(view.isAttachedToWindow && view.isShown && view.hasWindowFocus())
@@ -986,13 +986,13 @@ class RdpFixtureInstrumentedTest {
             val mapped = view.viewportSnapshot().toScreen(remoteX, remoteY)
             assertEquals(point.x, location[0] + mapped.x, 0f); assertEquals(point.y, location[1] + mapped.y, 0f)
             attempt.put("view_identity", System.identityHashCode(view)).put("revalidated_elapsed_ms", SystemClock.elapsedRealtime())
+            Unit
         }
-        val events = JSONArray(); attempt.put("injected_events", events)
         val start = SystemClock.elapsedRealtime()
-        val upCompleted = injectDesktopTap(point.x, point.y, events)
-        val deadline = upCompleted + timeout
-        attempt.put("up_completed_elapsed_ms", upCompleted).put("response_deadline_elapsed_ms", deadline)
-            .put("gesture_duration_ms", events.getJSONObject(1).getLong("event_time_ms") - events.getJSONObject(0).getLong("down_time_ms"))
+        val upReceived = injectObservedDesktopTap(instrumentation, requireNotNull(observedView), point.x, point.y,
+            remoteX, remoteY, attempt, revalidate)
+        val deadline = upReceived + timeout
+        attempt.put("response_deadline_elapsed_ms", deadline)
         val samples = JSONArray(); attempt.put("response_samples", samples)
         while (SystemClock.elapsedRealtime() < deadline) {
             compose.mainClock.advanceTimeBy(100)
@@ -1024,43 +1024,6 @@ class RdpFixtureInstrumentedTest {
         }
         attempt.put("passed", false)
         throw AssertionError("Android touch reaches server and returns painted response within ${timeout}ms after the single UP: ${RdpConnector.getDiag()}")
-    }
-
-    /** Desktop only: keep IME-key and app-popup injectors unchanged. */
-    private fun injectDesktopTap(x: Float, y: Float, trace: JSONArray): Long {
-        val down = SystemClock.uptimeMillis()
-        var upEventTime = -1L
-        var upCompleted = -1L
-        fun inject(action: Int) {
-            val eventTime = SystemClock.uptimeMillis()
-            val properties = MotionEvent.PointerProperties().apply { id = 0; toolType = MotionEvent.TOOL_TYPE_FINGER }
-            val coordinates = MotionEvent.PointerCoords().apply { this.x = x; this.y = y; pressure = 1f; size = 1f }
-            val event = MotionEvent.obtain(down, eventTime, action, 1, arrayOf(properties), arrayOf(coordinates), 0, 0, 1f, 1f, 0, 0, InputDevice.SOURCE_TOUCHSCREEN, 0)
-            val record = clockSnapshot().put("action", action).put("event_time_ms", eventTime).put("down_time_ms", down)
-                .put("x", x).put("y", y).put("tool_type", event.getToolType(0)).put("source", event.source).put("sync", false)
-            trace.put(record)
-            try {
-                val accepted = instrumentation.uiAutomation.injectInputEvent(event, false)
-                record.put("accepted", accepted)
-                assertTrue("One observed desktop finger event admitted", accepted)
-            } catch (error: Throwable) { record.put("injection_error", error.toString()); throw error }
-            finally {
-                val completed = clockSnapshot(); record.put("completed", completed)
-                if (action == MotionEvent.ACTION_UP) { upEventTime = eventTime; upCompleted = completed.getLong("elapsed_ms") }
-                event.recycle()
-            }
-        }
-        var downFailure: Throwable? = null
-        try { inject(MotionEvent.ACTION_DOWN); SystemClock.sleep(40) }
-        catch (error: Throwable) { downFailure = error; throw error }
-        finally {
-            try { inject(MotionEvent.ACTION_UP) }
-            catch (upFailure: Throwable) { if (downFailure != null) downFailure.addSuppressed(upFailure) else throw upFailure }
-        }
-        // Real timestamps only: >=500ms is intentionally a production right-click.
-        // Reject an invalid harness gesture rather than backdating or retrying it.
-        assertTrue("Actual desktop tap must remain below the 500ms long-press threshold", upEventTime - down in 0L until 500L)
-        return upCompleted
     }
 
     private fun receivedPointMatches(point: JSONArray?, x: Float, y: Float): Boolean =

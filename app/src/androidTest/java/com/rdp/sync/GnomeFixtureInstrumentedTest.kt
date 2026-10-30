@@ -301,8 +301,7 @@ class GnomeFixtureInstrumentedTest {
                 .put("scale",transform.scale).put("transform_left",transform.left).put("transform_top",transform.top))
         }
         attempt.put("screen_x",sx).put("screen_y",sy).put("pre_input_windows", touchWindowObservation(sx,sy))
-        val events=JSONArray(); attempt.put("injected_events",events)
-        compose.runOnUiThread {
+        val revalidate = {
             val v=desktop(); val original=attempt.getJSONObject("view")
             val transform=v.viewportSnapshot(); val mapped=transform.toScreen(x,y)
             val loc=IntArray(2); v.getLocationOnScreen(loc)
@@ -313,45 +312,11 @@ class GnomeFixtureInstrumentedTest {
             assertEquals(sx,loc[0]+mapped.x,0f); assertEquals(sy,loc[1]+mapped.y,0f)
             assertEquals(original.getDouble("scale"),transform.scale.toDouble(),0.0)
             attempt.put("view_revalidated_elapsed_ms",SystemClock.elapsedRealtime())
+            Unit
         }
-        val down=SystemClock.uptimeMillis()
-        var upEventTime=-1L
-        var upCompleted=-1L
-        fun inject(action: Int) {
-            val eventTime=SystemClock.uptimeMillis() // Never backdate a slow host gesture.
-            val properties=MotionEvent.PointerProperties().apply { id=0; toolType=MotionEvent.TOOL_TYPE_FINGER }
-            val coordinates=MotionEvent.PointerCoords().apply { this.x=sx; this.y=sy; pressure=1f; size=1f }
-            val event=MotionEvent.obtain(down,eventTime,action,1,arrayOf(properties),arrayOf(coordinates),0,0,1f,1f,0,0,InputDevice.SOURCE_TOUCHSCREEN,0)
-            val record=JSONObject().put("action",action).put("event_time_ms",eventTime).put("down_time_ms",down)
-                .put("wall_before_ms",System.currentTimeMillis()).put("elapsed_before_ms",SystemClock.elapsedRealtime())
-                .put("tool_type",event.getToolType(0)).put("source",event.source).put("sync",false)
-            events.put(record)
-            try {
-                val accepted=instrumentation.uiAutomation.injectInputEvent(event,false)
-                record.put("accepted",accepted)
-                assertTrue("One observed GNOME finger event admitted",accepted)
-            } catch(error: Throwable) {
-                record.put("injection_error",error.toString())
-                throw error
-            } finally {
-                record.put("wall_completed_ms",System.currentTimeMillis()).put("elapsed_completed_ms",SystemClock.elapsedRealtime())
-                    .put("uptime_completed_ms",SystemClock.uptimeMillis())
-                if(action==MotionEvent.ACTION_UP) { upEventTime=eventTime; upCompleted=SystemClock.elapsedRealtime() }
-                event.recycle()
-            }
-        }
-        var downFailure: Throwable?=null
-        try { inject(MotionEvent.ACTION_DOWN); SystemClock.sleep(40) }
-        catch(error: Throwable) { downFailure=error; throw error }
-        finally {
-            try { inject(MotionEvent.ACTION_UP) }
-            catch(upFailure: Throwable) { if(downFailure != null) downFailure.addSuppressed(upFailure) else throw upFailure }
-        }
-        attempt.put("gesture_duration_ms",upEventTime-down).put("response_deadline_elapsed_ms",upCompleted+15_000)
-        // Production intentionally maps >=500ms to right-click. A stalled harness
-        // must fail, never forge a short event time, retry, or accept another button.
-        assertTrue("Actual single tap must remain below the production 500ms long-press threshold",upEventTime-down in 0L until 500L)
-        val deadline=upCompleted+15_000
+        val upReceived=injectObservedDesktopTap(instrumentation,requireNotNull(inputView),sx,sy,x,y,attempt,revalidate)
+        val deadline=upReceived+15_000
+        attempt.put("response_deadline_elapsed_ms",deadline)
         val samples=JSONArray(); attempt.put("response_samples",samples)
         var matched=false
         while(SystemClock.elapsedRealtime()<deadline) {
@@ -363,7 +328,13 @@ class GnomeFixtureInstrumentedTest {
                 val actual=colorAt(40,140); val expected=if((before+1)%2==1) 0x44dd88 else 0xdd4488
                 sample.put("server",current).put("actual_rgb",actual).put("source_rgb",expected)
                     .put("frame_id",RdpConnector.nativeGetFrameId()).put("diag",RdpConnector.getDiag())
-                matched=current.getInt("clicks")==before+1 && press!=null && release!=null &&
+                val buttons=current.getJSONArray("button_events"); val priorButtons=beforeState.getJSONArray("button_events")
+                val onlyOneLeftPair=buttons.length()==priorButtons.length()+2 &&
+                    (0 until priorButtons.length()).all { buttons.getJSONObject(it).toString()==priorButtons.getJSONObject(it).toString() } &&
+                    buttons.getJSONObject(priorButtons.length()).let { it.getString("action")=="press" && it.getInt("button")==1 } &&
+                    buttons.getJSONObject(priorButtons.length()+1).let { it.getString("action")=="release" && it.getInt("button")==1 }
+                sample.put("only_one_left_pair_no_extra_buttons",onlyOneLeftPair)
+                matched=onlyOneLeftPair && current.getInt("clicks")==before+1 && press!=null && release!=null &&
                     abs(press.getDouble(0)-x)<=1 && abs(press.getDouble(1)-y)<=1 &&
                     abs(release.getDouble(0)-x)<=1 && abs(release.getDouble(1)-y)<=1 && decodedSourceMatches(expected,actual)
                 sample.put("outcome_matched",matched)
