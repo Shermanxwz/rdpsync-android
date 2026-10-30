@@ -8,7 +8,9 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.os.SystemClock
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import android.view.InputDevice
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
@@ -638,21 +640,44 @@ class RdpFixtureInstrumentedTest {
         } finally { shot.recycle() }
     }
 
-    private fun injectSingleTap(x: Float, y: Float, inputMethodWindow: Boolean = false) {
+    private fun injectSingleTap(x: Float, y: Float, inputMethodWindow: Boolean = false, trace: JSONArray? = null): Long {
         val downTime = SystemClock.uptimeMillis()
+        var allAccepted = true
+        var injectionFailure: Throwable? = null
+        var upCompletedElapsed = 0L
         listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEach { action ->
             val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
                 .apply { source = InputDevice.SOURCE_TOUCHSCREEN }
+            val record = clockSnapshot().put("action", action).put("x", x).put("y", y)
+                .put("source", event.source).put("device_id", event.deviceId)
+            trace?.put(record)
             try {
                 if (inputMethodWindow) {
                     // The real IME belongs to a different UID. UiAutomation's
                     // system input injection can target its observed window.
-                    assertTrue("System must accept the single observed IME key event",
-                        instrumentation.uiAutomation.injectInputEvent(event, true))
-                } else instrumentation.sendPointerSync(event)
+                    Log.i("RdpImeFixture", "inject-start action=$action elapsed=${SystemClock.elapsedRealtime()} uptime=${SystemClock.uptimeMillis()}")
+                    try {
+                        val accepted = instrumentation.uiAutomation.injectInputEvent(event, true)
+                        allAccepted = allAccepted && accepted
+                        val completed = clockSnapshot()
+                        record.put("accepted", accepted).put("completed", completed)
+                        if (action == MotionEvent.ACTION_UP) upCompletedElapsed = completed.getLong("elapsed_ms")
+                        Log.i("RdpImeFixture", "inject-end action=$action accepted=$accepted elapsed=${SystemClock.elapsedRealtime()} uptime=${SystemClock.uptimeMillis()}")
+                    } catch (failure: Throwable) {
+                        record.put("exception_type", failure.javaClass.simpleName).put("completed", clockSnapshot())
+                        if (injectionFailure == null) injectionFailure = failure
+                    }
+                } else {
+                    instrumentation.sendPointerSync(event)
+                    if (action == MotionEvent.ACTION_UP) upCompletedElapsed = SystemClock.elapsedRealtime()
+                }
             } finally { event.recycle() }
             if (action == MotionEvent.ACTION_DOWN) SystemClock.sleep(40)
         }
+        // Complete exactly one UP even if DOWN failed or the IME changed mid-gesture.
+        injectionFailure?.let { throw it }
+        if (inputMethodWindow) assertTrue("System must accept both observed IME key events", allAccepted)
+        return upCompletedElapsed
     }
 
     private fun exerciseActualSoftwareKeyboard() {
@@ -664,66 +689,198 @@ class RdpFixtureInstrumentedTest {
         val before = fixtureState().getString("text")
         val keyEvidence = JSONArray()
         measurements.put("actual_software_keyboard_keys", keyEvidence)
+        val receipts = JSONArray()
+        var receiptOverflow = 0
+        measurements.put("software_keyboard_view_key_receipts", receipts)
+            .put("key_receipt_limitation", "Nonconsuming OnKeyListener observes dispatched KeyEvents only; commitText/editor actions bypass it")
+        var observedView: RdpDesktopView? = null
         try {
+            compose.runOnUiThread {
+                // This fresh fixture-owned View and pinned Compose1.7.2 install no
+                // OnKeyListener. Restore that known null state on this same View.
+                observedView = desktop().also { view ->
+                    view.setOnKeyListener { actualView, code, event ->
+                        synchronized(receipts) {
+                            if (receipts.length() >= 128) receiptOverflow++
+                            else receipts.put(clockSnapshot().put("action", event.action)
+                                .put("is_enter", code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER)
+                                .put("event_uptime_ms", event.eventTime).put("view_identity", System.identityHashCode(actualView))
+                                .put("view_focused", actualView.isFocused).put("window_focused", actualView.hasWindowFocus()))
+                        }
+                        Log.i("RdpImeFixture", "view-key action=${event.action} enter=${code == KeyEvent.KEYCODE_ENTER || code == KeyEvent.KEYCODE_NUMPAD_ENTER} elapsed=${SystemClock.elapsedRealtime()} uptime=${SystemClock.uptimeMillis()}")
+                        false
+                    }
+                }
+            }
             tapObservedImeKey("a", keyEvidence)
             // Some IMEs keep a composing character local until Enter. Record, do not
             // fabricate a commit or send a replacement/native key as a fallback.
             measurements.put("software_keyboard_interim_text", fixtureState().getString("text"))
-            tapObservedImeKey("Enter", keyEvidence)
+            val enterUpCompleted = tapObservedImeKey("Enter", keyEvidence)
             val expected = before + "a\n"
             val length = expected.codePointCount(0, expected.length)
             val colors = intArrayOf(Color.rgb(85, 204, 204), Color.rgb(204, 170, 85), Color.rgb(153, 85, 221))
-            waitFor("real software keyboard commits a/newline and paints distinct remote text feedback") {
+            val responseWaitStarted = SystemClock.elapsedRealtime()
+            val remainingResponseBudget = 15_000 - (responseWaitStarted - enterUpCompleted)
+            measurements.put("software_keyboard_response_budget", JSONObject()
+                .put("enter_up_completed_elapsed_ms", enterUpCompleted).put("wait_started_elapsed_ms", responseWaitStarted)
+                .put("remaining_ms", remainingResponseBudget).put("total_budget_ms", 15_000))
+            assertTrue("Post-gesture diagnostics exhausted the unchanged15s response budget", remainingResponseBudget > 0)
+            waitFor("real software keyboard commits a/newline and paints distinct remote text feedback", remainingResponseBudget) {
                 fixtureState().getString("text") == expected &&
                     colorAt(328, 40)?.let { sameColor(it, colors[length % 3]) } == true
             }
+            synchronized(receipts) { assertEquals("Key receipt diagnostic must not truncate", 0, receiptOverflow) }
             measurements.put("software_keyboard_committed_text", expected)
                 .put("software_keyboard_text_patch_exact_rgb", true)
+        } catch (failure: Throwable) {
+            // Capture the live IME before the outer cleanup hides it. Keep the
+            // original failure and never repair missing input with another tap.
+            runCatching { measurements.put("software_keyboard_failure_state", fixtureState()) }
+            runCatching { measurements.put("software_keyboard_failure_view", desktopBounds()) }
+            runCatching { screenshot("04d4-ime-key-failure-before-hide") }
+            throw failure
         } finally {
+            compose.runOnUiThread { observedView?.setOnKeyListener(null) }
+            synchronized(receipts) { measurements.put("software_keyboard_key_receipt_overflow", receiptOverflow) }
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
         }
     }
 
-    private fun tapObservedImeKey(label: String, evidence: JSONArray) {
-        var target: Rect? = null
-        var targetLabel = ""
-        var imeBounds = Rect()
+    private data class ObservedImeKey(
+        val node: AccessibilityNodeInfo, val label: String, val windowId: Int,
+        val windowBounds: Rect, val keyBounds: Rect, val rootIdentity: Int, val rootPackage: String
+    ) {
+        fun sameTarget(other: ObservedImeKey): Boolean = windowId == other.windowId &&
+            windowBounds == other.windowBounds && keyBounds == other.keyBounds && label == other.label &&
+            rootPackage == other.rootPackage && rootIdentity == other.rootIdentity && node == other.node
+        fun snapshot(): JSONObject = JSONObject().put("observed", label).put("window_id", windowId)
+            .put("ime_window_bounds", windowBounds.toShortString()).put("key_bounds", keyBounds.toShortString())
+            .put("root_identity", rootIdentity).put("root_package", rootPackage).put("node_identity", node.hashCode())
+            .put("visible", node.isVisibleToUser).put("enabled", node.isEnabled)
+    }
+
+    private fun clockSnapshot(): JSONObject = JSONObject().put("wall_ms", System.currentTimeMillis())
+        .put("elapsed_ms", SystemClock.elapsedRealtime()).put("uptime_ms", SystemClock.uptimeMillis())
+
+    private fun inputViewSnapshot(): JSONObject {
+        val snapshot = JSONObject()
+        compose.runOnUiThread {
+            val view = desktop()
+            snapshot.put("view_identity", System.identityHashCode(view)).put("focused", view.isFocused)
+                .put("window_focused", view.hasWindowFocus()).put("attached", view.isAttachedToWindow)
+                .put("shown", view.isShown).put("width", view.width).put("height", view.height)
+        }
+        return snapshot
+    }
+
+    private fun matchesImeKey(node: AccessibilityNodeInfo, label: String): Boolean {
+        val text = node.text?.toString()?.trim().orEmpty()
+        val description = node.contentDescription?.toString()?.trim().orEmpty()
+        return if (label == "a") text == label || description == label
+            else text.equals(label, true) || description.equals(label, true)
+    }
+
+    /** No global accessibility listener: UiAutomation has no getter to restore its previous owner. */
+    private fun findFreshImeKey(label: String): ObservedImeKey? {
+        val matches = linkedMapOf<String, ObservedImeKey>()
         val observed = JSONArray()
-        waitFor("actual input-method accessibility key $label") {
-            target = null
-            for (window in instrumentation.uiAutomation.windows) {
-                if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
-                val bounds = Rect().also(window::getBoundsInScreen)
-                val root = window.root ?: continue
+        for (window in instrumentation.uiAutomation.windows) {
+            if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+            val bounds = Rect().also(window::getBoundsInScreen)
+            val root = window.root ?: continue
+            try {
+                if (!root.refresh()) continue
                 fun visit(node: AccessibilityNodeInfo, depth: Int) {
-                    if (depth > 30 || target != null) return
+                    if (depth > 30) return
                     val text = node.text?.toString()?.trim().orEmpty()
                     val description = node.contentDescription?.toString()?.trim().orEmpty()
                     val rect = Rect().also(node::getBoundsInScreen)
                     if (observed.length() < 150 && (text.isNotBlank() || description.isNotBlank())) {
+                        // Only public synthetic fixture IME key labels, never input text.
                         observed.put(JSONObject().put("text", text.take(80)).put("description", description.take(80))
                             .put("bounds", rect.toShortString()))
                     }
-                    val matches = if (label == "a") text == label || description == label
+                    val matchesLabel = if (label == "a") text == label || description == label
                         else text.equals(label, true) || description.equals(label, true)
-                    if (matches && node.isVisibleToUser && rect.width() > 0 && rect.height() > 0 && bounds.contains(rect)) {
-                        target = rect; targetLabel = if (text.isNotEmpty()) text else description; imeBounds = bounds
+                    if (matchesLabel && node.isVisibleToUser && node.isEnabled && rect.width() > 0 &&
+                        rect.height() > 0 && bounds.contains(rect)) {
+                        val copy = AccessibilityNodeInfo.obtain(node)
+                        if (copy.refresh() && copy.isVisibleToUser && copy.isEnabled) {
+                            val freshBounds = Rect().also(copy::getBoundsInScreen)
+                            if (freshBounds == rect && matchesImeKey(copy, label)) {
+                                val key = "${window.id}:${copy.hashCode()}:${rect.toShortString()}"
+                                matches.put(key, ObservedImeKey(copy, if (text.isNotEmpty()) text else description,
+                                    window.id, bounds, rect, root.hashCode(), root.packageName?.toString().orEmpty()))?.node?.recycle()
+                            } else copy.recycle()
+                        } else copy.recycle()
                     }
                     for (i in 0 until node.childCount) node.getChild(i)?.let { child ->
                         try { visit(child, depth + 1) } finally { child.recycle() }
                     }
                 }
-                try { visit(root, 0) } finally { root.recycle() }
-            }
-            measurements.put("ime_accessibility_observed_nodes", observed)
-            target != null
+                visit(root, 0)
+            } finally { root.recycle() }
         }
-        val rect = requireNotNull(target)
-        evidence.put(JSONObject().put("requested", label).put("observed", targetLabel)
-            .put("key_bounds", rect.toShortString()).put("ime_window_bounds", imeBounds.toShortString())
-            .put("injection", "UiAutomation.injectInputEvent(sync=true)")
-            .put("injected_at_ms", SystemClock.elapsedRealtime()))
-        injectSingleTap(rect.exactCenterX(), rect.exactCenterY(), inputMethodWindow = true)
+        measurements.put("ime_accessibility_observed_nodes", observed)
+        if (matches.size == 1) return matches.values.single()
+        matches.values.forEach { it.node.recycle() }
+        return null
+    }
+
+    private fun tapObservedImeKey(label: String, evidence: JSONArray): Long {
+        val attempt = JSONObject().put("requested", label).put("readiness_started", clockSnapshot())
+        evidence.put(attempt)
+        val readiness = JSONArray()
+        attempt.put("readiness_observations", readiness)
+        if (label == "Enter") screenshot("04d2-ime-before-enter")
+        val deadline = SystemClock.elapsedRealtime() + 15_000
+        var target: ObservedImeKey? = null
+        while (SystemClock.elapsedRealtime() < deadline && target == null) {
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
+            val first = findFreshImeKey(label)
+            if (first == null) { SystemClock.sleep(100); continue }
+            try {
+                val observation = clockSnapshot().put("before_idle", first.snapshot())
+                assertTrue("Key readiness diagnostic must remain bounded", readiness.length() < 32)
+                readiness.put(observation)
+                // A supported accessibility-event quiet condition, not a guessed
+                // fixed delay. A timeout fails rather than tapping during churn.
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                assertTrue("IME key readiness deadline expired", remaining > 0)
+                instrumentation.uiAutomation.waitForIdle(500, minOf(10_000, remaining))
+                observation.put("idle_completed", clockSnapshot())
+                val focused = desktopHasWindowFocus() && imeVisible()
+                observation.put("desktop_window_focused_and_ime_visible", focused).put("view", inputViewSnapshot())
+                val fresh = findFreshImeKey(label)
+                if (fresh != null) {
+                    observation.put("after_idle", fresh.snapshot())
+                    if (focused && first.sameTarget(fresh)) target = fresh else fresh.node.recycle()
+                }
+            } finally { first.node.recycle() }
+        }
+        val key = requireNotNull(target) { "No stable unique enabled real IME key $label within readiness budget" }
+        try {
+            // Revalidate the exact live target immediately before the one gesture.
+            assertTrue("Observed IME key became stale before injection", key.node.refresh())
+            val liveBounds = Rect().also(key.node::getBoundsInScreen)
+            assertTrue("Observed IME key changed before injection", key.node.isVisibleToUser && key.node.isEnabled &&
+                matchesImeKey(key.node, label) && liveBounds == key.keyBounds && key.node.windowId == key.windowId &&
+                key.node.packageName?.toString() == key.rootPackage)
+            attempt.put("before_gesture", key.snapshot()).put("injected_at_ms", SystemClock.elapsedRealtime())
+                .put("injection", "UiAutomation.injectInputEvent(sync=true)")
+            val events = JSONArray()
+            attempt.put("motion_events", events)
+            val upCompleted = injectSingleTap(key.keyBounds.exactCenterX(), key.keyBounds.exactCenterY(), inputMethodWindow = true, trace = events)
+            attempt.put("original_node_refresh_after_gesture", key.node.refresh()).put("gesture_completed", clockSnapshot())
+            val after = findFreshImeKey(label)
+            try { attempt.put("after_gesture", after?.snapshot() ?: JSONObject.NULL) }
+            finally { after?.node?.recycle() }
+            attempt.put("view_after_gesture", inputViewSnapshot()).put("ime_visible_after_gesture", imeVisible())
+            if (label == "Enter") screenshot("04d3-ime-after-enter")
+            return upCompleted
+        } finally { key.node.recycle() }
     }
 
     private fun actualSize(w: Int, h: Int) = RdpConnector.getWidth() == w && RdpConnector.getHeight() == h
