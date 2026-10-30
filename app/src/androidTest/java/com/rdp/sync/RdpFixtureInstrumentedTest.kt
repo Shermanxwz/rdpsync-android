@@ -23,6 +23,7 @@ import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.screens.RdpConnectionScreen
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Rule
@@ -31,7 +32,6 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.net.Socket
 import java.net.InetSocketAddress
-import kotlin.math.abs
 import kotlin.math.min
 
 /** Real xrdp/Xorg server on a disposable runner; no mocks stand in for pixels or input. */
@@ -113,6 +113,10 @@ class RdpFixtureInstrumentedTest {
             selectResolution("1280 × 720")
             waitFor("server-applied 1280x720 frame", 20_000) { actualSize(1280, 720) && fixtureSize(1280, 720) }
             assertColor(40, 40, Color.RED)
+            // A retained old top-left corner plus new dimensions cannot pass:
+            // this visible pixel is outside the original 1024-wide framebuffer.
+            assertColor(1200, 600, Color.rgb(17, 34, 51))
+            measurements.put("hd_new_frame_region_exact_rgb", true)
             screenshot("03-negotiated-hd")
             selectResolution("适应窗口")
             waitFor("portrait fit-window framebuffer", 20_000) { RdpConnector.getHeight() > RdpConnector.getWidth() }
@@ -288,6 +292,34 @@ class RdpFixtureInstrumentedTest {
     }
 
     private fun tapAndObserve(timeout: Long = 10_000): Long {
+        val attempt = JSONObject()
+        val attempts = measurements.optJSONArray("touch_attempts") ?: JSONArray().also { measurements.put("touch_attempts", it) }
+        attempts.put(attempt)
+        measurements.put("rgb_assertion", "exact 8-bit RGB channels at uniform interior pixels")
+        // Compose semantics can disappear before Android disposes the dialog's
+        // input window. Do not inject a measured gesture into that transition.
+        // A native frame counter also does not establish a drawn View bitmap.
+        waitFor("visible, attached and focused remote desktop before touch") {
+            var viewReady = false
+            compose.runOnUiThread {
+                val view = desktop()
+                val location = IntArray(2)
+                view.getLocationOnScreen(location)
+                viewReady = view.isAttachedToWindow && view.isShown && view.hasWindowFocus() && view.width > 0 && view.height > 0
+                attempt.put("attached", view.isAttachedToWindow).put("shown", view.isShown)
+                    .put("window_focus", view.hasWindowFocus()).put("view_left", location[0]).put("view_top", location[1])
+                    .put("view_width", view.width).put("view_height", view.height)
+            }
+            val dialogAbsent = !dialogExists("显示与网络")
+            val painted = viewReady && dialogAbsent && RdpConnector.isConnected() &&
+                colorAt(40, 40)?.let { sameColor(it, Color.RED) } == true &&
+                colorAt(136, 40)?.let { sameColor(it, Color.GREEN) } == true &&
+                colorAt(232, 40)?.let { sameColor(it, Color.BLUE) } == true
+            attempt.put("settings_dialog_absent", dialogAbsent).put("visible_exact_rgb", painted)
+                .put("native_generation", RdpConnector.nativeGetTelemetry()[11]).put("native_frame_id", RdpConnector.nativeGetFrameId())
+                .put("frame_width", RdpConnector.getWidth()).put("frame_height", RdpConnector.getHeight())
+            painted
+        }
         val before = fixtureState().getInt("clicks")
         val position = IntArray(2)
         var x = 0f; var y = 0f
@@ -298,6 +330,7 @@ class RdpFixtureInstrumentedTest {
             x = position[0] + (view.width - RdpConnector.getWidth() * fit) / 2 + 400 * fit
             y = position[1] + (view.height - RdpConnector.getHeight() * fit) / 2 + 300 * fit
         }
+        attempt.put("screen_x", x).put("screen_y", y).put("server_clicks_before", before)
         val start = SystemClock.elapsedRealtime()
         val downTime = SystemClock.uptimeMillis()
         listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEach { action ->
@@ -307,9 +340,12 @@ class RdpFixtureInstrumentedTest {
             if (action == MotionEvent.ACTION_DOWN) SystemClock.sleep(40)
         }
         waitFor("Android touch reaches server and returns painted response", timeout) {
-            fixtureState().getInt("clicks") > before && colorAt(40, 140)?.let { closeColor(it, if ((before + 1) % 2 == 1) Color.rgb(68, 221, 136) else Color.rgb(221, 68, 136)) } == true
+            fixtureState().getInt("clicks") > before && colorAt(40, 140)?.let { sameColor(it, if ((before + 1) % 2 == 1) Color.rgb(68, 221, 136) else Color.rgb(221, 68, 136)) } == true
         }
-        return (SystemClock.elapsedRealtime() - start).also { latencySamples += it }
+        return (SystemClock.elapsedRealtime() - start).also {
+            latencySamples += it
+            attempt.put("touch_to_observed_response_ms", it).put("server_clicks_after", fixtureState().getInt("clicks"))
+        }
     }
 
     private fun actualSize(w: Int, h: Int) = RdpConnector.getWidth() == w && RdpConnector.getHeight() == h
@@ -335,8 +371,8 @@ class RdpFixtureInstrumentedTest {
         val shot = instrumentation.uiAutomation.takeScreenshot() ?: return null
         return try { if (sx in 0 until shot.width && sy in 0 until shot.height) shot.getPixel(sx, sy) else null } finally { shot.recycle() }
     }
-    private fun closeColor(actual: Int, expected: Int) = abs(Color.red(actual) - Color.red(expected)) <= 6 && abs(Color.green(actual) - Color.green(expected)) <= 6 && abs(Color.blue(actual) - Color.blue(expected)) <= 6
-    private fun assertColor(x: Int, y: Int, expected: Int) = waitFor("RGB pixel $x,$y") { colorAt(x, y)?.let { closeColor(it, expected) } == true }
+    private fun sameColor(actual: Int, expected: Int) = Color.red(actual) == Color.red(expected) && Color.green(actual) == Color.green(expected) && Color.blue(actual) == Color.blue(expected)
+    private fun assertColor(x: Int, y: Int, expected: Int) = waitFor("exact RGB pixel $x,$y") { colorAt(x, y)?.let { sameColor(it, expected) } == true }
     private fun screenshot(name: String) {
         val shot = instrumentation.uiAutomation.takeScreenshot()
         File(evidence, "$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
