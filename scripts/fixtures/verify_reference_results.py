@@ -19,6 +19,15 @@ from PIL import Image
 
 SOURCE_REVISION = '97eff6ddfbbfaa8e42a126d362686bd001ff8bdc'
 PROFILES = {(f, s) for f in ('TRUE', 'FALSE') for s in ('FALSE', 'TRUE')}
+# Pinned FreeRDP 3.32.2 libfreerdp/core/rdp.c:2208-2222 only. These are
+# server-receive finalization phases, not negotiation or arbitrary errors.
+REACTIVATION_PHASES = (
+    ('SYNC', 'FINALIZE_SC_SYNCHRONIZE_PDU'),
+    ('COOPERATE', 'FINALIZE_SC_CONTROL_COOPERATE_PDU'),
+    ('GRANTED_CONTROL', 'FINALIZE_SC_CONTROL_GRANTED_PDU'),
+    ('FONT_MAP', 'FINALIZE_SC_FONT_MAP_PDU'),
+)
+STATE_PREFIX = 'CONNECTION_STATE_FINALIZATION_CLIENT_'
 
 
 class InvalidEvidence(ValueError):
@@ -118,6 +127,67 @@ def frame(directory, data, name, width, height, clicks):
         require(image.getpixel(point) == expected, f'{name} exact RGB mismatch at {point}')
 
 
+def log_clock(log, position):
+    # stdout/stderr may interleave within a line. Use the last actual record
+    # timestamp before the marker, not physical line ordering across streams.
+    prefix = log[log.rfind('\n', 0, position) + 1:position]
+    stamps = list(re.finditer(r'\[(\d{2}):(\d{2}):(\d{2}):(\d{3})\]', prefix))
+    require(stamps, 'missing finalization record timestamp')
+    hour, minute, second, millis = map(int, stamps[-1].groups())
+    require(hour < 24 and minute < 60 and second < 60, 'invalid finalization record timestamp')
+    return ((hour * 60 + minute) * 60 + second) * 1000 + millis
+
+
+def early_update_phase(log):
+    guards = list(re.finditer(
+        r'\[update_recv\][^\n]*State CONNECTION_STATE_ACTIVE \(or higher\) requested, but '
+        r'(CONNECTION_STATE_[A-Z_]+) found\. Aborting\.', log))
+    require(len(guards) == 1, 'missing/ambiguous exact non-ACTIVE UPDATE guard')
+    guard = guards[0]
+    state = guard.group(1)
+    states = [STATE_PREFIX + phase for phase, _ in REACTIVATION_PHASES]
+    require(state in states, 'UPDATE guard is outside the enumerated reactivation phases')
+    phase_index = states.index(state)
+    guard_time = log_clock(log, guard.start())
+
+    def completed(pattern, description, unique=True):
+        records = list(re.finditer(pattern, log))
+        require(len(records) == 1 if unique else bool(records), f'missing/ambiguous {description}')
+        # Date-free FreeRDP clocks can cross midnight. A preceding record must
+        # be within this bounded resize attempt, not a later/stale timestamp.
+        for record in records:
+            age = (guard_time - log_clock(log, record.start())) % 86_400_000
+            require(age <= 30_000, f'{description} was not completed before UPDATE rejection')
+        return age
+
+    previous_age = completed(r'\[rdp_client_transition_to_state\][^\n]*'
+                             r'CONNECTION_STATE_FINALIZATION_FONT_LIST --> ' + states[0],
+                             'entry into reactivation receive phase')
+    for index, (_, flag) in enumerate(REACTIVATION_PHASES):
+        flag_pattern = (r'\[rdp_finalize_set_flag\][^\n]*\[' + states[index] +
+                        r'\] received flag ' + flag + r' \[')
+        if index < phase_index:
+            flag_age = completed(flag_pattern, flag)
+            transition_age = completed(r'\[rdp_client_transition_to_state\][^\n]*' + states[index] +
+                                       r' --> ' + states[index + 1], 'transition after ' + flag)
+            require(previous_age >= flag_age >= transition_age, 'finalization records contradict protocol ordering')
+            previous_age = transition_age
+        else:
+            require(re.search(flag_pattern, log) is None, 'guard state contradicts a later received flag')
+    if phase_index == 0:
+        # Preserve the original exact missing-SYNCHRONIZE evidence requirement.
+        completed(r'\[rdp_handle_sc_flags\][^\n]*\[' + states[0] +
+                  r'\][^\n]*expected flag FINALIZE_SC_SYNCHRONIZE_PDU[^\n]*NO_FLAG_SET',
+                  'missing-SYNCHRONIZE warning', unique=False)
+    suffix = log[guard.end():]
+    require('DATA_PDU_TYPE_UPDATE - update_recv() failed' in suffix and
+            state + ' status STATE_RUN_FAILED [-1]' in suffix,
+            'missing exact UPDATE/finalization failure chain')
+    require('--> CONNECTION_STATE_ACTIVE' not in log, 'server later completed reactivation')
+    require('AutoReconnect not enabled, quitting.' in suffix, 'missing explicit no-reconnect termination')
+    return state, REACTIVATION_PHASES[phase_index][1]
+
+
 def verify_case(directory, variant, raw_exit, flush, sync):
     data = load(directory / 'result.json')
     process = load(directory / 'process-result.json')
@@ -159,25 +229,17 @@ def verify_case(directory, variant, raw_exit, flush, sync):
     require('DisplayControlCapsPdu: setting the window as resizable' in log[:resize], 'DISP caps were not ready')
     require(variant in ('apt-0.9.24', 'upstream-0.10.6.1'), 'unknown server variant')
     observed = final
+    guard_state = awaited_pdu = None
     if variant == 'apt-0.9.24' and raw_exit == 1:
         require(raw_exit == 1 and data.get('passed') is False and data.get('stage') == 'resize',
                 'old control must fail the raw resize case with exit 1')
         require(data.get('error') == 'Official client exited before comparison completed', 'unexpected old-server failure')
         require(data.get('client_alive_at_finish') is False and process.get('client_exit_origin') == 'natural',
                 'client did not terminate naturally before cleanup')
-        require(process['client_returncode'] >= 0, 'child was externally terminated by a signal')
+        require(process['client_returncode'] > 0, 'child did not exit naturally with a nonzero failure code')
         observed = observed_resize_after_failure(data, initial)
-        warning = re.search(r'\[rdp_handle_sc_flags\][^\n]*\[CONNECTION_STATE_FINALIZATION_CLIENT_SYNC\]'
-                            r'[^\n]*expected flag FINALIZE_SC_SYNCHRONIZE_PDU[^\n]*NO_FLAG_SET', log[resize:])
-        require(warning is not None, 'missing exact reactivation synchronization failure')
-        suffix = log[resize + warning.start():]
-        update = suffix.find('State CONNECTION_STATE_ACTIVE (or higher) requested, but '
-                             'CONNECTION_STATE_FINALIZATION_CLIENT_SYNC found. Aborting.')
-        require(update >= 0 and 'DATA_PDU_TYPE_UPDATE - update_recv() failed' in suffix[update:],
-                'missing exact non-ACTIVE UPDATE rejection')
-        require('--> CONNECTION_STATE_ACTIVE' not in log[resize:], 'server later completed reactivation')
-        require('AutoReconnect not enabled, quitting.' in suffix, 'missing explicit no-reconnect termination')
-        outcome = 'old interoperability failure reproduced'
+        guard_state, awaited_pdu = early_update_phase(log[resize:])
+        outcome = 'old interoperability failure reproduced (' + guard_state.removeprefix('CONNECTION_STATE_FINALIZATION_') + ')'
     else:
         require(raw_exit == 0 and data.get('passed') is True and data.get('stage') == 'complete' and
                 data.get('client_alive_at_finish') is True and process.get('client_exit_origin') == 'cleanup-signal',
@@ -199,6 +261,7 @@ def verify_case(directory, variant, raw_exit, flush, sync):
                    else 'old server live resize passed in this attempt')
     return {'outcome': outcome, 'raw_case_exit': raw_exit, 'client_returncode': process['client_returncode'],
             'client_exit_origin': process['client_exit_origin'], 'run_id': run_id, 'client_sha256': binary_hash,
+            'reactivation_guard_state': guard_state, 'awaited_server_pdu': awaited_pdu,
             'immediate_or_final_server_size': list(final_size),
             'verified_observed_server_size': [observed['width'], observed['height']]}
 
@@ -223,7 +286,7 @@ def verify_matrix(root):
         hashes.add(case['client_sha256'])
         cases.append(dict(flush=pair[0], synchronous_dynamic_channels=pair[1], **case))
     require(len(hashes) == 1, 'client binary changed between controlled cases')
-    failed = sum(case['outcome'] == 'old interoperability failure reproduced' for case in cases)
+    failed = sum(case['reactivation_guard_state'] is not None for case in cases)
     return {'schema_version': 1, 'validated': True, 'server_variant': variant, 'cases': cases,
             'live_resize_positive_cases': len(cases) - failed, 'reactivation_failure_cases': failed,
             'meaning': 'Old-server compatibility characterization: proven successes and/or the exact '

@@ -20,12 +20,26 @@ INITIAL_LOG = ('[freerdp_connect_begin]: resetting error state\n'
                'CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP --> CONNECTION_STATE_ACTIVE\n'
                'DisplayControlCapsPdu: setting the window as resizable\n'
                '[rdp_client_connect_confirm_active]: new size 1280x720\n')
-FAILURE_LOG = ('[rdp_handle_sc_flags][0x1]: [CONNECTION_STATE_FINALIZATION_CLIENT_SYNC] unexpected server message, '
-               'expected flag FINALIZE_SC_SYNCHRONIZE_PDU [0x00000001] [have NO_FLAG_SET [0x00000000]]\n'
-               '[update_recv]: State CONNECTION_STATE_ACTIVE (or higher) requested, but '
-               'CONNECTION_STATE_FINALIZATION_CLIENT_SYNC found. Aborting.\n'
-               'DATA_PDU_TYPE_UPDATE - update_recv() failed\n'
-               'AutoReconnect not enabled, quitting.\n')
+def phase_failure_log(phase='SYNC', interleaved=False):
+    states = [verify.STATE_PREFIX + item[0] for item in verify.REACTIVATION_PHASES]
+    index = [item[0] for item in verify.REACTIVATION_PHASES].index(phase)
+    completed = '[12:00:00:100] [rdp_client_transition_to_state]: CONNECTION_STATE_FINALIZATION_FONT_LIST --> ' + states[0] + '\n'
+    for prior in range(index):
+        completed += ('[12:00:00:110] [rdp_finalize_set_flag]: [' + states[prior] + '] received flag ' +
+                      verify.REACTIVATION_PHASES[prior][1] + ' [0x1]\n')
+        completed += ('[12:00:00:110] [rdp_client_transition_to_state]: ' + states[prior] + ' --> ' + states[prior + 1] + '\n')
+    if index == 0:
+        completed += ('[12:00:00:120] [rdp_handle_sc_flags][0x1]: [' + states[0] + '] unexpected server message, '
+                      'expected flag FINALIZE_SC_SYNCHRONIZE_PDU [0x00000001] [have NO_FLAG_SET [0x00000000]]\n')
+    failure = ('[12:00:00:130] [update_recv]: State CONNECTION_STATE_ACTIVE (or higher) requested, but ' +
+               states[index] + ' found. Aborting.\n'
+               '[12:00:00:130] DATA_PDU_TYPE_UPDATE - update_recv() failed\n' +
+               '[12:00:00:130] [rdp_recv_callback_int]: ' + states[index] + ' status STATE_RUN_FAILED [-1]\n')
+    return (failure + completed if interleaved else completed + failure) + 'AutoReconnect not enabled, quitting.\n'
+
+
+FAILURE_LOG = phase_failure_log()
+OLD_SYNC_OUTCOME = 'old interoperability failure reproduced (CLIENT_SYNC)'
 
 
 def write_json(path, value):
@@ -102,9 +116,68 @@ class ReferenceEvidenceTest(unittest.TestCase):
 
     def test_old_is_named_incompatibility_not_resize_success(self):
         result = self.check()
-        self.assertEqual(result['outcome'], 'old interoperability failure reproduced')
+        self.assertEqual(result['outcome'], OLD_SYNC_OUTCOME)
         self.assertEqual(result['raw_case_exit'], 1)
         self.assertEqual(result['client_returncode'], 130)  # Not incorrectly forced to 1.
+
+    def test_only_source_enumerated_phases_have_explicit_outcomes(self):
+        for phase, awaited in verify.REACTIVATION_PHASES:
+            with self.subTest(phase=phase):
+                (self.root / 'client.log').write_text(INITIAL_LOG + phase_failure_log(phase))
+                result = self.check()
+                self.assertEqual(result['reactivation_guard_state'], verify.STATE_PREFIX + phase)
+                self.assertEqual(result['awaited_server_pdu'], awaited)
+                self.assertEqual(result['outcome'], 'old interoperability failure reproduced (CLIENT_' + phase + ')')
+
+    def test_merged_stream_order_uses_actual_record_timestamps(self):
+        log = INITIAL_LOG + phase_failure_log('FONT_MAP', interleaved=True)
+        log = log.replace('[12:00:00:130] [update_recv]',
+                          '[12:00:00:110] [DEBUG][[12:00:00:130] [update_recv]')
+        (self.root / 'client.log').write_text(log)
+        result = self.check()
+        self.assertEqual(result['awaited_server_pdu'], 'FINALIZE_SC_FONT_MAP_PDU')
+
+    def test_later_phase_requires_every_prior_flag_and_transition(self):
+        log = phase_failure_log('FONT_MAP')
+        records = [line for line in log.splitlines() if 'received flag' in line or ' --> ' in line]
+        for record in records:
+            with self.subTest(record=record):
+                (self.root / 'client.log').write_text(INITIAL_LOG + log.replace(record + '\n', ''))
+                with self.assertRaises(verify.InvalidEvidence):
+                    self.check()
+
+    def test_finalization_state_and_error_chain_mutations_rejected(self):
+        log = phase_failure_log('FONT_MAP')
+        later_flag = ('[12:00:00:120] [rdp_finalize_set_flag]: [CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP] '
+                      'received flag FINALIZE_SC_FONT_MAP_PDU [0x8]\n')
+        mutations = [
+            log.replace('CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP found.', 'CONNECTION_STATE_CAPABILITIES_EXCHANGE_CONFIRM_ACTIVE found.'),
+            log.replace('CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP found.', 'CONNECTION_STATE_FINALIZATION_FONT_LIST found.'),
+            log.replace('CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP found.', 'CONNECTION_STATE_FINALIZATION_CLIENT_UNKNOWN found.'),
+            log.replace('[update_recv]', '[unrelated_callback]'),
+            log.replace('DATA_PDU_TYPE_UPDATE - update_recv() failed', 'DATA_PDU_TYPE_POINTER failed'),
+            log.replace('status STATE_RUN_FAILED [-1]', 'status OTHER_FAILURE [-1]'),
+            log.replace('[12:00:00:110]', '[12:00:00:140]'),
+            log.replace('[12:00:00:110]', '[11:59:00:110]'),
+            log.replace('[12:00:00:110]', ''),
+            log.replace('[12:00:00:110] [rdp_finalize_set_flag]', '[12:00:00:115] [rdp_finalize_set_flag]', 1),
+            log + later_flag,
+            log + '--> CONNECTION_STATE_ACTIVE\n',
+            log + '[freerdp_connect_begin]: reset\n',
+            log + log,
+        ]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                (self.root / 'client.log').write_text(INITIAL_LOG + mutation)
+                with self.assertRaises(verify.InvalidEvidence):
+                    self.check()
+
+    def test_current_server_cannot_use_any_negative_phase(self):
+        for phase, _ in verify.REACTIVATION_PHASES:
+            with self.subTest(phase=phase):
+                (self.root / 'client.log').write_text(INITIAL_LOG + phase_failure_log(phase))
+                with self.assertRaises(verify.InvalidEvidence):
+                    self.check('upstream-0.10.6.1', 1)
 
     def test_current_strict_positive(self):
         make_case(self.root, 'upstream-0.10.6.1')
@@ -116,7 +189,7 @@ class ReferenceEvidenceTest(unittest.TestCase):
 
     def test_immediate_snapshot_preserved_while_fresh_observation_settles(self):
         self.change_data(lambda d: d.update(final_server=copy.deepcopy(d['initial_server'])))
-        self.assertEqual(self.check()['outcome'], 'old interoperability failure reproduced')
+        self.assertEqual(self.check()['outcome'], OLD_SYNC_OUTCOME)
         self.assertEqual(json.loads((self.root / 'result.json').read_text())['final_server']['width'], 1024)
 
     def test_unobserved_target_and_stale_or_unbounded_observation_rejected(self):
@@ -163,7 +236,7 @@ class ReferenceEvidenceTest(unittest.TestCase):
 
     def test_process_mutations_rejected(self):
         original = dict(self.process)
-        for values in ({'client_exit_origin': 'cleanup-signal'}, {'client_returncode': -15},
+        for values in ({'client_exit_origin': 'cleanup-signal'}, {'client_returncode': -15}, {'client_returncode': 0},
                        {'client_returncode': None}, {'checker_timed_out': True}, {'case_exit': 124},
                        {'wrapper_error': 'TimeoutExpired'}, {'run_id': str(uuid.uuid4())}):
             with self.subTest(values=values):

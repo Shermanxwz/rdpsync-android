@@ -143,9 +143,20 @@ resize. Those raw outcomes and immediate snapshots remain unchanged.
 Each original-server case is now classified separately: either **“old server live
 resize passed in this attempt”**, requiring exactly the same positive
 pixel/resize/input/liveness proof as the current server, or **“old interoperability
-failure reproduced”**. The latter must first receive exact initial pixels and DISP
+failure reproduced (CLIENT_…)”**, recording the exact guard state and awaited
+server PDU. The latter must first receive exact initial pixels and DISP
 capability, really resize the same X desktop UUID/PID, and then fail naturally with
-the precise `FINALIZATION_CLIENT_SYNC` / Synchronize / Update rejection. A separate
+the precise `update_recv` pre-ACTIVE UPDATE rejection and matching failure chain.
+Only the pinned FreeRDP source's server-receive reactivation phases
+`FINALIZATION_CLIENT_{SYNC,COOPERATE,GRANTED_CONTROL,FONT_MAP}` are enumerated.
+Each later phase requires every completed preceding server flag and state transition;
+timestamp ordering handles merged stdout/stderr without accepting later/stale flags.
+`CLIENT_SYNC` additionally retains its exact missing-SYNCHRONIZE warning requirement.
+No later ACTIVE transition or reconnect is permitted. The old FALSE/FALSE case in
+[run 41001680629](https://github.com/Shermanxwz/rdpsync-android/actions/runs/41001680629)
+received SYNCHRONIZE/COOPERATE/GRANTED_CONTROL and then failed while awaiting FONT_MAP;
+that is explicitly **not** labelled missing synchronization, and the original red
+run and raw artifacts remain unchanged. A separate
 bounded, timestamped read-only observation may capture fixture metadata settling
 after client exit; it does not retry the client, infer a resize, replace the original
 failure snapshot, or convert failure into successful display support.
