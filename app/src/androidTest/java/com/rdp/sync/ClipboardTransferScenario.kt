@@ -471,9 +471,19 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         tapDocumentLabel(child)
     }
     private fun documentBreadcrumbs(): List<String> {
-        val nodes = documentNodes { it.viewIdResourceName?.endsWith("/breadcrumb_text") == true }
+        // AOSP15 HorizontalBreadcrumb enables only the last title for styling.
+        // Read visible disabled ancestors too; all gesture lookups still demand
+        // enabled targets. The exact owned parent+destination guard is unchanged.
+        val nodes = documentNodes(requireEnabled = false) { it.viewIdResourceName?.endsWith("/breadcrumb_text") == true }
         return try {
-            nodes.sortedBy { Rect().also(it::getBoundsInScreen).left }.map { requireNotNull(it.text).toString() }
+            val ordered = nodes.sortedBy { Rect().also(it::getBoundsInScreen).left }
+            val observations = measurements.optJSONArray("tree_breadcrumb_observations") ?: JSONArray().also { measurements.put("tree_breadcrumb_observations", it) }
+            if (observations.length() < 64) observations.put(JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime())
+                .put("nodes", JSONArray().also { values -> ordered.forEach { node ->
+                    values.put(JSONObject().put("text", node.text).put("enabled", node.isEnabled)
+                        .put("bounds", Rect().also(node::getBoundsInScreen).toShortString()))
+                } }))
+            ordered.map { requireNotNull(it.text).toString() }
         } finally { nodes.forEach { it.recycle() } }
     }
 
@@ -538,7 +548,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         while (SystemClock.elapsedRealtime() < deadline && target == null) {
             compose.mainClock.advanceTimeBy(100)
             instrumentation.waitForIdleSync()
-            val candidates = documentNodes(predicate)
+            val candidates = documentNodes(predicate = predicate)
             if (candidates.size != 1) {
                 candidates.forEach { it.recycle() }; SystemClock.sleep(100); continue
             }
@@ -555,7 +565,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 // Wait for actual accessibility-event quiet, then requery the same
                 // live node. Never resend a gesture if navigation does not occur.
                 automation.waitForIdle(500, minOf(5_000, remaining))
-                val freshCandidates = documentNodes(predicate)
+                val freshCandidates = documentNodes(predicate = predicate)
                 if (freshCandidates.size == 1) {
                     val fresh = freshCandidates.single()
                     val after = Rect().also(fresh::getBoundsInScreen)
@@ -588,10 +598,10 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             screenshot("picker-${pickerEvents.length()}-after-single-gesture")
         } finally { node.recycle() }
     }
-    private fun documentNodes(predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
+    private fun documentNodes(requireEnabled: Boolean = true, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
         val found = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo) {
-            if (node.isVisibleToUser && node.isEnabled && predicate(node) && found.none { it == node }) found += AccessibilityNodeInfo.obtain(node)
+            if (node.isVisibleToUser && (!requireEnabled || node.isEnabled) && predicate(node) && found.none { it == node }) found += AccessibilityNodeInfo.obtain(node)
             for (i in 0 until node.childCount) node.getChild(i)?.let { child -> try { visit(child) } finally { child.recycle() } }
         }
         automation.windows.forEach { window ->

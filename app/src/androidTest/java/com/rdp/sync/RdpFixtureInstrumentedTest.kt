@@ -725,7 +725,28 @@ class RdpFixtureInstrumentedTest {
             var observedPolls = 0
             var changed = false
             val started = SystemClock.elapsedRealtime()
-            waitFor("IME preserves remote geometry across three actual display polls", 10_000) {
+            val composeStarted = compose.mainClock.currentTime
+            val iterations = JSONArray()
+            val clockEvidence = JSONObject().put("wall_start_ms", started).put("compose_start_ms", composeStarted)
+                .put("wall_budget_ms", 10_000).put("iterations", iterations)
+            measurements.put("ime_display_poll_clock", clockEvidence)
+            try { waitFor("IME preserves remote geometry across three actual display polls", 10_000) {
+                val elapsed = SystemClock.elapsedRealtime() - started
+                if (elapsed >= 10_000) return@waitFor false
+                val iteration = JSONObject().put("wall_start_ms", SystemClock.elapsedRealtime())
+                    .put("compose_before_ms", compose.mainClock.currentTime)
+                if (iterations.length() < 128) iterations.put(iteration)
+                // The production loop delays 1000ms on Compose's test clock.
+                // Fixed 100ms steps per expensive HTTP/UI observation can leave
+                // that clock behind wall time. Align only this observation to
+                // real elapsed time; never invoke updateDisplay or extend10s.
+                val target = composeStarted + elapsed
+                val advance = (target - compose.mainClock.currentTime).coerceAtLeast(0)
+                iteration.put("compose_target_ms", target).put("alignment_advance_ms", advance)
+                if (advance > 0) compose.mainClock.advanceTimeBy(advance)
+                instrumentation.waitForIdleSync()
+                iteration.put("compose_after_ms", compose.mainClock.currentTime)
+                try {
                 val state = fixtureState()
                 val status = RdpConnector.pollDisplayStatus()
                 val nativeGeneration = RdpConnector.nativeGetTelemetry()[11]
@@ -740,12 +761,19 @@ class RdpFixtureInstrumentedTest {
                     previousStatus = status
                     observedPolls++
                     observations.put(JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime() - started)
+                        .put("compose_ms", compose.mainClock.currentTime)
                         .put("client_width", RdpConnector.getWidth()).put("client_height", RdpConnector.getHeight())
                         .put("server_width", state.getInt("width")).put("server_height", state.getInt("height"))
                         .put("native_generation", nativeGeneration).put("requested", status.requested?.toString())
                         .put("ever_changed", changed))
                 }
-                observedPolls >= 3 && SystemClock.elapsedRealtime() - started >= 2_000
+                iteration.put("fresh_polls", observedPolls).put("ever_changed", changed)
+                val observedElapsed = SystemClock.elapsedRealtime() - started
+                observedPolls >= 3 && observedElapsed in 2_000..10_000
+                } finally { iteration.put("wall_end_ms", SystemClock.elapsedRealtime()).put("compose_end_ms", compose.mainClock.currentTime) }
+            } } finally {
+                clockEvidence.put("wall_end_ms", SystemClock.elapsedRealtime()).put("compose_end_ms", compose.mainClock.currentTime)
+                    .put("fresh_polls", observedPolls).put("ever_changed", changed)
             }
             assertFalse("IME must not resize/reconnect the remote session, even transiently: $observations", changed)
             assertColor(40, 40, Color.RED)
