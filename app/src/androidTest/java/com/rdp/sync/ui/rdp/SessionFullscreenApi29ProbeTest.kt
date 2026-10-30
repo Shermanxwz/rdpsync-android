@@ -382,6 +382,22 @@ class SessionFullscreenApi29ProbeTest {
             }
         } finally { automation.serviceInfo = automation.serviceInfo.apply { flags = previousFlags } }
         assertUniqueKeyboardControl()
+        // A real edge gesture also reaches this local EditText, which may open its
+        // own keyboard on UP. That is probe-editor behavior, not a request for the
+        // production layout to dismiss IME. Restore the next rotation's explicit
+        // non-IME precondition with one hide request, never a readiness waiver.
+        evidence.put("ime_before_explicit_hide", geometry())
+        phase = "portrait-edge-hide-request"
+        compose.runOnUiThread {
+            val view = requireNotNull(editor)
+            evidence.put("explicit_hide_request_accepted", imm(view).hideSoftInputFromWindow(view.windowToken, 0))
+        }
+        awaitFullGeometry("portrait-after-edge-ime-hide", landscape = false)
+        val restored = geometry()
+        assertEquals("Edge IME hide must restore actual local width", baseline.getInt("view_width"), restored.getInt("view_width"))
+        assertEquals("Edge IME hide must restore actual local height", baseline.getInt("view_height"), restored.getInt("view_height"))
+        evidence.put("after_explicit_hide", restored)
+        screenshot("portrait-edge-after-explicit-ime-hide")
         val callbacks = synchronized(logicalCallbacks) { JSONArray(logicalCallbacks.toString()) }
         for (i in callbackStart until callbacks.length()) {
             val callback = callbacks.getJSONObject(i)

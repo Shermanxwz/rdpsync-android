@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Independent pinned upstream GFX decoder pixel characterization, not tolerance."""
+"""Pinned upstream decoder: source-bounded GNOME46 codec9 flat-patch evidence."""
 import hashlib
 import json
 import os
@@ -9,13 +9,14 @@ import sys
 import time
 import urllib.request
 from PIL import Image
+from calibrate_pixels import source_matches
 
 ROOT=Path(__file__).resolve().parents[3]
 OUT=ROOT/'build/gnome-evidence/gfx-reference'
 OUT.mkdir(parents=True,exist_ok=True)
 CLIENT=(ROOT/'build/reference-freerdp/client-path.txt').read_text().strip()
 PIN=(ROOT/'build/gnome-evidence/certificate-sha256.txt').read_text().strip()
-result={'scope':'Unmodified same-version software Progressive decoder raw-pixel oracle; not relaxed Android RGB acceptance',
+result={'scope':'Unmodified software Progressive decoder; empirical source RGB bound 2/channel for GNOME46 synthetic flat patches only',
         'client_sha256':hashlib.sha256(Path(CLIENT).read_bytes()).hexdigest(), 'frames':[], 'success':False}
 args=[CLIENT,'/v:127.0.0.1:33891','/u:rdpfixture','/p:rdpsync-fixture-only',f'/cert:fingerprint:sha256:{PIN}',
       '/sec:nla','/size:1024x768','/bpp:32','/gdi:sw','/gfx:progressive','/dynamic-resolution',
@@ -61,11 +62,9 @@ try:
     initial=wait(initial_ready)
     def painted():
         f=capture(window,'initial')
-        # No numeric error allowance is selected here. Characterize only once the
-        # three independently colored source blocks are actually visible.
-        rgb=[x['rgb'] for x in f['samples'][:3]]
-        return f if all(v[i]>max(v[j] for j in range(3) if j!=i) for i,v in enumerate(rgb)) else None
+        return f if all(source_matches(x['source_rgb'],x['rgb']) for x in f['samples']) else None
     assert initial['text']=='', 'Oracle requires a pristine synthetic text state'
+    assert initial['clicks']==0, 'Oracle requires a pristine synthetic pointer state'
     first=wait(painted)
     result['frames'].append(first);result['initial_server']=initial
     subprocess.run(['xdotool','mousemove','--window',window,'400','300','click','1'],check=True,timeout=5)
@@ -76,7 +75,7 @@ try:
     old=first['samples'][4]['rgb']
     def response_painted():
         f=capture(window,'after-click')
-        return f if f['samples'][4]['rgb']!=old else None
+        return f if f['samples'][4]['rgb']!=old and all(source_matches(x['source_rgb'],x['rgb']) for x in f['samples']) else None
     second=wait(response_painted)
     result['frames'].append(second);result['after_click_server']=after
     assert (after['session_id'],after['desktop_pid'])==(initial['session_id'],initial['desktop_pid'])
@@ -89,7 +88,7 @@ try:
         wait(lambda: state()['text']==expected_text)
         def text_painted():
             f=capture(window,name)
-            return f if f['samples'][3]['rgb']!=old_text_rgb else None
+            return f if f['samples'][3]['rgb']!=old_text_rgb and all(source_matches(x['source_rgb'],x['rgb']) for x in f['samples']) else None
         result['frames'].append(wait(text_painted))
     mode=(ROOT/'build/gnome-evidence/mode.txt').read_text().strip()
     if mode=='headless-extend':
@@ -97,7 +96,10 @@ try:
         wait(lambda: state()['width']==1280 and state()['height']==720)
         def resized_painted():
             f=capture(window,'resized',1280,720)
-            return f if all(f['samples'][i]['rgb']==first['samples'][i]['rgb'] for i in range(3)) and f['samples'][-1]['rgb']==first['samples'][-1]['rgb'] else None
+            # Re-encoded static tiles need not equal the first lossy decode.
+            # All six fixed source regions (including genuinely new x=1200)
+            # must independently stay inside the empirical source bound.
+            return f if all(source_matches(x['source_rgb'],x['rgb']) for x in f['samples']) else None
         result['frames'].append(wait(resized_painted))
     assert p.poll() is None, 'Official client exited after final paint'
     result['client_alive_after_actual_input_and_frame']=True

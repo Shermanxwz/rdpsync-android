@@ -222,17 +222,24 @@ remains covered by the separate mandatory full xrdp UI scenario. Software
 progressive graphics is not H264 or hardware decoding. No GNOME pass is claimed
 until actual runtime artifacts have been inspected.
 
-The GNOME Progressive gate now uses a **same-run reference-decoder calibration**,
-not ideal-source RGB equality or a global tolerance. The official pinned GFX
-client must deliver real frames/input, every source probe color (including all
-three text markers), and headless DISP resize. Finalized logs must identify
-codec 9 after the owned process is joined, avoiding stdout-buffer races. Linked
-ELF hashes, source/build configuration, PNG hashes and sampled pixels bind the
-calibration. Repeated uniform patches must be stable and source deviation must
-stay within the independently observed two-level-per-channel bound; missing colors,
-wrong codec/source, tampered PNGs and inconsistent samples fail closed. Android
-then compares **exactly** to those reference values, recording source, reference
-and actual RGB. Existing classic/native exact-color and alpha gates are unchanged.
+The GNOME46 **codec9 synthetic flat-patch** gate uses an empirical bound of
+**at most 2 per RGB channel from intended source color**, independently for the
+same-run official decoder and Android. It is not a universal codec guarantee:
+GNOME46 emits lossy RFX `TILE_SIMPLE` under codec9, and actual unchanged patches
+varied between phases (for example green253→255); an exact first-frame mapping
+was disproven. The temporal cause is not established from decoded images alone.
+No FIRST/UPGRADE refinement claim is made.
+
+The pinned official GFX client must still deliver every fixed spatial probe and
+source color (all three text markers), actual input and headless DISP resize.
+Finalized logs must identify codec9 after the owned process is joined. Schema2
+retains every phase's raw samples, PNG hashes, source/build and linked-ELF
+provenance, including legitimate within-bound repeated-color variation. Missing
+phases/colors, wrong regions/channels/codec/source, out-of-bound pixels, tampered
+PNGs and inconsistent sample claims fail closed. Android requires actual decoded
+codec9 commands and compares to **source**, not to shifted reference plus another
+allowance; source/reference-phase/actual RGB are retained. Existing classic/native
+exact-color and alpha gates, input/resize/session gates and deadlines are unchanged.
 
 ### Explicit files-only transfer gate
 

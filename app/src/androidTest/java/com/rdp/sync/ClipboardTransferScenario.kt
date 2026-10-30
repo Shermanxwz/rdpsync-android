@@ -36,6 +36,8 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Socket
 import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Shared strict SAF/CLIPRDR scenario; each concrete class uses a real, fixed peer. */
 abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer) {
@@ -290,7 +292,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         }
     }
     private fun seedOwnedDocuments() {
-        check(Build.VERSION.SDK_INT >= 31) { "The isolated API35 SAF fixture uses shell stdin pipes" }
+        check(Build.VERSION.SDK_INT >= 34) { "The isolated API35 SAF fixture records shell stdout/stderr" }
         require(folder.matches(Regex("rdpsync-transfer-[0-9]+")))
         val entries = JSONArray()
         measurements.put("synthetic_seed_media_store", entries)
@@ -300,24 +302,20 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             require(name in samples("android").keys || name == "server-binary.bin")
             val relative = "Download/$folder/$child/"
             File(local, if (child == "destination") "sentinel.bin" else name).writeBytes(bytes)
-            // AOSP15 cmds/content attributes these operations to com.android.shell.
-            // Publish real Downloads metadata, not an eventually indexed shell copy.
-            shell("content insert --uri content://media/external_primary/downloads --bind relative_path:s:$relative --bind _display_name:s:$name --bind mime_type:s:application/octet-stream --bind is_pending:i:1")
-            val query = shell("content query --uri content://media/external_primary/downloads --projection _id:_display_name:relative_path:owner_package_name:is_pending --where relative_path='$relative'")
+            // AOSP15 MediaProvider lets shell explicitly assign its own owner.
+            // Pending collection rows are excluded by default, including for
+            // shell: includePending is needed only to capture our new owned ID.
+            seedShell("content insert --uri content://media/external_primary/downloads --bind relative_path:s:$relative --bind _display_name:s:$name --bind mime_type:s:application/octet-stream --bind owner_package_name:s:com.android.shell --bind is_pending:i:1")
+            val query = seedShell("content query --uri content://media/external_primary/downloads?includePending=1 --projection _id:_display_name:relative_path:owner_package_name:is_pending --where relative_path='$relative'")
             val row = query.lineSequence().single { it.contains("_display_name=$name,") }
             val id = requireNotNull(Regex("(?:^|[ ,])_id=([0-9]+)(?:,|$)").find(row)).groupValues[1]
             val uri = "content://media/external_primary/downloads/$id"
             seededMediaUris[uri] = relative to name
             assertTrue("Fixture seed must belong to shell, not the app under test", row.contains("owner_package_name=com.android.shell"))
             assertTrue(row.contains("is_pending=1"))
-            val pipes = automation.executeShellCommandRw("content write --uri $uri")
-            try {
-                ParcelFileDescriptor.AutoCloseOutputStream(pipes[1]).use { it.write(bytes) }
-                val output = ParcelFileDescriptor.AutoCloseInputStream(pipes[0]).bufferedReader().use { it.readText() }
-                assertTrue("Synthetic shell content write failed: $output", output.isBlank())
-            } finally { pipes.forEach { runCatching { it.close() } } }
-            shell("content update --uri $uri --bind is_pending:i:0")
-            val published = shell("content query --uri $uri --projection _display_name:relative_path:owner_package_name:is_pending:_size")
+            assertTrue("Synthetic shell content write must complete cleanly", seedShell("content write --uri $uri", bytes).isBlank())
+            seedShell("content update --uri $uri --bind is_pending:i:0")
+            val published = seedShell("content query --uri $uri --projection _display_name:relative_path:owner_package_name:is_pending:_size")
             assertTrue(published.contains("_display_name=$name,"))
             assertTrue(published.contains("relative_path=$relative,"))
             assertTrue(published.contains("owner_package_name=com.android.shell"))
@@ -339,19 +337,61 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         assertEquals(sha256("Original destination must remain unchanged\n".toByteArray()), directoryHashes("destination").getValue("server-binary.bin"))
     }
 
+    /** Only synthetic seed commands; retain BOTH streams before parsing any row. */
+    private fun seedShell(command: String, input: ByteArray? = null): String {
+        require(command.startsWith("content ") && command.contains("--uri content://media/external_primary/downloads"))
+        val records = measurements.optJSONArray("synthetic_seed_shell") ?: JSONArray().also { measurements.put("synthetic_seed_shell", it) }
+        check(records.length() < 64)
+        val record = JSONObject().put("command", command).put("started_elapsed_ms", SystemClock.elapsedRealtime())
+            .put("stdin_bytes", input?.size ?: 0)
+        records.put(record)
+        val pipes = automation.executeShellCommandRwe(command)
+        val workers = Executors.newFixedThreadPool(3)
+        fun readBounded(index: Int): String = ParcelFileDescriptor.AutoCloseInputStream(pipes[index]).bufferedReader().use { reader ->
+            val out = StringBuilder(); val buffer = CharArray(1024)
+            while (true) {
+                val n = reader.read(buffer)
+                if (n < 0) break
+                check(out.length + n <= 8192) { "Synthetic command output exceeded evidence bound" }
+                out.append(buffer, 0, n)
+            }
+            out.toString()
+        }
+        val stdout = workers.submit<String> { readBounded(0) }
+        val stderr = workers.submit<String> { readBounded(2) }
+        val stdin = workers.submit { ParcelFileDescriptor.AutoCloseOutputStream(pipes[1]).use { stream -> input?.let(stream::write) } }
+        val deadline = SystemClock.elapsedRealtime() + 20_000
+        fun remaining() = (deadline-SystemClock.elapsedRealtime()).coerceAtLeast(0)
+        try {
+            stdin.get(remaining(), TimeUnit.MILLISECONDS)
+            val out = stdout.get(remaining(), TimeUnit.MILLISECONDS)
+            record.put("stdout", out)
+            val err = stderr.get(remaining(), TimeUnit.MILLISECONDS)
+            record.put("stderr", err).put("completed_elapsed_ms", SystemClock.elapsedRealtime())
+            assertTrue("Synthetic MediaStore command failed: $err", err.isBlank())
+            return out.trim()
+        } catch (failure: Throwable) {
+            record.put("failure", failure.javaClass.name)
+            throw failure
+        } finally {
+            pipes.forEach { runCatching { it.close() } }
+            workers.shutdownNow()
+        }
+    }
+
     private fun cleanOwnedMediaSeeds(): JSONArray = JSONArray().also { results ->
         seededMediaUris.forEach { (uri, expected) ->
             require(uri.matches(Regex("content://media/external_primary/downloads/[0-9]+")))
             val item = JSONObject().put("uri", uri)
             results.put(item)
             try {
-                val current = shell("content query --uri $uri --projection _display_name:relative_path:owner_package_name")
+                val current = seedShell("content query --uri $uri --projection _display_name:relative_path:owner_package_name")
                 require(current.lineSequence().count { it.startsWith("Row:") } == 1)
                 require(current.contains("_display_name=${expected.second},") &&
                     current.contains("relative_path=${expected.first},") && current.contains("owner_package_name=com.android.shell"))
                 item.put("verified_owned_path", expected.first).put("verified_owned_name", expected.second)
-                shell("content delete --uri $uri")
-                val remaining = shell("content query --uri $uri --projection _id")
+                seedShell("content delete --uri $uri")
+                val remaining = seedShell("content query --uri $uri --projection _id")
                 item.put("removed", remaining.trim() == "No result found.")
             } catch (failure: Exception) { item.put("removed", false).put("error", failure.javaClass.simpleName) }
         }
