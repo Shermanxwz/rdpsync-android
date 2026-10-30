@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.PopupProperties
 import com.rdp.sync.data.Device
 import com.rdp.sync.display.DisplayQuality
 import com.rdp.sync.display.ResolutionMode
@@ -234,7 +235,12 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     }
 
     SessionViewportLayout(
-        onLogicalViewport = { if (it.width > 0 && it.height > 0) viewportSize = it },
+        onLogicalViewport = {
+            if (it.width > 0 && it.height > 0) {
+                viewportSize = it
+                desktopView?.setLogicalViewport(it.width, it.height)
+            }
+        },
         header = {
             if (!compactLandscape) TopAppBar(
                 windowInsets = WindowInsets(0, 0, 0, 0),
@@ -251,8 +257,12 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             Box(Modifier.fillMaxSize().background(Color(0xFF020617)), contentAlignment = Alignment.Center) {
                 if (isConnected) {
                     AndroidView(
-                        factory = { RdpDesktopView(it, input).also { view -> desktopView = view; view.setPointerMode(pointerMode) } },
-                        update = { it.setPointerMode(pointerMode) },
+                        factory = { RdpDesktopView(it, input).also { view ->
+                            desktopView = view
+                            view.setPointerMode(pointerMode)
+                            view.setLogicalViewport(viewportSize.width, viewportSize.height)
+                        } },
+                        update = { it.setPointerMode(pointerMode); it.setLogicalViewport(viewportSize.width, viewportSize.height) },
                         modifier = Modifier.fillMaxSize()
                     )
                 } else Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -319,7 +329,10 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 }
             }
         },
-        keyboardShortcuts = { Surface(tonalElevation = 6.dp) { SessionKeyboardShortcuts(input) } }
+        imeControls = {
+            SessionImeControls(input, imeVisible, onHideKeyboard = { desktopView?.hideKeyboard() },
+                onSettings = { showSettings = true }, onExit = ::exitSession)
+        }
     )
     pendingTrust?.let { pending ->
         CertificateTrustDialog(pending, savingTrust, trustError, onCancel = ::dismissCertificate, onTrust = {
@@ -362,15 +375,37 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
 
 
 @Composable
-private fun SessionKeyboardShortcuts(input: RdpInputDispatcher) {
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-        TextButton(onClick = { input.enqueueKeyStroke(0x01) }) { Text("Esc") }
-        TextButton(onClick = { input.enqueueKeyStroke(0x0F) }) { Text("Tab") }
-        TextButton(onClick = { input.enqueueShortcut(0x1D, 0x2E) }) { Text("Ctrl+C") }
-        TextButton(onClick = { input.enqueueShortcut(0x1D, 0x2F) }) { Text("Ctrl+V") }
-        TextButton(onClick = { input.enqueueShortcut(0x1D, 0x38, 0xE053) }) { Text("Ctrl+Alt+Del") }
+private fun SessionImeControls(input: RdpInputDispatcher, visible: Boolean, onHideKeyboard: () -> Unit,
+                               onSettings: () -> Unit, onExit: () -> Unit) {
+    var showTools by remember { mutableStateOf(false) }
+    LaunchedEffect(visible) { if (!visible) showTools = false }
+    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+        tonalElevation = 6.dp, shadowElevation = 4.dp) {
+        // Only these three 48dp buttons occupy the cropped desktop. Keyboard shortcuts
+        // remain accessible in the popup instead of consuming a permanent extra row.
+        Row(Modifier.padding(4.dp)) {
+            IconButton(onClick = { showTools = false; onHideKeyboard() }, modifier = Modifier.size(48.dp)) {
+                Icon(Icons.Default.Keyboard, "显示或隐藏键盘")
+            }
+            Box {
+                IconButton(onClick = { showTools = true }, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Settings, "会话工具")
+                }
+                DropdownMenu(expanded = showTools, onDismissRequest = { showTools = false },
+                    properties = PopupProperties(focusable = false)) {
+                    DropdownMenuItem(text = { Text("显示与网络设置") }, onClick = { showTools = false; onSettings() })
+                    DropdownMenuItem(text = { Text("Esc") }, onClick = { showTools = false; input.enqueueKeyStroke(0x01) })
+                    DropdownMenuItem(text = { Text("Tab") }, onClick = { showTools = false; input.enqueueKeyStroke(0x0F) })
+                    DropdownMenuItem(text = { Text("Ctrl+C") }, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2E) })
+                    DropdownMenuItem(text = { Text("Ctrl+V") }, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2F) })
+                    DropdownMenuItem(text = { Text("Ctrl+Alt+Del") }, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x38, 0xE053) })
+                }
+            }
+            IconButton(onClick = onExit, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "断开") }
+        }
     }
 }
+
 
 @Composable
 private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Device, sessionInfo: String, adaptiveInfo: String, inputWarning: String,

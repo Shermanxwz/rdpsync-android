@@ -37,6 +37,9 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 2f * resources.displayMetrics.density }
     private var bitmap: Bitmap? = null
+    private var logicalViewportWidth = 0
+    private var logicalViewportHeight = 0
+    private var lastInputTarget: ViewportTransform.Point? = null
     private val framePacer = FramePacer()
     private var pendingCopyNanos = 0L
     private var pendingFrame = false
@@ -78,6 +81,17 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         invalidate()
     }
     fun resetZoom() { viewport.reset(); invalidate() }
+    /** Use the non-IME layout for fit; a smaller local View crops instead of shrinking text. */
+    fun setLogicalViewport(width: Int, height: Int) {
+        if (width <= 0 || height <= 0 || (width == logicalViewportWidth && height == logicalViewportHeight)) return
+        logicalViewportWidth = width
+        logicalViewportHeight = height
+        cancelGesture()
+        updateViewport(keepInputTargetVisible = true)
+        invalidate()
+    }
+    /** Read on the UI thread; exactly the geometry used for drawing and input mapping. */
+    fun viewportSnapshot(): ViewportTransform.Snapshot = viewport.snapshot()
     fun showKeyboard() {
         requestFocus()
         (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
@@ -104,11 +118,16 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         cancelGesture()
-        updateViewport()
+        updateViewport(keepInputTargetVisible = true)
     }
-    private fun updateViewport() {
+    private fun updateViewport(keepInputTargetVisible: Boolean = false) {
         val frame = bitmap ?: return
-        viewport.update(width, height, frame.width, frame.height)
+        val fitWidth = logicalViewportWidth.takeIf { it > 0 } ?: width
+        val fitHeight = logicalViewportHeight.takeIf { it > 0 } ?: height
+        viewport.update(width, height, frame.width, frame.height, fitWidth, fitHeight)
+        if (keepInputTargetVisible && (height < fitHeight || width < fitWidth)) {
+            lastInputTarget?.let { viewport.ensureVisible(it, 16f * resources.displayMetrics.density) }
+        }
         cursorX = cursorX.coerceIn(0f, (frame.width - 1).toFloat())
         cursorY = cursorY.coerceIn(0f, (frame.height - 1).toFloat())
     }
@@ -125,6 +144,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                 if (previous != null && (previous.width != frame.bitmap.width || previous.height != frame.bitmap.height)) {
                     cancelGesture()
                     viewport.reset()
+                    lastInputTarget = null
                 }
                 bitmap = frame.bitmap
                 updateViewport()
@@ -192,6 +212,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                             }
                             cursorX = (cursorX + (x - lastX) / viewport.scale).coerceIn(0f, (viewport.remoteWidth - 1).toFloat())
                             cursorY = (cursorY + (y - lastY) / viewport.scale).coerceIn(0f, (viewport.remoteHeight - 1).toFloat())
+                            lastInputTarget = ViewportTransform.Point(cursorX, cursorY)
                             input.enqueuePointerMove(cursorX.toInt(), cursorY.toInt())
                             invalidate()
                         } else viewport.toRemote(x, y, clamp = true)?.let { direct(event, 1, it, index) }
@@ -209,6 +230,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
             MotionEvent.ACTION_UP -> {
                 if (activeTouch && !multiGesture) {
                     if (pointerMode) {
+                        lastInputTarget = ViewportTransform.Point(cursorX, cursorY)
                         if (mouseDragging) input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, false)
                         else if (!moved) input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), if (event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout()) 2 else 1)
                     } else viewport.toRemote(event.x, event.y, clamp = true)?.let { direct(event, 2, it, 0) }
@@ -223,6 +245,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
     }
     override fun performClick(): Boolean { super.performClick(); return true }
     private fun direct(event: MotionEvent, type: Int, point: ViewportTransform.Point, index: Int) {
+        if (type != 3) lastInputTarget = point
         input.enqueueDirectTouch(primaryId, type, point.x.toInt(), point.y.toInt(), event.getX(index), event.getY(index), event.eventTime, touchSlop)
     }
     private fun updateMultiOrigin(event: MotionEvent) {
@@ -249,6 +272,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         val remote = viewport.toRemote(event.x, event.y, clamp = mouseButtons != 0) ?: return true
         requestFocus()
         cursorX = remote.x; cursorY = remote.y
+        if (event.actionMasked != MotionEvent.ACTION_CANCEL) lastInputTarget = remote
         input.enqueuePointerMove(remote.x.toInt(), remote.y.toInt())
         val current = if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) 0 else event.buttonState
         listOf(MotionEvent.BUTTON_PRIMARY to 1, MotionEvent.BUTTON_SECONDARY to 2, MotionEvent.BUTTON_TERTIARY to 3).forEach { (mask, button) ->

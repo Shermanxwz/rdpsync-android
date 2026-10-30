@@ -51,6 +51,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libssl-dev
           bash scripts/test-native.sh
+          python3 scripts/test-native-notices.py
+          python3 scripts/collect-native-notices.py --check
       - name: Unit tests, lint, and side-by-side preview APK
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Verify JNI exports, dependency closure, signature and 16 KiB alignment

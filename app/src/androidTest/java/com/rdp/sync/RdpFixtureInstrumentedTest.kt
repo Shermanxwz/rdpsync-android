@@ -1,15 +1,19 @@
 package com.rdp.sync
 
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Rect
 import android.os.SystemClock
 import android.os.ParcelFileDescriptor
 import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
+import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
 import android.view.inputmethod.EditorInfo
 import androidx.activity.compose.setContent
 import com.rdp.sync.ui.MainActivity
@@ -24,6 +28,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.ui.rdp.RdpDesktopView
+import com.rdp.sync.ui.rdp.ViewportTransform
 import com.rdp.sync.ui.screens.RdpConnectionScreen
 import org.json.JSONArray
 import org.json.JSONObject
@@ -34,7 +39,8 @@ import org.junit.runner.RunWith
 import java.io.File
 import java.net.Socket
 import java.net.InetSocketAddress
-import kotlin.math.min
+import kotlin.math.abs
+import kotlin.math.max
 
 /** Real xrdp/Xorg server on a disposable runner; no mocks stand in for pixels or input. */
 @RunWith(AndroidJUnit4::class)
@@ -348,14 +354,15 @@ class RdpFixtureInstrumentedTest {
             val rootLocation = IntArray(2)
             view.getLocationOnScreen(location)
             view.rootView.getLocationOnScreen(rootLocation)
-            val safe = requireNotNull(ViewCompat.getRootWindowInsets(view)).getInsets(
-                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            val insets = requireNotNull(ViewCompat.getRootWindowInsets(view))
+            val safe = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             result.put("left", location[0]).put("top", location[1])
                 .put("width", view.width).put("height", view.height)
                 .put("window_left", rootLocation[0]).put("window_top", rootLocation[1])
                 .put("window_width", view.rootView.width).put("window_height", view.rootView.height)
                 .put("safe_left", safe.left).put("safe_top", safe.top)
                 .put("safe_right", safe.right).put("safe_bottom", safe.bottom)
+                .put("ime_bottom", insets.getInsets(WindowInsetsCompat.Type.ime()).bottom)
                 .put("height_fraction_of_window", view.height.toDouble() / view.rootView.height.coerceAtLeast(1))
         }
         return result
@@ -376,8 +383,13 @@ class RdpFixtureInstrumentedTest {
         val previousImeSetting = shellOutput("settings get secure show_ime_with_hard_keyboard").trim()
         require(previousImeSetting in setOf("0", "1", "null"))
         try {
+            // Establish a real recent input target near the probes before local IME cropping.
+            tapAndObserve(remoteX = 400f, remoteY = 40f)
+            val beforeViewport = viewportSnapshot()
+            val beforePatchSpan = observedPatchSpan(40, 40, Color.RED)
+            measurements.put("ime_pre_scale", beforeViewport.scale).put("ime_pre_red_patch_span_px", beforePatchSpan)
             shellOutput("settings put secure show_ime_with_hard_keyboard 1")
-            compose.onNodeWithContentDescription("显示或隐藏键盘").performClick()
+            tapAccessibleControl("显示或隐藏键盘")
             waitFor("software IME visible and local desktop viewport reduced") {
                 imeVisible() && desktopBounds().getInt("height") < fullViewHeight
             }
@@ -412,11 +424,54 @@ class RdpFixtureInstrumentedTest {
             }
             assertFalse("IME must not resize/reconnect the remote session, even transiently: $observations", changed)
             assertColor(40, 40, Color.RED)
+            val imeViewport = viewportSnapshot()
+            val imeBounds = desktopBounds()
+            val availableHeight = imeBounds.getInt("window_height") - imeBounds.getInt("safe_top") -
+                max(imeBounds.getInt("safe_bottom"), imeBounds.getInt("ime_bottom"))
+            assertTrue("IME must leave a usable unobscured area: $imeBounds", availableHeight > 0)
+            assertTrue("Typing chrome must not consume the remaining desktop area: $imeBounds",
+                imeBounds.getInt("height").toDouble() / availableHeight >= 0.90)
+            assertEquals("IME crop must preserve the pre-IME fit/zoom scale", beforeViewport.scale, imeViewport.scale, 0.000001f)
+            val imePatchSpan = observedPatchSpan(40, 40, Color.RED)
+            assertTrue("Actual received patch must retain readable pixel scale, not just report it",
+                abs(imePatchSpan - beforePatchSpan) <= 2)
+            measurements.put("ime_readable_scale", imeViewport.scale).put("ime_red_patch_span_px", imePatchSpan)
+                .put("ime_unobscured_height_px", availableHeight)
+                .put("ime_desktop_fraction_of_unobscured_area", imeBounds.getInt("height").toDouble() / availableHeight)
+            listOf("显示或隐藏键盘", "会话工具", "断开").forEach { label ->
+                val control = hasContentDescription(label) and hasClickAction()
+                compose.onAllNodes(control).assertCountEquals(1)
+                compose.onNode(control).assertIsDisplayed()
+            }
+            val clicksBeforeTools = fixtureState().getInt("clicks")
+            tapAccessibleControl("会话工具")
+            listOf("Esc", "Tab", "Ctrl+C", "Ctrl+V", "Ctrl+Alt+Del", "显示与网络设置").forEach { label ->
+                compose.onNodeWithText(label).performScrollTo().assertIsDisplayed()
+            }
+            val escapeBefore = fixtureState().getJSONArray("keys").toString()
+            compose.onNodeWithText("Esc").performScrollTo().assertIsDisplayed()
+            tapObservedAppPopupItem("Esc")
+            waitFor("IME tools shortcut reaches server and popup restores desktop focus") {
+                imeVisible() && fixtureState().getJSONArray("keys").toString() != escapeBefore &&
+                    fixtureState().getJSONArray("keys").toString().contains("Escape") &&
+                    desktopHasWindowFocus()
+            }
+            assertEquals("Overlay/tools touches must not leak pointer clicks to the desktop", clicksBeforeTools, fixtureState().getInt("clicks"))
+            tapAndObserve(remoteX = 400f, remoteY = 40f)
+            assertTrue("Direct touch must not dismiss the software keyboard", imeVisible())
+            exerciseActualSoftwareKeyboard()
+            assertTrue(actualSize(width, height) && fixtureSize(width, height))
+            assertEquals(generation, RdpConnector.nativeGetTelemetry()[11])
+            assertEquals(sessionId, fixtureState().getString("session_id"))
+            assertEquals(desktopPid, fixtureState().getInt("desktop_pid"))
+            measurements.put("ime_tools_touch_and_software_typing_passed", true)
             screenshot("04d-landscape-ime-visible")
-            compose.onNodeWithContentDescription("显示或隐藏键盘").performClick()
+            val clicksBeforeHide = fixtureState().getInt("clicks")
+            tapAccessibleControl("显示或隐藏键盘")
             waitFor("IME hidden and compact local viewport restored") {
                 !imeVisible() && desktopBounds().getInt("height") == fullViewHeight
             }
+            assertEquals("Overlay hide touch must not leak to the desktop", clicksBeforeHide, fixtureState().getInt("clicks"))
             assertTrue(actualSize(width, height))
             assertTrue(fixtureSize(width, height))
             assertEquals(generation, RdpConnector.nativeGetTelemetry()[11])
@@ -432,7 +487,7 @@ class RdpFixtureInstrumentedTest {
         }
     }
 
-    private fun tapAndObserve(timeout: Long = 10_000): Long {
+    private fun tapAndObserve(timeout: Long = 10_000, remoteX: Float = 400f, remoteY: Float = 300f): Long {
         val attempt = JSONObject()
         val attempts = measurements.optJSONArray("touch_attempts") ?: JSONArray().also { measurements.put("touch_attempts", it) }
         attempts.put(attempt)
@@ -462,31 +517,213 @@ class RdpFixtureInstrumentedTest {
             painted
         }
         val before = fixtureState().getInt("clicks")
-        val position = IntArray(2)
-        var x = 0f; var y = 0f
-        compose.runOnUiThread {
-            val view = desktop()
-            view.getLocationOnScreen(position)
-            val fit = min(view.width.toFloat() / RdpConnector.getWidth(), view.height.toFloat() / RdpConnector.getHeight())
-            x = position[0] + (view.width - RdpConnector.getWidth() * fit) / 2 + 400 * fit
-            y = position[1] + (view.height - RdpConnector.getHeight() * fit) / 2 + 300 * fit
-        }
-        attempt.put("screen_x", x).put("screen_y", y).put("server_clicks_before", before)
+        val point = requireNotNull(remoteScreenPoint(remoteX, remoteY)) { "Touch target is outside the actual cropped viewport" }
+        attempt.put("screen_x", point.x).put("screen_y", point.y).put("remote_x", remoteX).put("remote_y", remoteY)
+            .put("server_clicks_before", before)
         val start = SystemClock.elapsedRealtime()
-        val downTime = SystemClock.uptimeMillis()
-        listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEach { action ->
-            val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0).apply { source = InputDevice.SOURCE_TOUCHSCREEN }
-            instrumentation.sendPointerSync(event)
-            event.recycle()
-            if (action == MotionEvent.ACTION_DOWN) SystemClock.sleep(40)
-        }
+        injectSingleTap(point.x, point.y)
         waitFor("Android touch reaches server and returns painted response", timeout) {
-            fixtureState().getInt("clicks") > before && colorAt(40, 140)?.let { sameColor(it, if ((before + 1) % 2 == 1) Color.rgb(68, 221, 136) else Color.rgb(221, 68, 136)) } == true
+            val state = fixtureState()
+            state.getInt("clicks") > before && receivedPointMatches(state.optJSONArray("last_press"), remoteX, remoteY) &&
+                receivedPointMatches(state.optJSONArray("last_release"), remoteX, remoteY) &&
+                colorAt(40, 140)?.let { sameColor(it, if ((before + 1) % 2 == 1) Color.rgb(68, 221, 136) else Color.rgb(221, 68, 136)) } == true
         }
         return (SystemClock.elapsedRealtime() - start).also {
             latencySamples += it
-            attempt.put("touch_to_observed_response_ms", it).put("server_clicks_after", fixtureState().getInt("clicks"))
+            val state = fixtureState()
+            attempt.put("touch_to_observed_response_ms", it).put("server_clicks_after", state.getInt("clicks"))
+                .put("server_last_press", state.getJSONArray("last_press")).put("server_last_release", state.getJSONArray("last_release"))
         }
+    }
+
+    private fun receivedPointMatches(point: JSONArray?, x: Float, y: Float): Boolean =
+        point != null && point.length() == 2 && abs(point.getDouble(0) - x) <= 1 && abs(point.getDouble(1) - y) <= 1
+
+    private fun tapObservedAppPopupItem(label: String) {
+        val automation = instrumentation.uiAutomation
+        val originalFlags = automation.serviceInfo.flags
+        automation.serviceInfo = automation.serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        }
+        try {
+            var target: Rect? = null
+            waitFor("nonfocusable app popup exposes one real $label hit target") {
+                val matches = linkedMapOf<String, Rect>()
+                for (window in automation.windows) {
+                    if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                    val root = window.root ?: continue
+                    try {
+                        if (root.packageName?.toString() != instrumentation.targetContext.packageName) continue
+                        fun visit(node: AccessibilityNodeInfo, depth: Int) {
+                            if (depth > 30) return
+                            val rect = Rect().also(node::getBoundsInScreen)
+                            if (node.text?.toString() == label && node.isVisibleToUser && rect.width() > 0 && rect.height() > 0) {
+                                matches["${window.id}:${rect.toShortString()}"] = rect
+                            }
+                            for (i in 0 until node.childCount) node.getChild(i)?.let { child ->
+                                try { visit(child, depth + 1) } finally { child.recycle() }
+                            }
+                        }
+                        visit(root, 0)
+                    } finally { root.recycle() }
+                }
+                target = matches.values.singleOrNull()
+                target != null
+            }
+            val rect = requireNotNull(target)
+            measurements.put("ime_tools_popup_hit", JSONObject().put("label", label).put("screen_bounds", rect.toShortString()))
+            screenshot("04d1-ime-tools-popup")
+            // The menu deliberately does not take IME focus. Enumerate actual app
+            // windows, not only the active window or the main activity's origin.
+            injectSingleTap(rect.exactCenterX(), rect.exactCenterY())
+        } finally {
+            automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
+        }
+    }
+
+    private fun tapAccessibleControl(label: String) {
+        val node = compose.onNode(hasContentDescription(label) and hasClickAction()).assertIsDisplayed().fetchSemanticsNode()
+        val bounds = node.boundsInWindow
+        val screen = IntArray(2); val window = IntArray(2)
+        compose.runOnUiThread {
+            compose.activity.window.decorView.getLocationOnScreen(screen)
+            compose.activity.window.decorView.getLocationInWindow(window)
+        }
+        val x = screen[0] - window[0] + bounds.center.x
+        val y = screen[1] - window[1] + bounds.center.y
+        val events = measurements.optJSONArray("actual_toolbar_taps") ?: JSONArray().also { measurements.put("actual_toolbar_taps", it) }
+        events.put(JSONObject().put("label", label).put("screen_x", x).put("screen_y", y))
+        injectSingleTap(x, y)
+    }
+
+    private fun viewportSnapshot(): ViewportTransform.Snapshot {
+        var snapshot: ViewportTransform.Snapshot? = null
+        compose.runOnUiThread { snapshot = desktop().viewportSnapshot() }
+        return requireNotNull(snapshot)
+    }
+
+    private fun desktopHasWindowFocus(): Boolean {
+        var focused = false
+        compose.runOnUiThread { focused = desktop().hasWindowFocus() }
+        return focused
+    }
+
+    private fun remoteScreenPoint(x: Float, y: Float): ViewportTransform.Point? {
+        var point: ViewportTransform.Point? = null
+        compose.runOnUiThread {
+            val view = desktop()
+            val snapshot = view.viewportSnapshot()
+            if (snapshot.remoteWidth == RdpConnector.getWidth() && snapshot.remoteHeight == RdpConnector.getHeight()) {
+                val local = snapshot.toScreen(x, y)
+                if (local.x >= 0 && local.x < view.width && local.y >= 0 && local.y < view.height) {
+                    val location = IntArray(2)
+                    view.getLocationOnScreen(location)
+                    point = ViewportTransform.Point(location[0] + local.x, location[1] + local.y)
+                }
+            }
+        }
+        return point
+    }
+
+    private fun observedPatchSpan(x: Int, y: Int, expected: Int): Int {
+        val point = requireNotNull(remoteScreenPoint(x.toFloat(), y.toFloat()))
+        val shot = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+        return try {
+            val sx = point.x.toInt(); val sy = point.y.toInt()
+            assertTrue("Uniform patch center must be an exact received color", sameColor(shot.getPixel(sx, sy), expected))
+            var left = sx; var right = sx
+            while (left > 0 && sameColor(shot.getPixel(left - 1, sy), expected)) left--
+            while (right + 1 < shot.width && sameColor(shot.getPixel(right + 1, sy), expected)) right++
+            right - left + 1
+        } finally { shot.recycle() }
+    }
+
+    private fun injectSingleTap(x: Float, y: Float, inputMethodWindow: Boolean = false) {
+        val downTime = SystemClock.uptimeMillis()
+        listOf(MotionEvent.ACTION_DOWN, MotionEvent.ACTION_UP).forEach { action ->
+            val event = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action, x, y, 0)
+                .apply { source = InputDevice.SOURCE_TOUCHSCREEN }
+            try {
+                if (inputMethodWindow) {
+                    // The real IME belongs to a different UID. UiAutomation's
+                    // system input injection can target its observed window.
+                    assertTrue("System must accept the single observed IME key event",
+                        instrumentation.uiAutomation.injectInputEvent(event, true))
+                } else instrumentation.sendPointerSync(event)
+            } finally { event.recycle() }
+            if (action == MotionEvent.ACTION_DOWN) SystemClock.sleep(40)
+        }
+    }
+
+    private fun exerciseActualSoftwareKeyboard() {
+        val automation = instrumentation.uiAutomation
+        val originalFlags = automation.serviceInfo.flags
+        automation.serviceInfo = automation.serviceInfo.apply {
+            flags = flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS
+        }
+        val before = fixtureState().getString("text")
+        val keyEvidence = JSONArray()
+        measurements.put("actual_software_keyboard_keys", keyEvidence)
+        try {
+            tapObservedImeKey("a", keyEvidence)
+            // Some IMEs keep a composing character local until Enter. Record, do not
+            // fabricate a commit or send a replacement/native key as a fallback.
+            measurements.put("software_keyboard_interim_text", fixtureState().getString("text"))
+            tapObservedImeKey("Enter", keyEvidence)
+            val expected = before + "a\n"
+            val length = expected.codePointCount(0, expected.length)
+            val colors = intArrayOf(Color.rgb(85, 204, 204), Color.rgb(204, 170, 85), Color.rgb(153, 85, 221))
+            waitFor("real software keyboard commits a/newline and paints distinct remote text feedback") {
+                fixtureState().getString("text") == expected &&
+                    colorAt(328, 40)?.let { sameColor(it, colors[length % 3]) } == true
+            }
+            measurements.put("software_keyboard_committed_text", expected)
+                .put("software_keyboard_text_patch_exact_rgb", true)
+        } finally {
+            automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
+        }
+    }
+
+    private fun tapObservedImeKey(label: String, evidence: JSONArray) {
+        var target: Rect? = null
+        var targetLabel = ""
+        var imeBounds = Rect()
+        val observed = JSONArray()
+        waitFor("actual input-method accessibility key $label") {
+            target = null
+            for (window in instrumentation.uiAutomation.windows) {
+                if (window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+                val bounds = Rect().also(window::getBoundsInScreen)
+                val root = window.root ?: continue
+                fun visit(node: AccessibilityNodeInfo, depth: Int) {
+                    if (depth > 30 || target != null) return
+                    val text = node.text?.toString()?.trim().orEmpty()
+                    val description = node.contentDescription?.toString()?.trim().orEmpty()
+                    val rect = Rect().also(node::getBoundsInScreen)
+                    if (observed.length() < 150 && (text.isNotBlank() || description.isNotBlank())) {
+                        observed.put(JSONObject().put("text", text.take(80)).put("description", description.take(80))
+                            .put("bounds", rect.toShortString()))
+                    }
+                    val matches = if (label == "a") text == label || description == label
+                        else text.equals(label, true) || description.equals(label, true)
+                    if (matches && node.isVisibleToUser && rect.width() > 0 && rect.height() > 0 && bounds.contains(rect)) {
+                        target = rect; targetLabel = if (text.isNotEmpty()) text else description; imeBounds = bounds
+                    }
+                    for (i in 0 until node.childCount) node.getChild(i)?.let { child ->
+                        try { visit(child, depth + 1) } finally { child.recycle() }
+                    }
+                }
+                try { visit(root, 0) } finally { root.recycle() }
+            }
+            measurements.put("ime_accessibility_observed_nodes", observed)
+            target != null
+        }
+        val rect = requireNotNull(target)
+        evidence.put(JSONObject().put("requested", label).put("observed", targetLabel)
+            .put("key_bounds", rect.toShortString()).put("ime_window_bounds", imeBounds.toShortString())
+            .put("injection", "UiAutomation.injectInputEvent(sync=true)")
+            .put("injected_at_ms", SystemClock.elapsedRealtime()))
+        injectSingleTap(rect.exactCenterX(), rect.exactCenterY(), inputMethodWindow = true)
     }
 
     private fun actualSize(w: Int, h: Int) = RdpConnector.getWidth() == w && RdpConnector.getHeight() == h
@@ -500,15 +737,8 @@ class RdpFixtureInstrumentedTest {
         JSONObject(response.substringAfter("\r\n\r\n"))
     }
     private fun colorAt(x: Int, y: Int): Int? {
-        val position = IntArray(2)
-        var sx = -1; var sy = -1
-        compose.runOnUiThread {
-            val view = desktop()
-            view.getLocationOnScreen(position)
-            val fit = min(view.width.toFloat() / RdpConnector.getWidth(), view.height.toFloat() / RdpConnector.getHeight())
-            sx = (position[0] + (view.width - RdpConnector.getWidth() * fit) / 2 + x * fit).toInt()
-            sy = (position[1] + (view.height - RdpConnector.getHeight() * fit) / 2 + y * fit).toInt()
-        }
+        val point = remoteScreenPoint(x.toFloat(), y.toFloat()) ?: return null
+        val sx = point.x.toInt(); val sy = point.y.toInt()
         val shot = instrumentation.uiAutomation.takeScreenshot() ?: return null
         return try { if (sx in 0 until shot.width && sy in 0 until shot.height) shot.getPixel(sx, sy) else null } finally { shot.recycle() }
     }

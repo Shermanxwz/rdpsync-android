@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail packaging if the APK cannot load its JNI dependency closure or 16 KiB segments."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,27 @@ required = {"librdpsync.so", "libfreerdp3.so", "libfreerdp-client3.so", "libwinp
 system = {"libc.so", "libm.so", "libdl.so", "libz.so", "liblog.so", "libandroid.so", "libjnigraphics.so", "libOpenSLES.so", "libEGL.so", "libGLESv2.so", "libvulkan.so", "libaaudio.so"}
 expected_jni = set(re.findall(r"external fun (native\w+)\(", Path("app/src/main/java/com/rdp/sync/network/RdpConnector.kt").read_text()))
 with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="rdpsync-apk-") as temp:
+    # Native dependencies do not automatically carry their source license notices
+    # into ELF libraries. Preserve the committed upstream texts in the user APK.
+    notice_root = Path("app/src/main/assets/third_party")
+    notices = sorted(path for path in notice_root.rglob("*") if path.is_file())
+    required_notices = {"freerdp-3.32.2-LICENSE.txt", "openssl-3.5.9-LICENSE.txt",
+                        "android-cpufeatures-NOTICE.txt", "native-source-NOTICES.txt", "manifest.json"}
+    assert required_notices <= {path.relative_to(notice_root).as_posix() for path in notices}, \
+        "Required pinned third-party notice assets are missing from the checkout"
+    notice_manifest = json.loads((notice_root / "manifest.json").read_text())
+    assert notice_manifest["schema"] == 1
+    assert set(notice_manifest["assets"]) == required_notices - {"manifest.json"}
+    for name, expected in notice_manifest["assets"].items():
+        data = (notice_root / name).read_bytes()
+        assert len(data) == expected["bytes"] and hashlib.sha256(data).hexdigest() == expected["sha256"], \
+            f"Third-party notice provenance mismatch: {name}"
+    for path in notices:
+        original = path.read_bytes()
+        assert original, f"Empty third-party notice asset: {path}"
+        entry = "assets/third_party/" + path.relative_to(notice_root).as_posix()
+        assert archive.read(entry) == original, f"Third-party notice missing or altered in APK: {entry}"
+    print(f"Third-party notice assets: {len(notices)} exact committed files preserved")
     libraries = [n for n in archive.namelist() if re.fullmatch(r"lib/[^/]+/[^/]+\.so", n)]
     assert libraries, "APK has no native libraries (Gradle-only APK is not functional)"
     abis = sorted({n.split("/")[1] for n in libraries})

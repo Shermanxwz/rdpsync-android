@@ -40,7 +40,7 @@ internal fun SessionViewportLayout(
     header: @Composable () -> Unit,
     desktop: @Composable () -> Unit,
     toolbar: @Composable () -> Unit,
-    keyboardShortcuts: @Composable () -> Unit
+    imeControls: @Composable () -> Unit
 ) {
     val host = LocalView.current
     val composeSafe = WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout)
@@ -64,7 +64,7 @@ internal fun SessionViewportLayout(
         Box { header() }
         Box { desktop() }
         Box { toolbar() }
-        Box { keyboardShortcuts() }
+        Box { imeControls() }
     }) { children, constraints ->
         val originX = layoutOrigin.x
         val originY = layoutOrigin.y
@@ -85,25 +85,25 @@ internal fun SessionViewportLayout(
         val windowWidth = rootSize.width.takeIf { it > 0 } ?: (constraints.maxWidth + originX)
         val windowHeight = rootSize.height.takeIf { it > 0 } ?: (constraints.maxHeight + originY)
         val base = SessionViewportGeometry.calculate(windowWidth, windowHeight, constraints.maxWidth, constraints.maxHeight,
-            originX, originY, safe, ime, 0, 0, 0)
+            originX, originY, safe, ime, 0, 0)
         val chromeConstraints = Constraints(minWidth = base.width, maxWidth = base.width, maxHeight = base.logicalDesktopHeight)
         val headerPlaceable = children[0].measure(chromeConstraints)
         val toolbarPlaceable = children[2].measure(chromeConstraints)
-        val keyboardPlaceable = children[3].measure(chromeConstraints)
+        val controlsPlaceable = children[3].measure(chromeConstraints.copy(minWidth = 0))
         val geometry = SessionViewportGeometry.calculate(windowWidth, windowHeight, constraints.maxWidth, constraints.maxHeight,
-            originX, originY, safe, ime, headerPlaceable.height, toolbarPlaceable.height, keyboardPlaceable.height)
+            originX, originY, safe, ime, headerPlaceable.height, toolbarPlaceable.height)
         val desktopPlaceable = children[1].measure(Constraints.fixed(geometry.width, geometry.localDesktopHeight))
         onLogicalViewport(IntSize(geometry.width, geometry.logicalDesktopHeight))
         layout(constraints.maxWidth, constraints.maxHeight) {
-            var y = geometry.top
-            headerPlaceable.place(geometry.left, y)
-            y += headerPlaceable.height
-            desktopPlaceable.place(geometry.left, y)
-            y += geometry.localDesktopHeight
-            toolbarPlaceable.place(geometry.left, y)
-            y += toolbarPlaceable.height
-            // An unplaced shortcut row is neither drawn nor exposed as a hit target.
-            if (geometry.keyboardShortcutsHeight > 0) keyboardPlaceable.place(geometry.left, y)
+            desktopPlaceable.place(geometry.left, geometry.desktopTop)
+            if (geometry.imeOccluded) {
+                // Only this small overlay owns hit targets; no full-screen gesture layer.
+                controlsPlaceable.place(geometry.left + (geometry.width - controlsPlaceable.width).coerceAtLeast(0),
+                    geometry.desktopTop + (geometry.localDesktopHeight - controlsPlaceable.height).coerceAtLeast(0))
+            } else {
+                headerPlaceable.place(geometry.left, geometry.top)
+                toolbarPlaceable.place(geometry.left, geometry.desktopTop + geometry.localDesktopHeight)
+            }
         }
     }
 }

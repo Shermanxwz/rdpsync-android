@@ -9,7 +9,8 @@ internal data class SessionViewportGeometry(
     val width: Int,
     val logicalDesktopHeight: Int,
     val localDesktopHeight: Int,
-    val keyboardShortcutsHeight: Int
+    val desktopTop: Int,
+    val imeOccluded: Boolean
 ) {
     companion object {
         /**
@@ -21,7 +22,7 @@ internal data class SessionViewportGeometry(
         fun calculate(
             windowWidth: Int, windowHeight: Int, availableWidth: Int, availableHeight: Int,
             originX: Int, originY: Int, safe: SessionSafeInsets, imeBottom: Int,
-            headerHeight: Int, toolbarHeight: Int, keyboardShortcutsHeight: Int
+            headerHeight: Int, toolbarHeight: Int
         ): SessionViewportGeometry {
             val left = (safe.left - originX).coerceAtLeast(0)
             val top = (safe.top - originY).coerceAtLeast(0)
@@ -29,9 +30,13 @@ internal data class SessionViewportGeometry(
             val logicalBottom = windowHeight - safe.bottom - originY
             val localBottom = minOf(availableHeight, windowHeight - maxOf(safe.bottom, imeBottom) - originY)
             val logicalHeight = (logicalBottom - top - headerHeight - toolbarHeight).coerceAtLeast(0)
-            val shortcuts = if (imeBottom > 0) keyboardShortcutsHeight.coerceAtLeast(0) else 0
-            val localHeight = (localBottom - top - headerHeight - toolbarHeight - shortcuts).coerceIn(0, logicalHeight)
-            return SessionViewportGeometry(left, top, right - left, logicalHeight, localHeight, shortcuts)
+            val imeOccluded = imeBottom > 0
+            // Base chrome remains measured above for DISP, but typing uses all safe
+            // space above the keyboard. Essential controls are a small local overlay.
+            val desktopTop = top + if (imeOccluded) 0 else headerHeight
+            val localToolbar = if (imeOccluded) 0 else toolbarHeight
+            val localHeight = (localBottom - desktopTop - localToolbar).coerceAtLeast(0)
+            return SessionViewportGeometry(left, top, right - left, logicalHeight, localHeight, desktopTop, imeOccluded)
         }
     }
 }

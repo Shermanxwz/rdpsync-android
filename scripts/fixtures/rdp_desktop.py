@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 OUTPUT = pathlib.Path.home() / "rdpsync-fixture-state.json"
 lock = threading.Lock()
 state = {"session_id": str(uuid.uuid4()), "desktop_pid": os.getpid(), "ready": False, "width": 0, "height": 0, "clicks": 0, "right_clicks": 0,
-         "presses": 0, "releases": 0, "drag_moves": 0, "wheels": 0, "text": "",
+         "presses": 0, "releases": 0, "last_press": None, "last_release": None, "drag_moves": 0, "wheels": 0, "text": "",
          "keys": [], "resizes": [], "started_monotonic": time.monotonic()}
 
 
@@ -61,6 +61,10 @@ def paint():
         canvas.create_rectangle(x, 16, x + 64, 80, fill=color, outline=color)
     with lock:
         clicks, text = state["clicks"], state["text"]
+    # A separate three-color text-length probe proves software-keyboard commits
+    # return through the actual framebuffer; +2 characters cannot preserve parity.
+    text_marker = ("#55cccc", "#ccaa55", "#9955dd")[len(text) % 3]
+    canvas.create_rectangle(304, 16, 368, 80, fill=text_marker, outline=text_marker)
     marker = "#44dd88" if clicks % 2 else "#dd4488"
     canvas.create_rectangle(16, 112, 80, 176, fill=marker, outline=marker)
     canvas.create_text(112, 120, anchor="nw", fill="white", text="Synthetic test desktop — no private data", font=("sans", 16))
@@ -89,8 +93,10 @@ def event(name, ev):
     with lock:
         if name == "press":
             state["presses"] += 1
+            state["last_press"] = [ev.x, ev.y]
         elif name == "release":
             state["releases"] += 1
+            state["last_release"] = [ev.x, ev.y]
             state["clicks"] += 1
         elif name == "right":
             state["right_clicks"] += 1

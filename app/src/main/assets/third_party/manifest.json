@@ -1,0 +1,64 @@
+{
+  "assets": {
+    "android-cpufeatures-NOTICE.txt": {
+      "bytes": 577,
+      "sha256": "c870d52f42a8f93023b99a85fe68d02637d6b04e5f35bbcd7f98759adb4e4d49"
+    },
+    "freerdp-3.32.2-LICENSE.txt": {
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    "native-source-NOTICES.txt": {
+      "bytes": 1156331,
+      "sha256": "409686b860b8e403bee5c25662e466e36b4a08467fba366413bea0f0c1e09811"
+    },
+    "openssl-3.5.9-LICENSE.txt": {
+      "bytes": 10175,
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    }
+  },
+  "components": [
+    {
+      "component": "FreeRDP-3.32.2",
+      "distinct_notice_blocks": 708,
+      "git_commit": "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc",
+      "source_files_scanned": 1079,
+      "source_scopes": [
+        "include/",
+        "libfreerdp/",
+        "client/common/",
+        "channels/",
+        "winpr/include/",
+        "winpr/libwinpr/"
+      ]
+    },
+    {
+      "archive_sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+      "component": "OpenSSL-3.5.9",
+      "distinct_notice_blocks": 544,
+      "source_files_scanned": 2011,
+      "source_scopes": [
+        "include/",
+        "crypto/",
+        "ssl/",
+        "providers/",
+        "engines/"
+      ]
+    }
+  ],
+  "generator": "scripts/collect-native-notices.py",
+  "schema": 1,
+  "scope": "Conservative exact upstream source-notice collection; not a linked-component inventory",
+  "source_extensions": [
+    ".asm",
+    ".c",
+    ".cc",
+    ".cpp",
+    ".h",
+    ".in",
+    ".inc",
+    ".pl",
+    ".pm",
+    ".s"
+  ]
+}
