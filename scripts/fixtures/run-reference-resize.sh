@@ -45,6 +45,7 @@ TUNE+=",FreeRDP_SupportGraphicsPipeline:FALSE,FreeRDP_GfxH264:FALSE,FreeRDP_Smar
 TUNE+=",FreeRDP_SupportMonitorLayoutPdu:FALSE,FreeRDP_NetworkAutoDetect:TRUE,FreeRDP_DeviceRedirection:TRUE"
 TUNE+=",FreeRDP_AudioPlayback:FALSE,FreeRDP_AudioCapture:FALSE,FreeRDP_RedirectClipboard:FALSE"
 TUNE+=",FreeRDP_AutoReconnectionEnabled:FALSE"
+TUNE+=",FreeRDP_EncomspVirtualChannel:FALSE"
 "$CLIENT" /v:127.0.0.1:3389 /u:rdpfixture /p:rdpsync-fixture-only \
   /cert:fingerprint:sha256:"$FINGERPRINT" /sec:tls /size:1024x768 /bpp:32 \
   /gdi:sw /dynamic-resolution /t:rdpsync-reference /log-level:DEBUG \
