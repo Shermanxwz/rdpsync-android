@@ -15,7 +15,9 @@ import org.junit.Assert.*
 
 /** Acknowledges only the observed first-use Android system education overlay. */
 internal fun acknowledgeSystemImmersiveCoachmark(activity: Activity, pump: () -> Unit, screenshot: () -> Unit,
-    retainEvidence: (JSONObject) -> Unit = {}): JSONObject {
+    retainEvidence: (JSONObject) -> Unit = {}, deadlineElapsedMs: Long? = null,
+    readyWhenSystemOverlayAbsent: (() -> Boolean)? = null,
+    allowAcknowledgement: Boolean = true): JSONObject {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     val automation = instrumentation.uiAutomation
     val oldFlags = automation.serviceInfo.flags
@@ -25,7 +27,9 @@ internal fun acknowledgeSystemImmersiveCoachmark(activity: Activity, pump: () ->
     result.put("accessibility_observations", observations)
     retainEvidence(result) // Attached to caller evidence even if readiness fails.
     var injected = false
-    val deadline = SystemClock.elapsedRealtime() + 10_000
+    val deadline = deadlineElapsedMs ?: (SystemClock.elapsedRealtime() + 10_000)
+    result.put("deadline_elapsed_ms", deadline).put("allow_acknowledgement", allowAcknowledgement)
+        .put("custom_readiness", readyWhenSystemOverlayAbsent != null)
     var nextObservation = 0L
     try {
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -72,6 +76,7 @@ internal fun acknowledgeSystemImmersiveCoachmark(activity: Activity, pump: () ->
                         if (nodes.none { it.windowId == window.id && it.isVisibleToUser && it.text?.toString() == "Viewing full screen" }) continue
                         observed = true
                         if (injected) continue
+                        assertTrue("A previous phase already acknowledged the one system coachmark", allowAcknowledgement)
                         val buttons = nodes.filter { it.windowId == window.id && it.isVisibleToUser && it.isEnabled && it.isClickable &&
                             it.packageName?.toString() == packageName && it.className?.toString() == "android.widget.Button" &&
                             it.text?.toString()?.equals("Got it", ignoreCase = true) == true }
@@ -82,6 +87,8 @@ internal fun acknowledgeSystemImmersiveCoachmark(activity: Activity, pump: () ->
                         assertTrue(button.text?.toString()?.equals("Got it", ignoreCase = true) == true)
                         val bounds = Rect().also(button::getBoundsInScreen); assertFalse(bounds.isEmpty)
                         screenshot()
+                        assertTrue("Coachmark acknowledgement must begin inside the original readiness deadline",
+                            SystemClock.elapsedRealtime() < deadline)
                         result.put("package", packageName).put("window_id", window.id).put("window_type", window.type)
                             .put("bounds", bounds.toShortString()).put("uptime_before_down", SystemClock.uptimeMillis())
                         val down = SystemClock.uptimeMillis()
@@ -99,9 +106,15 @@ internal fun acknowledgeSystemImmersiveCoachmark(activity: Activity, pump: () ->
             } finally { windows.forEach { it.recycle() } }
             var focused = false
             instrumentation.runOnMainSync { focused = activity.window.decorView.hasWindowFocus() }
-            if (!observed && focused) return result.put("system_overlay_absent_and_app_focused", true)
+            // A legitimate application Dialog owns focus instead of the Activity decor.
+            // A caller may supply its narrower dialog readiness, but only after the
+            // matching SYSTEM overlay is absent, under this same absolute deadline.
+            val ready = !observed && (readyWhenSystemOverlayAbsent?.invoke() ?: focused)
+            if (ready && SystemClock.elapsedRealtime() <= deadline) return result
+                .put("system_overlay_absent", true).put("activity_decor_focused", focused)
+                .put("readiness_satisfied", true).put("completed_elapsed_ms", SystemClock.elapsedRealtime())
             SystemClock.sleep(100)
         }
-        throw AssertionError("Observed immersive coachmark did not close or app focus did not return: $result")
+        throw AssertionError("Observed immersive coachmark/readiness did not complete within the original deadline: $result")
     } finally { automation.serviceInfo = automation.serviceInfo.apply { flags = oldFlags } }
 }

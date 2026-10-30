@@ -52,6 +52,7 @@ class RdpFixtureInstrumentedTest {
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "rdp-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
     private val latencySamples = mutableListOf<Long>()
+    private var systemCoachmarkAcknowledged = false
 
     @Test fun realDesktopDisplayInputResizeAndWeakLink() {
         val enabled = InstrumentationRegistry.getArguments().getString("rdpFixture")
@@ -84,7 +85,10 @@ class RdpFixtureInstrumentedTest {
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
             measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
                 { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
-                { measurements.put("system_immersive_coachmark", it) }))
+                { measurements.put("system_immersive_coachmark", it) },
+                allowAcknowledgement = !systemCoachmarkAcknowledged).also {
+                    systemCoachmarkAcknowledged = systemCoachmarkAcknowledged || it.getBoolean("acknowledged")
+                })
             assertFullscreenDefault("initial_fullscreen")
             assertClassicFixtureCodec()
             measurements.put("renderer_scope", "Explicit classic xrdp server build; normal production client auto-GFX unchanged; separate GNOME Progressive gate required")
@@ -352,7 +356,49 @@ class RdpFixtureInstrumentedTest {
 
     private fun approveCertificate(fingerprint: String, changed: Boolean, authRequestsBefore: Int) {
         val title = if (changed) "服务器证书已改变" else "确认服务器证书"
-        waitFor("certificate challenge before authentication", 45_000) { RdpConnector.certificateChallenge()?.fingerprint == fingerprint && dialogExists(title) }
+        if (changed) {
+            waitFor("certificate challenge before authentication", 45_000) { RdpConnector.certificateChallenge()?.fingerprint == fingerprint && dialogExists(title) }
+        } else {
+            // First-use SYSTEM education may arrive after setContent and cover the
+            // trust dialog. Observe it throughout the ORIGINAL 45s trust budget,
+            // without approving a certificate or requiring the dialog's parent decor to focus.
+            val deadline = SystemClock.elapsedRealtime() + 45_000
+            val phases = measurements.optJSONArray("untrusted_certificate_phases") ?: JSONArray().also {
+                measurements.put("untrusted_certificate_phases", it)
+            }
+            assertTrue("Only the initial and deliberate weak-link untrusted phases are expected", phases.length() < 2)
+            val phase = JSONObject().put("ordinal", phases.length()).put("phase", if (phases.length() == 0) "initial" else "weak_link")
+                .put("auth_requests_before", authRequestsBefore).put("expected_fingerprint", fingerprint)
+                .put("started_elapsed_ms", SystemClock.elapsedRealtime()).put("acknowledged_before_phase", systemCoachmarkAcknowledged)
+            phases.put(phase)
+            val readiness = JSONArray()
+            phase.put("readiness", readiness)
+            var nextObservation = 0L
+            fun observeReadiness(phase: String): Boolean {
+                val challenge = RdpConnector.certificateChallenge()
+                val titleCount = compose.onAllNodesWithText(title).fetchSemanticsNodes().size
+                val displayed = titleCount == 1 && runCatching { compose.onNodeWithText(title).assertIsDisplayed() }.isSuccess
+                val focusedDialogs = focusedApplicationTitleWindows(title)
+                val now = SystemClock.elapsedRealtime()
+                val ready = challenge?.fingerprint == fingerprint && displayed && focusedDialogs.length() == 1
+                if (readiness.length() < 100 && (now >= nextObservation || ready)) {
+                    nextObservation = now + 500
+                    readiness.put(JSONObject().put("phase", phase).put("elapsed_ms", now).put("wall_ms", System.currentTimeMillis())
+                        .put("compose_clock_ms", compose.mainClock.currentTime).put("challenge_fingerprint", challenge?.fingerprint)
+                        .put("challenge_generation", challenge?.generation).put("title_count", titleCount)
+                        .put("title_displayed", displayed).put("focused_application_title_windows", focusedDialogs).put("ready", ready))
+                }
+                return ready
+            }
+            val result = acknowledgeSystemImmersiveCoachmark(compose.activity,
+                { compose.mainClock.advanceTimeBy(100); observeReadiness("before_system_overlay_observation") },
+                { screenshot("00-pretrust-${phase.getString("phase")}-system-immersive-coachmark") },
+                { phase.put("system_immersive_coachmark", it) }, deadlineElapsedMs = deadline,
+                readyWhenSystemOverlayAbsent = { observeReadiness("system_overlay_absent") },
+                allowAcknowledgement = !systemCoachmarkAcknowledged)
+            systemCoachmarkAcknowledged = systemCoachmarkAcknowledged || result.getBoolean("acknowledged")
+            phase.put("completed_elapsed_ms", SystemClock.elapsedRealtime()).put("acknowledged_after_phase", systemCoachmarkAcknowledged)
+        }
         compose.onNodeWithText(title).assertExists()
         compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
         assertEquals("credentials must not reach the session manager before approval", authRequestsBefore, controlState().getInt("auth_requests"))
@@ -361,6 +407,35 @@ class RdpFixtureInstrumentedTest {
         compose.onNodeWithText(button).assertIsNotEnabled()
         compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹").performScrollTo().performClick()
         compose.onNodeWithText(button).assertIsEnabled().performClick()
+    }
+
+    /** Read-only focus proof: a certificate Dialog, not the Activity decor, owns input. */
+    private fun focusedApplicationTitleWindows(title: String): JSONArray {
+        val matches = JSONArray()
+        val windows = instrumentation.uiAutomation.windows
+        try {
+            for (window in windows) {
+                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION || !window.isFocused) continue
+                val root = window.root ?: continue
+                val nodes = mutableListOf<AccessibilityNodeInfo>()
+                fun visit(node: AccessibilityNodeInfo) {
+                    nodes += node
+                    for (i in 0 until node.childCount) {
+                        if (nodes.size >= 512) break
+                        node.getChild(i)?.let(::visit)
+                    }
+                }
+                visit(root)
+                try {
+                    if (root.packageName?.toString() != instrumentation.targetContext.packageName) continue
+                    val titles = nodes.filter { it.windowId == window.id && it.isVisibleToUser && it.text?.toString() == title }
+                    if (titles.size == 1) matches.put(JSONObject().put("window_id", window.id)
+                        .put("window_type", window.type).put("root_package", root.packageName?.toString())
+                        .put("focused", window.isFocused).put("title_bounds", Rect().also(titles.single()::getBoundsInScreen).toShortString()))
+                } finally { nodes.forEach { it.recycle() } }
+            }
+        } finally { windows.forEach { it.recycle() } }
+        return matches
     }
 
     private fun dialogExists(title: String): Boolean = compose.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty()

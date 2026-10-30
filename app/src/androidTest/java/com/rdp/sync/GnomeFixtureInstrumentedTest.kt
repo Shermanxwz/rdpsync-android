@@ -1,5 +1,8 @@
 package com.rdp.sync
 
+import android.accessibilityservice.AccessibilityServiceInfo
+import android.graphics.Rect
+import android.view.accessibility.AccessibilityWindowInfo
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
@@ -278,23 +281,123 @@ class GnomeFixtureInstrumentedTest {
         }
     }
     private fun tapAndObserve(x: Float, y: Float) {
+        val attempts = measurements.optJSONArray("touch_attempts") ?: JSONArray().also { measurements.put("touch_attempts", it) }
+        val attempt = JSONObject().put("remote_x", x).put("remote_y", y)
+        attempts.put(attempt) // Retain pre-input and failed responses, not only successful taps.
         waitFor("visible focused GNOME before single tap") { var focused=false; compose.runOnUiThread { focused=desktopOrNull()?.hasWindowFocus() == true }; focused && decodedSourceMatches(0xff0000, colorAt(40,40)) }
-        val before = state().getInt("clicks")
+        val beforeState = state()
+        val before = beforeState.getInt("clicks")
+        attempt.put("before_server", beforeState).put("before_frame_id", RdpConnector.nativeGetFrameId())
         var sx=0f; var sy=0f
-        compose.runOnUiThread { val v=desktop(); val p=v.viewportSnapshot().toScreen(x,y); val loc=IntArray(2); v.getLocationOnScreen(loc); assertTrue(p.x in 0f..v.width.toFloat() && p.y in 0f..v.height.toFloat()); sx=loc[0]+p.x; sy=loc[1]+p.y }
+        var inputView: RdpDesktopView?=null
+        compose.runOnUiThread {
+            val v=desktop(); inputView=v; val transform=v.viewportSnapshot(); val p=transform.toScreen(x,y)
+            val loc=IntArray(2); v.getLocationOnScreen(loc)
+            assertTrue(v.isAttachedToWindow && v.isShown && v.hasWindowFocus())
+            assertTrue(p.x >= 0 && p.y >= 0 && p.x < v.width && p.y < v.height)
+            sx=loc[0]+p.x; sy=loc[1]+p.y
+            attempt.put("view", JSONObject().put("identity", System.identityHashCode(v)).put("focused", v.hasWindowFocus())
+                .put("left",loc[0]).put("top",loc[1]).put("width",v.width).put("height",v.height)
+                .put("scale",transform.scale).put("transform_left",transform.left).put("transform_top",transform.top))
+        }
+        attempt.put("screen_x",sx).put("screen_y",sy).put("pre_input_windows", touchWindowObservation(sx,sy))
+        val events=JSONArray(); attempt.put("injected_events",events)
+        compose.runOnUiThread {
+            val v=desktop(); val original=attempt.getJSONObject("view")
+            val transform=v.viewportSnapshot(); val mapped=transform.toScreen(x,y)
+            val loc=IntArray(2); v.getLocationOnScreen(loc)
+            assertTrue("The observed desktop instance must still own this one gesture",v === inputView)
+            assertTrue(v.isAttachedToWindow && v.isShown && v.hasWindowFocus())
+            assertEquals(original.getInt("left"),loc[0]); assertEquals(original.getInt("top"),loc[1])
+            assertEquals(original.getInt("width"),v.width); assertEquals(original.getInt("height"),v.height)
+            assertEquals(sx,loc[0]+mapped.x,0f); assertEquals(sy,loc[1]+mapped.y,0f)
+            assertEquals(original.getDouble("scale"),transform.scale.toDouble(),0.0)
+            attempt.put("view_revalidated_elapsed_ms",SystemClock.elapsedRealtime())
+        }
         val down=SystemClock.uptimeMillis()
-        for (action in listOf(MotionEvent.ACTION_DOWN,MotionEvent.ACTION_UP)) {
-            val ev=MotionEvent.obtain(down,SystemClock.uptimeMillis(),action,sx,sy,0).apply { source=InputDevice.SOURCE_TOUCHSCREEN }
-            try { instrumentation.sendPointerSync(ev) } finally { ev.recycle() }
-            if(action==MotionEvent.ACTION_DOWN) SystemClock.sleep(40)
+        var upEventTime=-1L
+        var upCompleted=-1L
+        fun inject(action: Int) {
+            val eventTime=SystemClock.uptimeMillis() // Never backdate a slow host gesture.
+            val properties=MotionEvent.PointerProperties().apply { id=0; toolType=MotionEvent.TOOL_TYPE_FINGER }
+            val coordinates=MotionEvent.PointerCoords().apply { this.x=sx; this.y=sy; pressure=1f; size=1f }
+            val event=MotionEvent.obtain(down,eventTime,action,1,arrayOf(properties),arrayOf(coordinates),0,0,1f,1f,0,0,InputDevice.SOURCE_TOUCHSCREEN,0)
+            val record=JSONObject().put("action",action).put("event_time_ms",eventTime).put("down_time_ms",down)
+                .put("wall_before_ms",System.currentTimeMillis()).put("elapsed_before_ms",SystemClock.elapsedRealtime())
+                .put("tool_type",event.getToolType(0)).put("source",event.source).put("sync",false)
+            events.put(record)
+            try {
+                val accepted=instrumentation.uiAutomation.injectInputEvent(event,false)
+                record.put("accepted",accepted)
+                assertTrue("One observed GNOME finger event admitted",accepted)
+            } catch(error: Throwable) {
+                record.put("injection_error",error.toString())
+                throw error
+            } finally {
+                record.put("wall_completed_ms",System.currentTimeMillis()).put("elapsed_completed_ms",SystemClock.elapsedRealtime())
+                    .put("uptime_completed_ms",SystemClock.uptimeMillis())
+                if(action==MotionEvent.ACTION_UP) { upEventTime=eventTime; upCompleted=SystemClock.elapsedRealtime() }
+                event.recycle()
+            }
         }
-        waitFor("GNOME receives exact touch coordinates and paints response",15_000) {
-            val s=state(); val p=s.optJSONArray("last_press"); val r=s.optJSONArray("last_release")
-            s.getInt("clicks")==before+1 && p!=null && r!=null &&
-                abs(p.getDouble(0)-x)<=1 && abs(p.getDouble(1)-y)<=1 && abs(r.getDouble(0)-x)<=1 && abs(r.getDouble(1)-y)<=1 &&
-                decodedSourceMatches(if((before+1)%2==1) 0x44dd88 else 0xdd4488, colorAt(40,140))
+        var downFailure: Throwable?=null
+        try { inject(MotionEvent.ACTION_DOWN); SystemClock.sleep(40) }
+        catch(error: Throwable) { downFailure=error; throw error }
+        finally {
+            try { inject(MotionEvent.ACTION_UP) }
+            catch(upFailure: Throwable) { if(downFailure != null) downFailure.addSuppressed(upFailure) else throw upFailure }
         }
-        measurements.put("last_touch",state())
+        attempt.put("gesture_duration_ms",upEventTime-down).put("response_deadline_elapsed_ms",upCompleted+15_000)
+        // Production intentionally maps >=500ms to right-click. A stalled harness
+        // must fail, never forge a short event time, retry, or accept another button.
+        assertTrue("Actual single tap must remain below the production 500ms long-press threshold",upEventTime-down in 0L until 500L)
+        val deadline=upCompleted+15_000
+        val samples=JSONArray(); attempt.put("response_samples",samples)
+        var matched=false
+        while(SystemClock.elapsedRealtime()<deadline) {
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
+            val sample=JSONObject().put("started_elapsed_ms",SystemClock.elapsedRealtime())
+            try {
+                val current=state(); val press=current.optJSONArray("last_press"); val release=current.optJSONArray("last_release")
+                val actual=colorAt(40,140); val expected=if((before+1)%2==1) 0x44dd88 else 0xdd4488
+                sample.put("server",current).put("actual_rgb",actual).put("source_rgb",expected)
+                    .put("frame_id",RdpConnector.nativeGetFrameId()).put("diag",RdpConnector.getDiag())
+                matched=current.getInt("clicks")==before+1 && press!=null && release!=null &&
+                    abs(press.getDouble(0)-x)<=1 && abs(press.getDouble(1)-y)<=1 &&
+                    abs(release.getDouble(0)-x)<=1 && abs(release.getDouble(1)-y)<=1 && decodedSourceMatches(expected,actual)
+                sample.put("outcome_matched",matched)
+            } catch(e: java.io.IOException) { sample.put("read_error",e.toString()) }
+            val completed=SystemClock.elapsedRealtime()
+            sample.put("completed_elapsed_ms",completed)
+            if(samples.length()<64) samples.put(sample)
+            attempt.put("last_response",sample)
+            if(matched && completed<=deadline) { measurements.put("last_touch",sample.getJSONObject("server")); attempt.put("passed",true); return }
+            SystemClock.sleep(100)
+        }
+        attempt.put("passed",false)
+        throw AssertionError("GNOME receives exact touch coordinates and paints response within 15s after the single UP: ${RdpConnector.getDiag()}")
+    }
+
+    /** Window overlap is diagnostic, not inferred hit-test exclusion (Taskbar can be transparent). */
+    private fun touchWindowObservation(x: Float,y: Float): JSONArray {
+        val automation=instrumentation.uiAutomation
+        val oldFlags=automation.serviceInfo.flags
+        automation.serviceInfo=automation.serviceInfo.apply { flags=flags or AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS }
+        try {
+            val result=JSONArray(); val windows=automation.windows
+            try {
+                for(window in windows.take(24)) {
+                    val bounds=Rect().also(window::getBoundsInScreen)
+                    val root=window.root
+                    try { result.put(JSONObject().put("id",window.id).put("type",window.type).put("layer",window.layer)
+                        .put("focused",window.isFocused).put("active",window.isActive).put("package",root?.packageName?.toString())
+                        .put("bounds",bounds.toShortString()).put("contains_intended_point",bounds.contains(x.toInt(),y.toInt())))
+                    } finally { root?.recycle() }
+                }
+            } finally { windows.forEach { it.recycle() } }
+            return result
+        } finally { automation.serviceInfo=automation.serviceInfo.apply { flags=oldFlags } }
     }
     private fun waitFor(reason: String, timeout: Long=15_000, predicate: ()->Boolean) {
         val deadline=SystemClock.elapsedRealtime()+timeout

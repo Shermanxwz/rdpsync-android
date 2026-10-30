@@ -19,7 +19,7 @@ state = dict(session_id=str(uuid.uuid4()), desktop_pid=os.getpid(), ready=False,
              backend='GdkWaylandDisplay', width=0, height=0, monitor_width=0, monitor_height=0,
              mapped=False, visible=False, paint_count=0,
              clicks=0, presses=0, releases=0, last_press=None, last_release=None, text='', keys=[],
-             resizes=[], started_monotonic=time.monotonic())
+             resizes=[], button_events=[], started_monotonic=time.monotonic())
 lock = threading.Lock()
 ROOT = Path(__file__).resolve().parents[3]
 spec = importlib.util.spec_from_file_location('transfer_fixture', Path(__file__).with_name('transfer-fixture.py'))
@@ -110,6 +110,11 @@ def resized(_, allocation):
 
 def event(_, ev):
     with lock:
+        if ev.type in (Gdk.EventType.BUTTON_PRESS, Gdk.EventType.BUTTON_RELEASE):
+            state['button_events'] = (state['button_events'] + [dict(
+                action='press' if ev.type == Gdk.EventType.BUTTON_PRESS else 'release',
+                button=int(ev.button), x=ev.x, y=ev.y, event_time_ms=int(ev.time),
+                observed_monotonic=time.monotonic())])[-64:]
         if ev.type == Gdk.EventType.BUTTON_PRESS and ev.button == 1:
             state['presses'] += 1
             state['last_press'] = [ev.x, ev.y]
