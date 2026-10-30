@@ -52,6 +52,7 @@ class GnomeFixtureInstrumentedTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "gnome-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
+    private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
     private lateinit var decodedColors: JSONObject
 
     @Test fun nativeGnomeRdpPixelsInputAndDisplayControl() {
@@ -93,7 +94,7 @@ class GnomeFixtureInstrumentedTest {
         val device = Device(id = 910001, name = "Native GNOME isolated fixture", host = "10.0.2.2", port = 33891,
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768)
         measurements.put("mode", mode).put("fixture_scope", "GNOME46 per-user native Wayland; not GDM Remote Login or Windows NLA")
-        compose.runOnUiThread { compose.activity.setContent { MaterialTheme { if (showing.value) RdpConnectionScreen(device) { showing.value = false } } } }
+        compose.runOnUiThread { compose.activity.setContent { boundedScroll.Bind(); MaterialTheme { if (showing.value) RdpConnectionScreen(device) { showing.value = false } } } }
         try {
             waitFor("native GNOME certificate challenge before frame", 45_000) {
                 RdpConnector.certificateChallenge()?.fingerprint == fingerprint &&
@@ -101,9 +102,9 @@ class GnomeFixtureInstrumentedTest {
             }
             assertFalse(RdpConnector.isConnected())
             assertEquals(0L, RdpConnector.nativeGetFrameId())
-            compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
+            boundedScroll.to(compose.onNodeWithText(fingerprint)).assertIsDisplayed()
             compose.onNodeWithText("保存指纹并重连").assertIsNotEnabled()
-            compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹")).performClick()
             compose.onNodeWithText("保存指纹并重连").performClick()
             waitFor("real GNOME decoded desktop", 60_000) {
                 RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && serverSize(1024, 768) && actualSize(1024, 768)
@@ -139,7 +140,7 @@ class GnomeFixtureInstrumentedTest {
             measurements.put("view_input_connection_commit", true)
             // Distinct from actual Gboard-key coverage in the mandatory xrdp UI test.
             openSettings()
-            compose.onNode(hasText("1280 × 720") and hasClickAction()).performScrollTo().performClick().assertIsSelected()
+            boundedScroll.to(compose.onNode(hasText("1280 × 720") and hasClickAction())).performClick().assertIsSelected()
             compose.onNodeWithText("完成").performClick()
             if (mode == "headless-extend") {
                 waitFor("GNOME DISP caps and actual new framebuffer", 25_000) {
@@ -151,7 +152,7 @@ class GnomeFixtureInstrumentedTest {
                 measurements.put("actual_disp_resize", true)
                 screenshot("02-gnome-real-disp-resize")
                 openSettings()
-                compose.onNode(hasText("适应窗口") and hasClickAction()).performScrollTo().performClick()
+                boundedScroll.to(compose.onNode(hasText("适应窗口") and hasClickAction())).performClick()
                 compose.onNodeWithText("完成").performClick()
                 waitFor("portrait virtual monitor") { RdpConnector.getHeight() > RdpConnector.getWidth() && serverSize(RdpConnector.getWidth(), RdpConnector.getHeight()) }
                 compose.runOnUiThread { compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
@@ -221,7 +222,7 @@ class GnomeFixtureInstrumentedTest {
             count == 1
         }
         observation.put("popup_ready_elapsed_ms", SystemClock.elapsedRealtime())
-        compose.onNodeWithText("显示与网络设置").performScrollTo().performClick()
+        boundedScroll.to(compose.onNodeWithText("显示与网络设置"), deadline).assertIsEnabled().performClick()
         waitFor("actual display settings dialog", (deadline-SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
             compose.onAllNodesWithText("完成").fetchSemanticsNodes().size == 1
         }

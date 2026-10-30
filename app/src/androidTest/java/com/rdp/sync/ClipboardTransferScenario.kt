@@ -209,8 +209,19 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             // A new offer stays alive while its dialog is hidden, but real route
             // Back disposal must revoke it. Previously copied remote bytes remain
             // ordinary remote files; this does not claim retroactive deletion.
-            compose.onNodeWithText("发送文件", useUnmergedTree = true).performClick()
-            compose.onNodeWithText("选择文件").performScrollTo().performClick()
+            val sendChip = compose.onNode(hasText("发送文件") and hasClickAction())
+            val sendStarted = SystemClock.elapsedRealtime()
+            sendChip.performScrollTo().assertIsDisplayed().assertIsEnabled()
+            measurements.put("reoffer_send_chip", JSONObject().put("started_elapsed_ms", sendStarted)
+                .put("visible_bounds", sendChip.fetchSemanticsNode().boundsInRoot.toString()))
+            sendChip.performClick()
+            waitFor("single Send chip action selected its file chooser") {
+                val chips = compose.onAllNodes(hasText("发送文件") and hasClickAction()).fetchSemanticsNodes()
+                chips.size == 1 && isSelected().matches(chips.single()) &&
+                    compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().size == 1
+            }
+            measurements.getJSONObject("reoffer_send_chip").put("selected_elapsed_ms", SystemClock.elapsedRealtime())
+            compose.onNodeWithText("选择文件").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
             navigateDocumentsFolder("source")
             originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
             tapDocumentAction("confirm-reoffer-selection") { node -> node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT") }

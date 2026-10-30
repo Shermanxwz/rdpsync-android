@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import unittest
 
-from collect_product_ui import methods_for, prefix_for, validate
+from collect_product_ui import methods_for, prefix_for, state_tag_for, validate
 
 PLAN = json.loads((Path(__file__).parent / 'product-ui-capture-plan.json').read_text())
 COMMIT = 'a' * 40
@@ -20,7 +20,8 @@ def ledger(method):
             'locale': spec['locale'], 'dark': spec['dark'], 'font_scale': spec['font_scale'],
             'device_width_dp': 640 if method == 'expandedWidth' else 320,
             'started_at_epoch_ms': 1001000, 'expected_files': expected,
-            'captured_files': [{'filename': name, 'sha256': 'b' * 64, 'captured_at_epoch_ms': 1002000}
+            'captured_files': [{'filename': name, 'sha256': 'b' * 64, 'captured_at_epoch_ms': 1002000,
+                                'draw_barriers': 1, 'active_state_tag': state_tag_for(name[len(prefix) + 1:-4])}
                                for name in expected]}
 
 
@@ -69,6 +70,25 @@ class UiCollectorTest(unittest.TestCase):
         with self.assertRaises(AssertionError): self.check(item)
         item = ledger('englishLight'); item['captured_files'][0]['captured_at_epoch_ms'] = 1000999
         with self.assertRaises(AssertionError): self.check(item)
+
+    def test_missing_or_invalid_draw_barrier_fails(self):
+        for value in [None, 0, -1, 6, True, '1']:
+            item = ledger('englishLight'); row = item['captured_files'][0]
+            if value is None: del row['draw_barriers']
+            else: row['draw_barriers'] = value
+            with self.assertRaises((AssertionError, KeyError)): self.check(item)
+
+    def test_wrong_or_missing_rendered_state_fails(self):
+        for value in [None, '', 'product-ui-unrelated', 'profiles']:
+            item = ledger('englishLight'); row = item['captured_files'][0]
+            if value is None: del row['active_state_tag']
+            else: row['active_state_tag'] = value
+            with self.assertRaises((AssertionError, KeyError)): self.check(item)
+
+    def test_dialog_suffix_maps_to_actual_underlying_state(self):
+        self.assertEqual(state_tag_for('delete-confirmation'), 'product-ui-detail')
+        self.assertEqual(state_tag_for('drive-write-consent'), 'product-ui-drive_consent')
+        self.assertEqual(state_tag_for('profiles'), 'product-ui-profiles')
 
     def test_hash_and_configuration_required(self):
         item = ledger('englishLight'); item['captured_files'][0]['sha256'] = 'not a hash'

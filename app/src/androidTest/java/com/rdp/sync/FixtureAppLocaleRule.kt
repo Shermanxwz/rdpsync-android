@@ -17,7 +17,8 @@ import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Legacy network fixtures assert exact Chinese app labels. Set only the target app's
- * locale before ActivityScenario starts; the system picker and keyboard stay unchanged.
+ * locale before ActivityScenario starts. No system/IME locale setting is written;
+ * an IME may still follow the target app's locale indirectly.
  * Public AOSP15 LocaleManagerShellCommand defines set/get-app-locales and an omitted
  * --locales restores the empty list. No localeconfig override or permission grant.
  */

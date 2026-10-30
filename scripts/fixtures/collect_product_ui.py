@@ -12,6 +12,21 @@ from collect_android_evidence import Collector
 
 DIRECTORY = 'rdpsync-product-ui'
 CLASS = 'com.rdp.sync.ProductUiInstrumentedTest'
+# Exact screenshot suffix -> rendered state contract in ProductUiInstrumentedTest.
+STATE_OVERRIDES = {
+    'delete-confirmation': 'detail', 'preconnect-drive-consent': 'detail',
+    'editor-validation': 'editor', 'save-busy-action': 'saving',
+    'settings-options': 'settings', 'session-menu-open': 'menu',
+    'session-menu-shortcuts': 'menu', 'space-invalid-name': 'space_name_new',
+    'space-busy-error': 'space_busy', 'drive-write-consent': 'drive_consent',
+    'drive-stop-confirmation': 'drive_accepted', 'plaintext-warning': 'sync',
+    'previous-fingerprint': 'changed',
+}
+
+
+def state_tag_for(suffix):
+    return 'product-ui-' + STATE_OVERRIDES.get(suffix, suffix)
+
 
 
 def methods_for(layout):
@@ -39,6 +54,9 @@ def validate(value, method, spec, commit, started):
     rows = value['captured_files']
     assert len(rows) == len(expected) and {row['filename'] for row in rows} == expected
     for row in rows:
+        suffix = row['filename'][len(prefix) + 1:-4]
+        assert type(row['draw_barriers']) is int and 1 <= row['draw_barriers'] <= 5
+        assert row['active_state_tag'] == state_tag_for(suffix)
         assert re.fullmatch('[0-9a-f]{64}', row['sha256'])
         assert row['captured_at_epoch_ms'] >= value['started_at_epoch_ms']
     return expected

@@ -47,6 +47,7 @@ import kotlin.math.abs
 @OptIn(ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 class XrdpSharedDriveInstrumentedTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
+    private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private val automation get() = instrumentation.uiAutomation
@@ -86,7 +87,7 @@ class XrdpSharedDriveInstrumentedTest {
                 .putString("resolution_mode", "PROFILE").putString("display_quality", "SHARP").commit()
             val device = Device(id = 940001L, name = "Owned RDPDR synthetic drive", host = "10.0.2.2", port = 3391,
                 username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768)
-            compose.runOnUiThread { compose.activity.setContent { RdpSyncTheme { if (showing.value) RdpConnectionScreen(device) { showing.value = false } } } }
+            compose.runOnUiThread { compose.activity.setContent { boundedScroll.Bind(); RdpSyncTheme { if (showing.value) RdpConnectionScreen(device) { showing.value = false } } } }
             trustFirstCertificate(fingerprint)
             awaitFrame()
             val offGeneration = RdpConnector.sessionGeneration()
@@ -288,11 +289,11 @@ class XrdpSharedDriveInstrumentedTest {
         if(id==R.string.space_title) { compose.runOnUiThread { browserView=desktopOrNull() }; browserServer=request(8765,"/state") }
         compose.onNodeWithContentDescription(label(R.string.session_menu)).assertIsDisplayed().performTouchInput { click() }
         waitFor("unique enabled menu item") { val n=compose.onAllNodesWithText(label(id)).fetchSemanticsNodes(); n.size==1 && isEnabled().matches(n.single()) }
-        compose.onNodeWithText(label(id)).performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+        boundedScroll.to(compose.onNodeWithText(label(id))).assertIsDisplayed().assertIsEnabled().performClick()
     }
     private fun click(id: Int) {
         waitFor("enabled app action ${context.resources.getResourceEntryName(id)}") { val n=compose.onAllNodesWithText(label(id)).fetchSemanticsNodes(); n.size==1 && isEnabled().matches(n.single()) }
-        val node=compose.onNodeWithText(label(id)); runCatching { node.performScrollTo() }; node.assertIsDisplayed().assertIsEnabled().performClick()
+        val node=boundedScroll.to(compose.onNodeWithText(label(id))); node.assertIsDisplayed().assertIsEnabled().performClick()
     }
     private fun browserIdle(timeout: Long=15_000) {
         waitFor("actual Shared space loading/picker/operation completed",timeout) {
@@ -301,7 +302,7 @@ class XrdpSharedDriveInstrumentedTest {
         }
     }
     private fun scrollBrowserTo(matcher: SemanticsMatcher) {
-        compose.onNode(hasScrollAction()).performScrollToNode(matcher)
+        boundedScroll.toNode(hasScrollAction(), matcher)
     }
     private fun closeBrowser(generation: Long) {
         compose.onNodeWithContentDescription(label(R.string.back)).assertIsDisplayed().performClick()
@@ -445,7 +446,7 @@ class XrdpSharedDriveInstrumentedTest {
             readyWhenSystemOverlayAbsent={RdpConnector.certificateChallenge()?.fingerprint==fingerprint && textExists(title) && focusedTitle(title)},allowAcknowledgement=true)
         coachmarkAcknowledged=result.getBoolean("acknowledged")
         assertEquals(0L,RdpConnector.nativeGetFrameId())
-        compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
+        boundedScroll.to(compose.onNodeWithText(fingerprint)).assertIsDisplayed()
         compose.onNodeWithText(label(R.string.fingerprint_save)).assertIsNotEnabled()
         click(R.string.fingerprint_verified)
         click(R.string.fingerprint_save)

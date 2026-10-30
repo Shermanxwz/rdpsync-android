@@ -13,6 +13,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -21,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.platform.graphics.HardwareRendererCompat
 import com.rdp.sync.data.Device
 import com.rdp.sync.manager.SyncDirection
 import com.rdp.sync.display.SessionDisplaySettings
@@ -58,6 +61,7 @@ class ProductUiInstrumentedTest {
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "product-ui-evidence").apply { mkdirs() } }
     private val capturedFiles = mutableListOf<JSONObject>()
     private var activePrefix = ""
+    private var activeStateTag = ""
     private var capturePlan: Set<String> = emptySet()
     private val profile = Device(id = 900081, name = "Design studio · 设计工作室", host = "workstation-long-name.example.test", username = "example-user-with-long-name", password = "")
 
@@ -82,6 +86,7 @@ class ProductUiInstrumentedTest {
         val localized = base.createConfigurationContext(config)
         val label: (Int) -> String = { localized.getString(it) }
         val screen = mutableStateOf("profiles")
+        val detailProfile = mutableStateOf(profile)
         val webDavCompletion = mutableLongStateOf(0)
         val syntheticInput = RdpInputDispatcher({ _, _, _, _ -> true }, { _, _, _ -> 1 }, { _, _, _ -> 1 }, { _, _, _ -> 1 })
         var driveStops = 0
@@ -141,13 +146,13 @@ class ProductUiInstrumentedTest {
                     LocalDensity provides Density(actualDensity, fontScale)) {
                     RdpSyncTheme(darkTheme = dark) {
                         Surface(Modifier.fillMaxSize()) {
-                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+                            Box(Modifier.fillMaxSize().testTag("product-ui-${screen.value}"), contentAlignment = Alignment.TopCenter) {
                                 Box(if (constrainedWidth == null) Modifier.fillMaxSize() else Modifier.width(constrainedWidth.dp).fillMaxHeight()) {
                                     when (screen.value) {
                                         "profiles", "empty", "loading" -> DeviceListScreen(
                                             UiState(devices = if (screen.value == "profiles") listOf(profile, Device(id = 900082, name = "Lab / 实验室", host = "lab.example.test", username = "example", password = "").also { it.credentialUnavailable = true }) else emptyList(),
                                                 isLoading = screen.value == "loading", webDavSettingsLoaded = true), {}, {}, {}, { _, _, _ -> }, { _, _, _ -> }, {})
-                                        "detail" -> DeviceDetailScreen(profile, {}, {}, {}, { deleted++ }, onConnectWithSharedDrive = { driveApprovals++ })
+                                        "detail" -> DeviceDetailScreen(detailProfile.value, {}, {}, {}, { deleted++ }, onConnectWithSharedDrive = { driveApprovals++ })
                                         "editor" -> DeviceEditScreen(null, { saved++ }, {})
                                         "saving" -> DeviceEditScreen(profile, { saved++ }, {}, isSaving = true)
                                         "error" -> DeviceEditScreen(profile, { saved++ }, {}, errorMessage = label(R.string.credential_locked_help))
@@ -195,15 +200,70 @@ class ProductUiInstrumentedTest {
                 }
             }
         }
-        fun show(name: String, capture: Boolean = true) { compose.runOnIdle { screen.value = name }; compose.waitForIdle(); if (capture) screenshot("$prefix-$name") }
+        fun expectedState(name: String): SemanticsMatcher {
+            val resource = when (name) {
+                "empty" -> R.string.empty_title
+                "loading" -> R.string.loading_profiles
+                "detail" -> R.string.connection_title
+                "editor" -> R.string.add_device
+                "saving" -> R.string.saving
+                "error", "locked" -> R.string.credential_locked_help
+                "settings" -> R.string.display_network
+                "space", "space_empty", "space_busy", "space_progress" -> R.string.space_title
+                "space_name_new" -> R.string.space_new_folder
+                "space_name_rename" -> R.string.space_rename
+                "space_delete_dialog" -> R.string.space_delete_title
+                "drive_consent" -> R.string.drive_consent_title
+                "drive_off" -> R.string.drive_status_off
+                "drive_requested" -> R.string.drive_status_requested
+                "drive_capable" -> R.string.drive_status_capable
+                "drive_accepted", "drive_accepted_rw" -> R.string.drive_status_accepted
+                "drive_used" -> R.string.drive_status_used
+                "drive_unsupported" -> R.string.drive_status_unsupported
+                "drive_rejected" -> R.string.drive_status_rejected
+                "drive_revoked" -> R.string.drive_status_revoked
+                "drive_transport_unavailable" -> R.string.drive_status_transport
+                "drive_protocol_failed" -> R.string.drive_status_failed
+                "drive_unknown" -> R.string.drive_status_unknown
+                "webdav" -> R.string.webdav_title
+                "webdav_busy" -> R.string.testing_connection
+                "sync" -> R.string.sync_file_title
+                "trust" -> R.string.certificate_confirm
+                "changed" -> R.string.certificate_changed
+                "staged" -> R.string.transfer_staged
+                "receive" -> R.string.transfer_awaiting
+                "progress" -> R.string.transfer_receiving
+                "unsupported" -> R.string.transfer_unsupported
+                else -> null
+            }
+            return when (name) {
+                "profiles" -> hasText(profile.name)
+                "menu" -> hasContentDescription(label(R.string.session_menu))
+                else -> hasText(label(requireNotNull(resource) { name }))
+            }
+        }
+        fun show(name: String, capture: Boolean = true) {
+            compose.runOnIdle { screen.value = name }
+            activeStateTag = "product-ui-$name"
+            val expected = expectedState(name)
+            compose.waitUntil(5_000) {
+                compose.onAllNodesWithTag(activeStateTag, useUnmergedTree = true).fetchSemanticsNodes().size == 1 &&
+                    compose.onAllNodes(expected, useUnmergedTree = true).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.waitForIdle()
+            if (capture) screenshot("$prefix-$name")
+        }
+        fun addAction(): SemanticsNodeInteraction = compose.onNode(
+            hasClickAction() and hasAnyDescendant(hasText(label(R.string.add_device))), useUnmergedTree = true)
         fun scrollSpaceTo(matcher: SemanticsMatcher) {
             // Lazy rows do not exist until the unique list composes them.
             compose.onNode(SemanticsMatcher.keyIsDefined(SemanticsActions.ScrollToIndex)).performScrollToNode(matcher)
         }
         show("profiles")
-        compose.onNodeWithText(label(R.string.add_device)).assertHeightIsAtLeast(48.dp)
+        addAction().assertIsDisplayed().assertIsEnabled().assertHasClickAction().assertHeightIsAtLeast(48.dp)
+        report.put("initial_merged_semantics", compose.onRoot().printToString().take(32768))
         show("empty")
-        compose.onNodeWithText(label(R.string.add_device)).assertHasClickAction().assertHeightIsAtLeast(48.dp)
+        addAction().performScrollTo().assertIsDisplayed().assertIsEnabled().assertHasClickAction().assertHeightIsAtLeast(48.dp)
         show("loading")
         compose.onNodeWithText(label(R.string.loading_profiles)).assertExists()
         show("detail")
@@ -218,6 +278,27 @@ class ProductUiInstrumentedTest {
         screenshot("$prefix-preconnect-drive-consent")
         compose.onNodeWithText(label(R.string.cancel)).performClick()
         assertEquals("Canceling preconnect consent must not connect", 0, driveApprovals)
+        fun armPreconnectWrite() {
+            compose.onNodeWithText(label(R.string.drive_connect_action)).performScrollTo().performClick()
+            compose.onNodeWithText(label(R.string.drive_allow_write)).assertIsOff()
+            compose.onNodeWithText(label(R.string.drive_connect_ro)).assertIsEnabled()
+            compose.onNodeWithText(label(R.string.drive_allow_write)).performScrollTo().performClick()
+            compose.onNodeWithText(label(R.string.drive_write_ack)).performScrollTo().performClick()
+            compose.onNodeWithText(label(R.string.drive_connect_rw)).assertIsEnabled()
+        }
+        armPreconnectWrite()
+        // The visible server subtitle is identical: TLS identity, not its label,
+        // must invalidate the already-acknowledged preconnect authority.
+        compose.runOnIdle { detailProfile.value = profile.copy(rdpServerName = "alternate-tls.example.test") }
+        compose.onNodeWithText(label(R.string.drive_consent_title)).assertDoesNotExist()
+        armPreconnectWrite()
+        compose.runOnIdle { detailProfile.value = detailProfile.value.copy(host = "changed-target.example.test") }
+        compose.onNodeWithText(label(R.string.drive_consent_title)).assertDoesNotExist()
+        armPreconnectWrite()
+        compose.runOnIdle { detailProfile.value = detailProfile.value.copy(credentialUnavailable = true) }
+        compose.onNodeWithText(label(R.string.drive_consent_title)).assertDoesNotExist()
+        compose.onNodeWithText(label(R.string.drive_connect_action)).assertDoesNotExist()
+        assertEquals("Authority changes never confirm a previous grant", 0, driveApprovals)
         show("editor")
         compose.onNodeWithText(label(R.string.save_connection)).performScrollTo().performClick()
         compose.onNodeWithText(label(R.string.validation_required)).performScrollTo().assertIsDisplayed()
@@ -287,7 +368,7 @@ class ProductUiInstrumentedTest {
         }
         show("drive_accepted_rw")
         compose.onNodeWithText(label(R.string.drive_mode_rw)).assertExists()
-        compose.runOnIdle { screen.value = "drive_accepted" }; compose.waitForIdle()
+        show("drive_accepted", capture = false)
         compose.onNodeWithText(label(R.string.stop_sharing)).performScrollTo().performClick()
         compose.onNodeWithText(label(R.string.drive_stop_title)).assertIsDisplayed()
         screenshot("$prefix-drive-stop-confirmation")
@@ -344,6 +425,11 @@ class ProductUiInstrumentedTest {
         } catch (failure: Throwable) {
             primaryFailure = failure
             report.put("success", false).put("failure", failure.stackTraceToString())
+            runCatching {
+                val roots = compose.onAllNodes(isRoot(), useUnmergedTree = true)
+                val count = roots.fetchSemanticsNodes().size
+                report.put("failure_semantics", JSONArray((0 until minOf(count, 3)).map { roots[it].printToString().take(32768) }))
+            }
             throw failure
         } finally {
             syntheticInput.shutdown()
@@ -382,7 +468,27 @@ class ProductUiInstrumentedTest {
         compose.waitForIdle()
         require(name.startsWith("$activePrefix-") && name.matches(Regex("[A-Za-z0-9_.-]+")))
         check(capturedFiles.size < 64) { "Finite UI evidence frame budget exceeded" }
-        val bitmap = requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+        val drawingWasEnabled = HardwareRendererCompat.isDrawingEnabled()
+        var barriers = 0
+        val bitmap = try {
+            HardwareRendererCompat.setDrawingEnabled(true)
+            // Public Compose capture forces a real Android redraw/PixelCopy;
+            // waitForIdle alone only settles composition on pinned Compose1.7.2.
+            // Discard these temporary window images. Evidence remains an unedited
+            // full-display UiAutomation screenshot, including system surfaces.
+            if (!force) {
+                compose.onNodeWithTag(activeStateTag, useUnmergedTree = true).assertIsDisplayed()
+                    .captureToImage().asAndroidBitmap().recycle()
+                barriers++
+                for (kind in listOf(isDialog(), isPopup())) {
+                    val windows = compose.onAllNodes(kind, useUnmergedTree = true)
+                    val count = windows.fetchSemanticsNodes().size
+                    check(count <= 2) { "Unexpected number of fixture windows" }
+                    for (index in 0 until count) { windows[index].captureToImage().asAndroidBitmap().recycle(); barriers++ }
+                }
+            }
+            requireNotNull(instrumentation.uiAutomation.takeScreenshot())
+        } finally { HardwareRendererCompat.setDrawingEnabled(drawingWasEnabled) }
         val file = File(evidence, "$name.png")
         try {
             file.outputStream().use { check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) }
@@ -392,7 +498,7 @@ class ProductUiInstrumentedTest {
                 val buffer = ByteArray(65536)
                 while (true) { val count = input.read(buffer); if (count < 0) break; digest.update(buffer, 0, count) }
             }
-            capturedFiles += JSONObject().put("filename", file.name).put("captured_at_epoch_ms", System.currentTimeMillis()).put("sha256", digest.digest().joinToString("") { "%02x".format(it) })
+            capturedFiles += JSONObject().put("filename", file.name).put("draw_barriers", barriers).put("active_state_tag", activeStateTag).put("captured_at_epoch_ms", System.currentTimeMillis()).put("sha256", digest.digest().joinToString("") { "%02x".format(it) })
         } finally { bitmap.recycle() }
     }
 }

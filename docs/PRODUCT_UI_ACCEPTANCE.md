@@ -6,7 +6,7 @@ This is a bounded acceptance plan, not a claim of flawless UI or a substitute fo
 
 - Local app UI: ink/teal, explicit foreground/background pairs for light and dark; semantic error surfaces with an icon and explanatory text, never color alone. Dynamic wallpaper colors remain an optional theme parameter, not the product default.
 - System fonts with native Chinese shaping; 22sp major titles, 16sp body, 14sp supporting copy, flexible line height. User font scale is not capped.
-- 24/16/8dp spacing; 24dp cards; 840dp maximum list width and 560dp form/detail width. Long identifiers wrap instead of disappearing behind ellipses.
+- 24/16/12/8dp spacing; 24dp cards; 840dp maximum list width and 560dp form/detail width. At <=400dp, compact decorative icons and a shorter header leave more room for profiles. List metadata uses one-line ellipsis with full values retained in semantics and in detail/edit views; the port stays an unbroken unit. Details wrap long identifiers. The Add action reserves layout space instead of covering credential warnings.
 - Actions have at least 48dp interactive targets. Long dialogs scroll; confirm/cancel stay outside scrolling content. Checkbox/radio/switch rows expose one selection action rather than duplicate nested controls.
 - Main pages are safe-inset-aware. Session geometry is separate: the existing default fullscreen, single 48dp expandable handle, default direct touch, desktop/InputConnection identity, IME crop, rotation mapping and explicit bordered mode remain unchanged.
 
@@ -25,7 +25,7 @@ This is a bounded acceptance plan, not a claim of flawless UI or a substitute fo
 
 `ProductUiInstrumentedTest` is UI-only synthetic evidence and does not establish network or RDPDR correctness. It captures English and Chinese in both light and dark, a 320dp constrained form at font scale 1.5, and a separately required >=600dp window at scale 1.5. For narrow **dialog** acceptance, run the emulator at an actual 320dp width; constraining a composable alone does not resize Android dialog windows. The expanded test explicitly skips on narrower windows. No physical foldable claim is made.
 
-Inspect the actual PNGs in `product-ui-evidence`, not merely the test verdict. Require no overlap/clipping of essential text; accessible reachable primary/cancel actions; coherent hierarchy; long host/account/error text; legible foreground pairs; safe loading/disabled states. Verify dialog Back/dismiss and repeated actions. A test file existing is not a passed run.
+Each named capture requires the requested synthetic state in semantics and supported Compose `captureToImage` draw barriers for the main window and any dialogs/popups before taking an unedited full-display UiAutomation PNG. `waitForIdle` alone is not treated as proof that Android drew the requested state. Inspect the actual PNGs in `product-ui-evidence`, not merely the test verdict. Require no overlap/clipping of essential text; accessible reachable primary/cancel actions; coherent hierarchy; long host/account/error text; legible foreground pairs; safe loading/disabled states. Verify dialog Back/dismiss and repeated actions. A test file existing is not a passed run.
 
 `python scripts/test-product-ui.py` checks static bilingual parity, format placeholders and the explicit brand text-color pairs at WCAG 4.5:1. It is not a screenshot, TalkBack, contrast-over-remote-content or physical-device test.
 

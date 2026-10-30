@@ -1274,8 +1274,11 @@ class RdpFixtureInstrumentedTest {
     private fun matchesImeKey(node: AccessibilityNodeInfo, label: String): Boolean {
         val text = node.text?.toString()?.trim().orEmpty()
         val description = node.contentDescription?.toString()?.trim().orEmpty()
-        return if (label == "a") text == label || description == label
-            else text.equals(label, true) || description.equals(label, true)
+        // Actual API35 Gboard may follow the target app locale indirectly. These
+        // are the two observed labels for the same Enter key, never an action fallback.
+        fun matches(value: String): Boolean = if (label == "Enter")
+            value.equals("Enter", true) || value == "Enter 键" else value == label
+        return matches(text) || matches(description)
     }
 
     /** No global accessibility listener: UiAutomation has no getter to restore its previous owner. */
@@ -1298,14 +1301,17 @@ class RdpFixtureInstrumentedTest {
                         observed.put(JSONObject().put("text", text.take(80)).put("description", description.take(80))
                             .put("bounds", rect.toShortString()))
                     }
-                    val matchesLabel = if (label == "a") text == label || description == label
-                        else text.equals(label, true) || description.equals(label, true)
+                    val matchesLabel = matchesImeKey(node, label)
                     if (matchesLabel && node.isVisibleToUser && node.isEnabled && rect.width() > 0 &&
                         rect.height() > 0 && bounds.contains(rect)) {
                         val copy = AccessibilityNodeInfo.obtain(node)
                         if (copy.refresh() && copy.isVisibleToUser && copy.isEnabled) {
                             val freshBounds = Rect().also(copy::getBoundsInScreen)
-                            if (freshBounds == rect && matchesImeKey(copy, label)) {
+                            val observedLabel = if (text.isNotEmpty()) text else description
+                            val freshLabel = copy.text?.toString()?.trim().orEmpty().ifEmpty {
+                                copy.contentDescription?.toString()?.trim().orEmpty()
+                            }
+                            if (freshBounds == rect && matchesImeKey(copy, label) && freshLabel == observedLabel) {
                                 val key = "${window.id}:${copy.hashCode()}:${rect.toShortString()}"
                                 matches.put(key, ObservedImeKey(copy, if (text.isNotEmpty()) text else description,
                                     window.id, bounds, rect, root.hashCode(), root.packageName?.toString().orEmpty()))?.node?.recycle()
@@ -1364,7 +1370,10 @@ class RdpFixtureInstrumentedTest {
             val liveBounds = Rect().also(key.node::getBoundsInScreen)
             assertTrue("Observed IME key changed before injection", key.node.isVisibleToUser && key.node.isEnabled &&
                 matchesImeKey(key.node, label) && liveBounds == key.keyBounds && key.node.windowId == key.windowId &&
-                key.node.packageName?.toString() == key.rootPackage)
+                key.node.packageName?.toString() == key.rootPackage &&
+                key.node.text?.toString()?.trim().orEmpty().ifEmpty {
+                    key.node.contentDescription?.toString()?.trim().orEmpty()
+                } == key.label)
             attempt.put("before_gesture", key.snapshot()).put("injected_at_ms", SystemClock.elapsedRealtime())
                 .put("injection", "UiAutomation.injectInputEvent(sync=true)")
             val events = JSONArray()

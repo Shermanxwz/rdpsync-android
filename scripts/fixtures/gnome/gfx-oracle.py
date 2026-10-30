@@ -17,7 +17,9 @@ OUT.mkdir(parents=True,exist_ok=True)
 CLIENT=(ROOT/'build/reference-freerdp/client-path.txt').read_text().strip()
 PIN=(ROOT/'build/gnome-evidence/certificate-sha256.txt').read_text().strip()
 result={'scope':'Unmodified software Progressive decoder; empirical source RGB bound 2/channel for GNOME46 synthetic flat patches only',
-        'client_sha256':hashlib.sha256(Path(CLIENT).read_bytes()).hexdigest(), 'frames':[], 'success':False}
+        'client_sha256':hashlib.sha256(Path(CLIENT).read_bytes()).hexdigest(), 'frames':[], 'success':False,
+        'initial_paint_observations':[], 'initial_paint_observation_count':0,
+        'initial_paint_trace_scope':'Last64 actual captures; initial.png retains only the latest capture, not every trace PNG'}
 args=[CLIENT,'/v:127.0.0.1:33891','/u:rdpfixture','/p:rdpsync-fixture-only',f'/cert:fingerprint:sha256:{PIN}',
       '/sec:nla','/size:1024x768','/bpp:32','/gdi:sw','/gfx:progressive','/dynamic-resolution',
       '/t:rdpsync-gnome-gfx-oracle','/log-level:DEBUG',
@@ -39,7 +41,8 @@ def wait(predicate,seconds=30):
         time.sleep(.2)
     raise AssertionError('Official GFX oracle observable readiness timed out')
 
-def capture(window,name,width=1024,height=768):
+def capture(window,name,width=1024,height=768,observe=False):
+    started=time.monotonic()
     path=OUT/f'{name}.png'
     subprocess.run(['import','-window',window,str(path)],check=True,timeout=5)
     im=Image.open(path).convert('RGB')
@@ -49,7 +52,10 @@ def capture(window,name,width=1024,height=768):
     expected=[(255,0,0),(0,255,0),(0,0,255),[(85,204,204),(204,170,85),(153,85,221)][len(current['text'])%3],
               (68,221,136) if current['clicks']%2 else (221,68,136),(17,34,51)]
     samples=[{'point':pt,'rgb':im.getpixel(pt),'source_rgb':rgb} for pt,rgb in zip(points,expected)]
-    return {'file':path.name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'dimensions':im.size,'samples':samples}
+    frame={'file':path.name,'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'dimensions':im.size,'samples':samples}
+    if observe:
+        frame.update(capture_started_monotonic=started,capture_completed_monotonic=time.monotonic(),server_state=current)
+    return frame
 
 try:
     def find_window():
@@ -60,9 +66,15 @@ try:
         s=state()
         return s if s.get('ready') and (s['width'],s['height'])==(1024,768) else None
     initial=wait(initial_ready)
+    # Keep the actual readiness evidence even if the following pixel gate fails.
+    result['initial_server']=initial
+    result['initial_ready_observed_monotonic']=time.monotonic()
     def painted():
-        f=capture(window,'initial')
-        return f if all(source_matches(x['source_rgb'],x['rgb']) for x in f['samples']) else None
+        f=capture(window,'initial',observe=True)
+        matches=all(source_matches(x['source_rgb'],x['rgb']) for x in f['samples'])
+        result['initial_paint_observation_count']+=1
+        result['initial_paint_observations']=(result['initial_paint_observations']+[dict(f,source_regions_match=matches)])[-64:]
+        return f if matches else None
     assert initial['text']=='', 'Oracle requires a pristine synthetic text state'
     assert initial['clicks']==0, 'Oracle requires a pristine synthetic pointer state'
     first=wait(painted)
@@ -104,7 +116,17 @@ try:
     assert p.poll() is None, 'Official client exited after final paint'
     result['client_alive_after_actual_input_and_frame']=True
     result['live_gates_passed']=True
+except BaseException as error:
+    result['failure']={'type':type(error).__name__,'message':str(error)[:512],'observed_monotonic':time.monotonic()}
+    raise
 finally:
+    # Read-only state before this owned client's teardown removes the headless monitor.
+    # Diagnostic failure must never replace the original pixel/input failure.
+    try:
+        result['pre_cleanup_server']=state()
+        result['pre_cleanup_observed_monotonic']=time.monotonic()
+    except Exception as error:
+        result['pre_cleanup_observation_error']=type(error).__name__+': '+str(error)[:256]
     if p.poll() is None:
         p.terminate()
         try:p.wait(timeout=5)

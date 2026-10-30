@@ -7,6 +7,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -36,6 +38,7 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
     onSync: (SyncDirection) -> Unit, onSaveWebDavSettings: (String, String, String) -> Unit,
     onTestWebDavSettings: (String, String, String) -> Unit, onMessageShown: () -> Unit, onSharedSpace: () -> Unit = {}) {
     val context = LocalContext.current
+    val compact = LocalConfiguration.current.screenWidthDp <= 400
     val syncDescription = stringResource(R.string.sync)
     val syncingDescription = stringResource(R.string.sync_in_progress)
     var showSettings by remember { mutableStateOf(false) }
@@ -68,17 +71,28 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
                 Icon(Icons.Default.Settings, stringResource(R.string.settings))
             }
         })
-    }, floatingActionButton = {
-        if (uiState.devices.isNotEmpty()) ExtendedFloatingActionButton(onClick = onAddDevice,
-            icon = { Icon(Icons.Default.Add, null) }, text = { Text(stringResource(R.string.add_device)) })
+    }, bottomBar = {
+        // Reserve the action's measured height rather than overlaying a profile's
+        // credential warning. Text scaling and navigation insets remain intact.
+        if (uiState.devices.isNotEmpty()) Surface(color = MaterialTheme.colorScheme.surface) {
+            Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp), contentAlignment = Alignment.Center) {
+                Row(Modifier.widthIn(max = 840.dp).fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    ExtendedFloatingActionButton(onClick = onAddDevice,
+                        modifier = if (compact) Modifier.fillMaxWidth() else Modifier,
+                        icon = { Icon(Icons.Default.Add, null) }, text = { Text(stringResource(R.string.add_device)) })
+                }
+            }
+        }
     }) { insets ->
         Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
-            LazyColumn(Modifier.widthIn(max = 840.dp).fillMaxSize(), contentPadding = PaddingValues(24.dp, 16.dp, 24.dp, 104.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            LazyColumn(Modifier.widthIn(max = 840.dp).fillMaxSize(), contentPadding = PaddingValues(if (compact) 16.dp else 24.dp),
+                verticalArrangement = Arrangement.spacedBy(if (compact) 12.dp else 16.dp)) {
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(stringResource(R.string.profiles_title), style = MaterialTheme.typography.headlineMedium)
-                        Text(stringResource(R.string.profiles_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!compact) Text(stringResource(R.string.profiles_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        else if (uiState.devices.isNotEmpty()) Text(stringResource(R.string.profiles_count, uiState.devices.size),
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
                 if (uiState.isLoading) item {
@@ -98,8 +112,8 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
                         }
                     }
                 } else {
-                    item { SectionHeading(stringResource(R.string.profiles_section), stringResource(R.string.profiles_count, uiState.devices.size)) }
-                    items(uiState.devices, key = { it.id }) { device -> DeviceCard(device) { onDeviceClick(device.id) } }
+                    if (!compact) item { SectionHeading(stringResource(R.string.profiles_section), stringResource(R.string.profiles_count, uiState.devices.size)) }
+                    items(uiState.devices, key = { it.id }) { device -> DeviceCard(device, compact = compact) { onDeviceClick(device.id) } }
                 }
                 item { ProductNotice(stringResource(R.string.sync_hint)) }
             }
@@ -159,19 +173,30 @@ internal fun WebDavSettingsDialog(initialUrl: String, initialUsername: String, i
 }
 
 @Composable
-fun DeviceCard(device: Device, onClick: () -> Unit) {
+fun DeviceCard(device: Device, compact: Boolean = false, onClick: () -> Unit) {
     Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest)) {
-        Row(Modifier.padding(20.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            ProductIcon(Icons.Default.Computer)
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(device.name, style = MaterialTheme.typography.titleMedium)
-                Text("${device.host}:${device.port}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (device.username.isNotEmpty()) Text(device.username, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                if (device.credentialUnavailable) Text(stringResource(if (device.passwordFormat == 2) R.string.password_missing else R.string.password_locked),
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+        Column(Modifier.padding(if (compact) 16.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Surface(Modifier.size(if (compact) 32.dp else 44.dp), shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer) {
+                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Computer, null, modifier = Modifier.size(if (compact) 20.dp else 26.dp)) }
+                }
+                Text(device.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
             }
-            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+            // A port is an indivisible unit. Full identifiers remain in semantics
+            // and on the detail/edit route; visual ellipsis never rewrites them.
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(device.host, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Text(":${device.port}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, softWrap = false)
+            }
+            if (device.username.isNotEmpty()) Text(device.username, style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (device.credentialUnavailable) Text(stringResource(if (device.passwordFormat == 2) R.string.password_missing else R.string.password_locked),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
     }
 }

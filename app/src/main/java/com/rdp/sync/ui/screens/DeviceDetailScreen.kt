@@ -15,13 +15,17 @@ import androidx.compose.ui.unit.dp
 import com.rdp.sync.R
 import com.rdp.sync.data.Device
 import com.rdp.sync.network.SharedDriveMode
+import com.rdp.sync.security.CertificateEndpoint
 import com.rdp.sync.ui.sharedspace.SharedDriveConsentDialog
 import com.rdp.sync.ui.components.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DeviceDetailScreen(device: Device, onBack: () -> Unit, onEdit: () -> Unit, onConnect: () -> Unit, onDelete: () -> Unit, onConnectWithSharedDrive: ((SharedDriveMode) -> Unit)? = null) {
-    var showDriveConsent by remember { mutableStateOf(false) }
+    val consentEndpoint = CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName)
+    // A profile can refresh while this screen is open. An acknowledgment for
+    // another endpoint (including an invisible TLS-name change) never survives.
+    var showDriveConsent by remember(consentEndpoint, device.credentialUnavailable) { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     Scaffold(topBar = {
         TopAppBar(title = { Text(stringResource(R.string.connection_title)) },
