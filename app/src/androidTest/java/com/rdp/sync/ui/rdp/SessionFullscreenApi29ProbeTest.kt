@@ -310,14 +310,29 @@ class SessionFullscreenApi29ProbeTest {
         val expected = logical
         val callbackStart = synchronized(logicalCallbacks) { logicalCallbacks.length() }
         val resources = compose.activity.resources
-        val thresholdId = resources.getIdentifier("system_gestures_distance_threshold", "dimen", "android")
-        assertTrue("Actual platform edge threshold must be observable", thresholdId != 0)
-        val threshold = resources.getDimensionPixelSize(thresholdId)
+        // Pinned Android10 SystemGesturesPointerEventListener.onConfigurationChanged:
+        // https://android.googlesource.com/platform/frameworks/base/+/android-10.0.0_r47/services/core/java/com/android/server/wm/SystemGesturesPointerEventListener.java
+        val thresholdId = resources.getIdentifier("status_bar_height", "dimen", "android")
+        assertTrue("Actual API29 status-bar threshold resource must exist", thresholdId != 0)
+        val statusBarThreshold = resources.getDimensionPixelSize(thresholdId)
+        assertTrue("Actual API29 status-bar threshold must be positive", statusBarThreshold > 0)
+        var topCutout = Rect()
+        compose.runOnUiThread { topCutout = compose.activity.windowManager.defaultDisplay.cutout?.boundingRectTop ?: Rect() }
+        val cutoutAddition = if (!topCutout.isEmpty) {
+            val cutoutId = resources.getIdentifier("display_cutout_touchable_region_size", "dimen", "android")
+            assertTrue("Actual API29 top-cutout touch region resource must exist", cutoutId != 0)
+            resources.getDimensionPixelSize(cutoutId).also { assertTrue("Top-cutout addition must be nonnegative", it >= 0) }
+        } else 0
+        val threshold = statusBarThreshold + cutoutAddition
         val distance = minOf(200f, baseline.getInt("root_height") * 0.2f)
         assertTrue("One edge gesture must cross the actual platform threshold", distance > threshold)
         val x = baseline.getInt("root_left") + baseline.getInt("root_width") / 2f
         val top = baseline.getInt("root_top") + 1f
         val evidence = JSONObject().put("before", baseline).put("threshold_px", threshold)
+            .put("threshold_source", "AOSP android-10.0.0_r47 SystemGesturesPointerEventListener.onConfigurationChanged")
+            .put("threshold_resource", "android:dimen/status_bar_height").put("status_bar_threshold_px", statusBarThreshold)
+            .put("top_cutout_bounds", topCutout.toShortString())
+            .put("cutout_addition_resource", "android:dimen/display_cutout_touchable_region_size").put("cutout_addition_px", cutoutAddition)
             .put("distance_px", distance).put("visibility_asserted", false)
             .put("scope", "One real finger edge gesture; inspect screenshots/windows for reveal. No flag-based transient visibility claim.")
         val events = JSONArray()

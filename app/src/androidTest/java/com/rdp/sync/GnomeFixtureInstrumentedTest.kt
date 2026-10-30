@@ -29,6 +29,8 @@ import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.runner.RunWith
 import java.io.File
 import java.net.InetSocketAddress
@@ -37,8 +39,12 @@ import kotlin.math.abs
 
 /** Native GNOME/Mutter/PipeWire fixture. Never xrdp, GDM, or a user's desktop. */
 @RunWith(AndroidJUnit4::class)
+@OptIn(androidx.compose.ui.test.ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 class GnomeFixtureInstrumentedTest {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    // Compose1.7.2 defaults to UnconfinedTestDispatcher: external IO completion
+    // may recompose Dialog/layout on that worker through its test interceptor.
+    // Queue effects until the existing UI-thread test-clock pump instead.
+    @get:Rule val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "gnome-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()

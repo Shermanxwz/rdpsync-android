@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.net.Uri
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.KeyEvent
@@ -43,6 +45,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     private val automation get() = instrumentation.uiAutomation
     private val evidence by lazy { File(context.getExternalFilesDir(null), peer.evidenceName).apply { mkdirs() } }
     private val measurements = JSONObject()
+    private val seededMediaUris = linkedMapOf<String, Pair<String, String>>()
     private val pickerEvents = JSONArray()
     private val folder = "rdpsync-transfer-${SystemClock.uptimeMillis()}"
     private val downloads get() = "/sdcard/Download/$folder"
@@ -256,6 +259,8 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             measurements.put("picker_events", pickerEvents).put("diagnostics", RdpConnector.getDiag())
                 .put("native_transfer_state", RdpConnector.nativeFileTransferState().joinToString(","))
             screenshot("99-transfer-final")
+            val seedCleanup = cleanOwnedMediaSeeds()
+            measurements.put("synthetic_seed_cleanup", seedCleanup)
             File(evidence, "measurements.json").writeText(measurements.toString(2))
             File(evidence, "accessibility-final.txt").writeText(documentNodes { true }.joinToString("\n") { node ->
                 try { "${node.packageName} ${node.viewIdResourceName} ${node.text} ${node.contentDescription}" } finally { node.recycle() }
@@ -265,6 +270,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             compose.runOnUiThread { showing.value = false }
             RdpConnector.disconnect()
             automation.serviceInfo = originalService
+            assertTrue("Only owned synthetic MediaStore seed rows must be removed", (0 until seedCleanup.length()).all { seedCleanup.getJSONObject(it).getBoolean("removed") })
         }
     }
 
@@ -284,14 +290,71 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         }
     }
     private fun seedOwnedDocuments() {
-        shell("mkdir -p $downloads/source $downloads/destination")
+        check(Build.VERSION.SDK_INT >= 31) { "The isolated API35 SAF fixture uses shell stdin pipes" }
+        require(folder.matches(Regex("rdpsync-transfer-[0-9]+")))
+        val entries = JSONArray()
+        measurements.put("synthetic_seed_media_store", entries)
         val local = File(evidence, "originals").apply { mkdirs() }
-        samples("android").forEach { (name, bytes) ->
-            File(local, name).writeBytes(bytes); shell("cp ${local.absolutePath}/$name $downloads/source/$name")
+        fun seed(child: String, name: String, bytes: ByteArray) {
+            require(child in setOf("source", "destination"))
+            require(name in samples("android").keys || name == "server-binary.bin")
+            val relative = "Download/$folder/$child/"
+            File(local, if (child == "destination") "sentinel.bin" else name).writeBytes(bytes)
+            // AOSP15 cmds/content attributes these operations to com.android.shell.
+            // Publish real Downloads metadata, not an eventually indexed shell copy.
+            shell("content insert --uri content://media/external_primary/downloads --bind relative_path:s:$relative --bind _display_name:s:$name --bind mime_type:s:application/octet-stream --bind is_pending:i:1")
+            val query = shell("content query --uri content://media/external_primary/downloads --projection _id:_display_name:relative_path:owner_package_name:is_pending --where relative_path='$relative'")
+            val row = query.lineSequence().single { it.contains("_display_name=$name,") }
+            val id = requireNotNull(Regex("(?:^|[ ,])_id=([0-9]+)(?:,|$)").find(row)).groupValues[1]
+            val uri = "content://media/external_primary/downloads/$id"
+            seededMediaUris[uri] = relative to name
+            assertTrue("Fixture seed must belong to shell, not the app under test", row.contains("owner_package_name=com.android.shell"))
+            assertTrue(row.contains("is_pending=1"))
+            val pipes = automation.executeShellCommandRw("content write --uri $uri")
+            try {
+                ParcelFileDescriptor.AutoCloseOutputStream(pipes[1]).use { it.write(bytes) }
+                val output = ParcelFileDescriptor.AutoCloseInputStream(pipes[0]).bufferedReader().use { it.readText() }
+                assertTrue("Synthetic shell content write failed: $output", output.isBlank())
+            } finally { pipes.forEach { runCatching { it.close() } } }
+            shell("content update --uri $uri --bind is_pending:i:0")
+            val published = shell("content query --uri $uri --projection _display_name:relative_path:owner_package_name:is_pending:_size")
+            assertTrue(published.contains("_display_name=$name,"))
+            assertTrue(published.contains("relative_path=$relative,"))
+            assertTrue(published.contains("owner_package_name=com.android.shell"))
+            assertTrue(published.contains("is_pending=0"))
+            val actual = ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand("content read --uri $uri")).use { it.readBytes() }
+            assertArrayEquals("Published shell-owned seed bytes", bytes, actual)
+            var denied = false
+            try {
+                instrumentation.targetContext.contentResolver.openInputStream(Uri.parse(uri))?.use { it.read() }
+            } catch (_: SecurityException) { denied = true }
+            assertTrue("Target app must need real SAF consent for shell-owned source", denied)
+            entries.put(JSONObject().put("uri", uri).put("relative_path", relative).put("name", name)
+                .put("size", bytes.size).put("sha256", sha256(actual)).put("owner", "com.android.shell")
+                .put("published", true).put("target_read_denied_before_saf", true))
         }
-        val sentinel = File(local, "sentinel.bin").apply { writeText("Original destination must remain unchanged\n") }
-        shell("cp ${sentinel.absolutePath} $downloads/destination/server-binary.bin")
+        samples("android").forEach { (name, bytes) -> seed("source", name, bytes) }
+        seed("destination", "server-binary.bin", "Original destination must remain unchanged\n".toByteArray())
         assertEquals(samples("android").mapValues { sha256(it.value) }, directoryHashes("source"))
+        assertEquals(sha256("Original destination must remain unchanged\n".toByteArray()), directoryHashes("destination").getValue("server-binary.bin"))
+    }
+
+    private fun cleanOwnedMediaSeeds(): JSONArray = JSONArray().also { results ->
+        seededMediaUris.forEach { (uri, expected) ->
+            require(uri.matches(Regex("content://media/external_primary/downloads/[0-9]+")))
+            val item = JSONObject().put("uri", uri)
+            results.put(item)
+            try {
+                val current = shell("content query --uri $uri --projection _display_name:relative_path:owner_package_name")
+                require(current.lineSequence().count { it.startsWith("Row:") } == 1)
+                require(current.contains("_display_name=${expected.second},") &&
+                    current.contains("relative_path=${expected.first},") && current.contains("owner_package_name=com.android.shell"))
+                item.put("verified_owned_path", expected.first).put("verified_owned_name", expected.second)
+                shell("content delete --uri $uri")
+                val remaining = shell("content query --uri $uri --projection _id")
+                item.put("removed", remaining.trim() == "No result found.")
+            } catch (failure: Exception) { item.put("removed", false).put("error", failure.javaClass.simpleName) }
+        }
     }
     private fun directoryHashes(child: String): Map<String, String> {
         require(child in setOf("source", "destination"))
@@ -336,6 +399,11 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     }
     private fun navigateDocumentsFolder(child: String) {
         waitFor("real system DocumentsUI") { documentNodes { true }.also { nodes -> nodes.forEach { it.recycle() } }.isNotEmpty() }
+        if (child == "destination") {
+            navigateObservedTreeDestination()
+            return
+        }
+        require(child == "source")
         tapDocumentAction("show-document-roots") { it.contentDescription?.toString() in setOf("Show roots", "Open navigation drawer") }
         // Only DocumentsUI has MANAGE_DOCUMENTS. Its visible protected-provider
         // root proves the standalone test process loaded through the real path;
@@ -362,6 +430,46 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         tapDocumentLabel(folder)
         tapDocumentLabel(child)
     }
+    private fun documentBreadcrumbs(): List<String> {
+        val nodes = documentNodes { it.viewIdResourceName?.endsWith("/breadcrumb_text") == true }
+        return try {
+            nodes.sortedBy { Rect().also(it::getBoundsInScreen).left }.map { requireNotNull(it.text).toString() }
+        } finally { nodes.forEach { it.recycle() } }
+    }
+
+    private fun navigateObservedTreeDestination() {
+        // Actual API35 ACTION_OPEN_DOCUMENT_TREE has no roots drawer in this
+        // single-volume view. Navigate only its observed internal-storage root
+        // or the already selected exact owned destination, never grant the root.
+        var crumbs = emptyList<String>()
+        waitFor("observed tree-picker breadcrumb", 15_000) {
+            crumbs = documentBreadcrumbs()
+            crumbs.isNotEmpty()
+        }
+        // Pinned AOSP15 ExternalStorageProvider uses Settings.Global.DEVICE_NAME
+        // for the primary volume title; do not guess it from Build.MODEL.
+        val rootTitle = shell("settings get global device_name")
+        require(rootTitle.isNotBlank() && rootTitle != "null")
+        val navigation = JSONObject().put("initial_breadcrumbs", JSONArray(crumbs))
+            .put("expected_internal_root_title", rootTitle)
+            .put("expected_owned_folder", folder).put("elapsed_ms", SystemClock.elapsedRealtime())
+        val records = measurements.optJSONArray("tree_picker_navigation") ?: JSONArray().also { measurements.put("tree_picker_navigation", it) }
+        records.put(navigation)
+        if (crumbs.takeLast(2) == listOf(folder, "destination")) {
+            navigation.put("already_at_exact_owned_destination", true)
+        } else {
+            assertEquals("Only the observed fixture internal-storage root is accepted", listOf(rootTitle), crumbs)
+            tapDocumentLabel("Download", ancestorResourceSuffix = "/dir_list")
+            tapDocumentLabel(folder, ancestorResourceSuffix = "/dir_list")
+            tapDocumentLabel("destination", ancestorResourceSuffix = "/dir_list")
+        }
+        waitFor("actual exact owned destination breadcrumb before grant", 15_000) {
+            documentBreadcrumbs().takeLast(2) == listOf(folder, "destination")
+        }
+        navigation.put("final_breadcrumbs", JSONArray(documentBreadcrumbs()))
+            .put("root_grant_attempted", false)
+    }
+
     private fun tapDocumentLabel(label: String, longPress: Boolean = false, ancestorResourceSuffix: String? = null) =
         tapDocumentAction(label, longPress) { it.text?.toString() == label &&
             (ancestorResourceSuffix == null || ancestorResourceId(it, ancestorResourceSuffix) != null) }
