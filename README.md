@@ -11,20 +11,23 @@ RdpSync is an open Android RDP client that combines remote desktop connections, 
 
 ## 1.1 preview: display and input overhaul
 
-The preview starts every session in **direct-touch mode**. Touchpad mode remains a temporary session toggle. Display settings offer **fit window**, saved profile dimensions, 1280×720 and 1920×1080, with economy/balanced/sharp quality ceilings and opt-in adaptive quality.
+The GNOME/software-GFX and default-fullscreen follow-up below is **not included in the existing `v1.1.0-preview` APK**. Its exact-commit runtime checks are tracked separately in [verification notes](docs/VERIFICATION.md).
+
+The preview starts every session in **direct-touch, fullscreen mode**. The small **会话菜单** handle opens keyboard, disconnect, input and display controls; choose **显示工具栏** for bordered tools and **进入全屏** to return. Android system bars can be revealed with an edge swipe. Fullscreen is a fresh-session default, not a saved override. Touchpad mode remains a temporary session toggle. Display settings offer **fit window**, saved profile dimensions, 1280×720 and 1920×1080, with economy/balanced/sharp quality ceilings and opt-in adaptive quality.
 
 - Live resolution changes use the RDP Display Control channel, after server capability negotiation. The displayed size is the **actual received framebuffer**, not a stretched approximation. Unsupported or unacknowledged requests retain the current session and offer an explicit reconnect.
 - Fit-window sizing preserves aspect ratio and safely bounds memory; rotation/window changes are debounced. Opening the Android keyboard does not request a remote desktop resize.
 - Adaptive mode uses genuine server-reported RTT/bandwidth plus local bitmap-copy/draw-submission timings. It uses sustained samples and asymmetric cooldowns; idle, absent and stale network reports are not guessed from Wi-Fi/cellular or low frame rate. Some servers do not report network metrics.
 - Quality changes adjust **remote pixel count and local presentation FPS**, not an invented live codec/colour-depth setting. Fixed manual resolutions remain exact when adaptive mode is off.
+- Normal connections include the software RDP Graphics Pipeline (RDPGFX), including RemoteFX Progressive, for servers such as GNOME Remote Desktop that require it. Compatibility mode remains classic GDI; no H.264 capability is advertised without a decoder.
 - Native rendering unions all damage until consumed, respects both row strides, and removes redundant channel conversions. A lifecycle-bound Android View polls on vsync without per-frame Compose recomposition.
 - Input is an ordered, bounded worker stream with held mouse buttons, extended keys, IME composition and cancellation/release handling.
 - New/changed TLS certificates stop before login and require explicit fingerprint trust. Saved passwords migrate to device-bound Android Keystore AES-GCM; unavailable credentials remain visible and require deliberate re-entry.
 - Default WebDAV sync uses password-free `rdpsync_profiles.json`; explicit legacy sync uses the separate secret-bearing `rdpsync_devices.json`, without silently overwriting old backups.
 
-**Install safely:** CI produces `RdpSync Preview` (`com.rdp.sync.preview`), signed with a development key. It installs alongside the existing app; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged; no release/store publishing is performed.
+**Install safely:** CI produces `RdpSync Preview` (`com.rdp.sync.preview`), signed with a development key. It installs alongside the existing app; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged. Development keys can differ between CI runs, so one preview APK is not guaranteed to update another preview APK. Do not uninstall either app as a workaround; preserve its saved profiles and credentials.
 
-**Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/RDPGFX video acceleration is not enabled; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. First-use certificate trust requires independent fingerprint verification; local passwords use Android Keystore encryption, while explicitly selected legacy WebDAV sync still contains plaintext passwords and is not end-to-end encrypted. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
+**Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/hardware video decoding is not enabled; RDPGFX uses software decoding rather than a zero-copy video surface; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. GNOME per-user desktop sharing/headless sessions and GDM system Remote Login are distinct: server redirection remains blocked rather than forwarding credentials to an untrusted target. First-use certificate trust requires independent fingerprint verification; local passwords use Android Keystore encryption, while explicitly selected legacy WebDAV sync still contains plaintext passwords and is not end-to-end encrypted. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
 
 ## Highlights
 
@@ -67,7 +70,8 @@ The preview starts every session in **direct-touch mode**. Touchpad mode remains
 
 ### Rendering
 
-- FreeRDP GDI renders into a native primary buffer.
+- FreeRDP classic GDI and software RDPGFX render into the same native primary buffer.
+- Graphics surface/cache allocations and output mappings are bounded before delegated decoding; diagnostic codec counters reflect successfully processed commands, not only a requested capability.
 - JNI copies RGBA dirty rows directly into an Android-compatible ARGB_8888 bitmap.
 - A single reusable Android `Bitmap` is retained across frames when size is stable.
 - `frameId` only advances when the native side has a changed frame.

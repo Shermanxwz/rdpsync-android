@@ -7,7 +7,7 @@
 - SDK/target 35, minimum 26, NDK 28.0.13004108, JDK 21.
 - RDPDR/autodetect requires the RDPSND `sys:fake` protocol dependency. Only that fake backend is built; real audio backends and microphone input are disabled, and the actual post-load settings must retain no playback/capture or redirected devices.
 - Remote desktop scale is currently fixed at 100%; resolution and local zoom are independently adjustable, but there is no separate remote DPI selector.
-- Landscape defaults to a compact 56dp toolbar with accessible keyboard, input mode, settings and disconnect controls. Expanded tools are optional; system safe insets remain respected. Detailed resolution/adaptive status is available in settings without permanently consuming desktop height.
+- Sessions default to immersive fullscreen with one accessible 48dp menu handle. Bordered tools are opt-in; in landscape they retain the compact 56dp layout. Cutouts and non-hideable caption bars stay excluded. Temporary system-bar/IME occlusion changes only local crop and control placement, not the remote fit size. Original bar visibility/behavior is restored when leaving the session.
 - Preview application ID `com.rdp.sync.preview`, versionCode 13, versionName `1.1.0-preview-debug`, ARM64 user APK; x86_64 separately built for emulator tests.
 - Development signing only. `verify-apk.py` records package/version/ABIs/SHA256/signing certificate and verifies all defined JNI symbols, ELF architectures, dependency closure, 16 KiB ELF and ZIP alignment.
 
@@ -35,6 +35,14 @@ The Android desktop scenario also requires at least 72% landscape viewport cover
 A workflow definition or compiled test is **not** a passing emulator result. Consult the exact commit's completed Actions run and its evidence artifact. Raw timing samples reflect emulator/software rendering and test polling, not physical-phone or click-to-photon benchmarks.
 
 The optional local X.224/TLS fixture exercises the actual Android FreeRDP certificate callback with disposable certificates: unknown/changed pins must send no TLS application data; a matching pin may reach the deliberately terminated MCS boundary. This focused test does **not** complete authentication, render a desktop, or replace the hosted real-RDP scenario. See [fixture instructions](../scripts/fixtures/README.md).
+
+## GNOME-native compatibility follow-up
+
+GNOME Remote Desktop is not xrdp. Upstream [GNOME 46.3 rejects clients without the Graphics Pipeline](https://github.com/GNOME/gnome-remote-desktop/blob/46.3/src/grd-session-rdp.c#L1420) unless a server debugging legacy path is enabled. The previously released `v1.1.0-preview` disabled RDPGFX; the follow-up enables the actual FreeRDP software GDI/GFX callbacks and non-AVC codecs instead of merely setting an advertised capability. H.264 remains disabled. No TLS trust or authentication downgrade is used.
+
+The separate `Native GNOME RDP emulator integration` workflow targets two real GNOME 46 per-user modes: headless **EXTEND** and screen-sharing **MIRROR**. Its private network namespace/D-Bus/HOME, synthetic Wayland desktop, loopback relays and disposable NLA credentials never use a user's host. It retains installed package versions/binary hashes, exact tested SHA, actual decoded codec/frame data, input-painted responses and GNOME monitor sizes. EXTEND requires a real received resized frame; MIRROR is not misrepresented as a freely resizable remote monitor. A pinned official client without GFX must reproduce the specific capability rejection, not merely fail to connect.
+
+These definitions are not runtime results. The follow-up's exact-commit GNOME and existing xrdp/fullscreen workflows must complete and their artifacts must be inspected before compatibility is claimed. The old release and its historical xrdp passes do not validate this new path. **GDM/system Remote Login handover is not covered**: server redirects still fail closed, including routing-token/new-credential handovers. A generic transport error alone does not establish a particular GNOME server version or failure stage.
 
 ## Classic resize interoperability evidence
 
@@ -66,7 +74,7 @@ The event-driven native transport keeps `WaitForOutputBufferFlush=FALSE` to avoi
 ## Remaining limits and safety
 
 - No claim of Microsoft Windows App equivalence. No real handset radio/touch/GPU or Windows-host certification was performed by the cloud-only automated harness.
-- H.264/RDPGFX acceleration is not enabled. FreeRDP's experimental MediaCodec path has no documented device fallback and references Android28 APIs unguarded despite this app's API26 support; it also copies decoded YUV through GDI rather than a zero-copy Surface. A supported codec path needs its own tested device matrix before enabling.
+- RDPGFX is software-decoded into GDI; H.264/hardware video acceleration is not enabled. FreeRDP's experimental MediaCodec path has no documented device fallback and references Android28 APIs unguarded despite this app's API26 support; it also copies decoded YUV through GDI rather than a zero-copy Surface. A supported codec path needs its own tested device matrix before enabling.
 - Native touch depends on server RDPEI support; otherwise direct touch uses mouse/wheel compatibility. Server-specific Windows precision, handwriting/pen and native cursor-shape parity are not promised.
 - TLS uses explicit per-profile endpoint-bound SHA-256 trust-on-first-use pinning; a new/changed certificate is rejected before authentication. Local passwords migrate to Android Keystore AES-GCM. Default WebDAV profile sync omits passwords into a separate file; explicit legacy sync still contains plaintext passwords and is not end-to-end encrypted. See [security and migration boundaries](../SECURITY.md), including first-use fingerprint verification, key loss and historical plaintext remnants.
-- Preview installs side by side, does not copy old profiles automatically and must not require deleting the original app. No production signing key, merge, public GitHub release, app-store deployment, server policy change or user RDP connection is part of this work.
+- Preview installs alongside the original package, does not copy old profiles automatically and must not require deleting either app. Fresh CI development signers may prevent in-place preview updates. The existing `v1.1.0-preview` tag/Release is historical and immutable; follow-up source is not included in that APK. No production signing key, app-store deployment, server policy change or user RDP connection is performed by these tests.

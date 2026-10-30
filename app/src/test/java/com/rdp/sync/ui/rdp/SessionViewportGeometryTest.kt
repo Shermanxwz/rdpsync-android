@@ -106,4 +106,66 @@ class SessionViewportGeometryTest {
         assertEquals(807, occluded.logicalDesktopHeight)
         assertEquals(0, occluded.localDesktopHeight)
     }
+
+    @Test fun fullscreenUsesWholeWindowExceptCutoutWithoutBaseChrome() {
+        val g = SessionViewportGeometry.calculate(1920, 1080, 1920, 1080, 0, 0,
+            SessionSafeInsets(0, 0, 0, 0), 0, 168, 316, fullscreen = true)
+        assertEquals(1920, g.logicalDesktopWidth)
+        assertEquals(1080, g.logicalDesktopHeight)
+        assertEquals(1080, g.localDesktopHeight)
+        assertEquals(0, g.desktopTop)
+    }
+
+    @Test fun transientBarsOnlyCropLocalFullscreenWithoutResizingRemote() {
+        val stableCutout = SessionSafeInsets(80, 0, 0, 0)
+        for (visible in listOf(SessionSafeInsets(0, 0, 0, 0), safe,
+            SessionSafeInsets(80, 30, 90, 40), SessionSafeInsets(0, 0, 0, 0))) {
+            val g = SessionViewportGeometry.calculate(1920, 1080, 1920, 1080, 0, 0,
+                stableCutout, 0, 168, 316, fullscreen = true, localSafe = visible)
+            assertEquals(1840, g.logicalDesktopWidth)
+            assertEquals(1080, g.logicalDesktopHeight)
+            assertTrue(g.left >= 80)
+            assertTrue(g.left + g.width <= 1920 - visible.right)
+            assertTrue(g.desktopTop >= visible.top)
+            assertTrue(g.desktopTop + g.localDesktopHeight <= 1080 - visible.bottom)
+        }
+    }
+
+    @Test fun fullscreenImeAndStaleInsetOrderingKeepFullReferenceFit() {
+        val cutout = SessionSafeInsets(0, 30, 0, 0)
+        for (ime in listOf(0, 1, 250, 686, 250, 0)) {
+            for (available in listOf(1080, 394)) {
+                val g = SessionViewportGeometry.calculate(1920, 1080, 1920, available, 0, 0,
+                    cutout, ime, 168, 316, fullscreen = true, localSafe = safe)
+                assertEquals(1920, g.logicalDesktopWidth)
+                assertEquals(1050, g.logicalDesktopHeight)
+                assertTrue(g.localDesktopHeight <= available - safe.top)
+            }
+        }
+    }
+
+    @Test fun fullscreenRotationAndExplicitBorderedChoiceAreRealGeometryChanges() {
+        val noCutout = SessionSafeInsets(0, 0, 0, 0)
+        val portrait = SessionViewportGeometry.calculate(1080, 1920, 1080, 1920, 0, 0,
+            noCutout, 0, 168, 316, fullscreen = true)
+        val landscape = SessionViewportGeometry.calculate(1920, 1080, 1920, 1080, 0, 0,
+            noCutout, 0, 0, 147, fullscreen = true)
+        assertEquals(1080, portrait.logicalDesktopWidth)
+        assertEquals(1920, portrait.logicalDesktopHeight)
+        assertEquals(1920, landscape.logicalDesktopWidth)
+        assertEquals(1080, landscape.logicalDesktopHeight)
+        assertEquals(807, compact().logicalDesktopHeight)
+    }
+
+    @Test fun nonHideableCaptionAndCutoutRemainSafeInFullscreen() {
+        val permanent = SessionSafeInsets(75, 80, 25, 0)
+        val g = SessionViewportGeometry.calculate(1920, 1080, 1920, 1080, 0, 0,
+            permanent, 0, 168, 316, fullscreen = true, localSafe = SessionSafeInsets(0, 0, 0, 0))
+        assertEquals(1820, g.logicalDesktopWidth)
+        assertEquals(1000, g.logicalDesktopHeight)
+        assertEquals(75, g.left)
+        assertEquals(80, g.desktopTop)
+        assertEquals(1820, g.width)
+    }
+
 }

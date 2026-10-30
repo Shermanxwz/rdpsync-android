@@ -5,6 +5,8 @@ import android.view.View
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.captionBar
+import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
@@ -39,6 +41,7 @@ import androidx.core.view.WindowInsetsCompat
 @Composable
 internal fun SessionViewportLayout(
     onLogicalViewport: (IntSize) -> Unit,
+    fullscreen: Boolean = false,
     header: @Composable () -> Unit,
     desktop: @Composable () -> Unit,
     toolbar: @Composable () -> Unit,
@@ -46,13 +49,15 @@ internal fun SessionViewportLayout(
 ) {
     val host = LocalView.current
     val composeSafe = WindowInsets.systemBarsIgnoringVisibility.union(WindowInsets.displayCutout)
+    val composeFullscreenSafe = WindowInsets.displayCutout.union(WindowInsets.captionBar)
+    val composeVisibleSafe = WindowInsets.systemBars.union(WindowInsets.displayCutout)
     val composeIme = WindowInsets.ime
     val root = host.rootView
     var rootSize by remember(root) { mutableStateOf(IntSize(root.width, root.height)) }
     var layoutOrigin by remember(root) { mutableStateOf(IntOffset.Zero) }
     // Presentation only: unplaced children still publish Compose semantics. This
     // state follows measurement, but must never feed back into viewport geometry.
-    var imeChromeActive by remember { mutableStateOf(false) }
+    var floatingChromeActive by remember { mutableStateOf(fullscreen) }
     val rootLocation = remember { IntArray(2) }
     DisposableEffect(root) {
         val listener = View.OnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
@@ -66,21 +71,29 @@ internal fun SessionViewportLayout(
         root.getLocationInWindow(rootLocation)
         layoutOrigin = IntOffset(position.x.roundToInt() - rootLocation[0], position.y.roundToInt() - rootLocation[1])
     }, content = {
-        Box(Modifier.inactiveChrome(imeChromeActive)) { header() }
+        Box(Modifier.inactiveChrome(floatingChromeActive)) { header() }
         Box { desktop() }
-        Box(Modifier.inactiveChrome(imeChromeActive)) { toolbar() }
-        Box(Modifier.inactiveChrome(!imeChromeActive)) { imeControls() }
+        Box(Modifier.inactiveChrome(floatingChromeActive)) { toolbar() }
+        Box(Modifier.inactiveChrome(!floatingChromeActive)) { imeControls() }
     }) { children, constraints ->
         val originX = layoutOrigin.x
         val originY = layoutOrigin.y
         // Read Compose state as well so inset animation invalidates measurement. The
         // root's unconsumed insets are authoritative for bars/cutouts; child consumption
         // must not put remote content beneath the Android status/navigation controls.
-        val fallbackSafe = SessionSafeInsets(composeSafe.getLeft(this, layoutDirection), composeSafe.getTop(this),
-            composeSafe.getRight(this, layoutDirection), composeSafe.getBottom(this))
+        val logicalInsets = if (fullscreen) composeFullscreenSafe else composeSafe
+        val fallbackSafe = SessionSafeInsets(logicalInsets.getLeft(this, layoutDirection), logicalInsets.getTop(this),
+            logicalInsets.getRight(this, layoutDirection), logicalInsets.getBottom(this))
+        val fallbackVisibleSafe = SessionSafeInsets(composeVisibleSafe.getLeft(this, layoutDirection), composeVisibleSafe.getTop(this),
+            composeVisibleSafe.getRight(this, layoutDirection), composeVisibleSafe.getBottom(this))
         val insets = ViewCompat.getRootWindowInsets(host)
-        val platformSafe = insets?.getInsetsIgnoringVisibility(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+        val logicalTypes = WindowInsetsCompat.Type.displayCutout() or
+            if (fullscreen) WindowInsetsCompat.Type.captionBar() else WindowInsetsCompat.Type.systemBars()
+        val platformSafe = insets?.getInsetsIgnoringVisibility(logicalTypes)
         val safe = platformSafe?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) } ?: fallbackSafe
+        val visibleSafe = insets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            ?.let { SessionSafeInsets(it.left, it.top, it.right, it.bottom) } ?: fallbackVisibleSafe
+        val localSafe = if (fullscreen) visibleSafe else safe
         val animatedIme = composeIme.getBottom(this)
         val ime = if (animatedIme > 0) animatedIme else insets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom ?: 0
         // The full decor extent is independent of IME visibility/order. Older
@@ -90,19 +103,19 @@ internal fun SessionViewportLayout(
         val windowWidth = rootSize.width.takeIf { it > 0 } ?: (constraints.maxWidth + originX)
         val windowHeight = rootSize.height.takeIf { it > 0 } ?: (constraints.maxHeight + originY)
         val base = SessionViewportGeometry.calculate(windowWidth, windowHeight, constraints.maxWidth, constraints.maxHeight,
-            originX, originY, safe, ime, 0, 0)
+            originX, originY, safe, ime, 0, 0, fullscreen, localSafe)
         val chromeConstraints = Constraints(minWidth = base.width, maxWidth = base.width, maxHeight = base.logicalDesktopHeight)
         val headerPlaceable = children[0].measure(chromeConstraints)
         val toolbarPlaceable = children[2].measure(chromeConstraints)
         val controlsPlaceable = children[3].measure(chromeConstraints.copy(minWidth = 0))
         val geometry = SessionViewportGeometry.calculate(windowWidth, windowHeight, constraints.maxWidth, constraints.maxHeight,
-            originX, originY, safe, ime, headerPlaceable.height, toolbarPlaceable.height)
-        imeChromeActive = geometry.imeOccluded
+            originX, originY, safe, ime, headerPlaceable.height, toolbarPlaceable.height, fullscreen, localSafe)
+        floatingChromeActive = fullscreen || geometry.imeOccluded
         val desktopPlaceable = children[1].measure(Constraints.fixed(geometry.width, geometry.localDesktopHeight))
-        onLogicalViewport(IntSize(geometry.width, geometry.logicalDesktopHeight))
+        onLogicalViewport(IntSize(geometry.logicalDesktopWidth, geometry.logicalDesktopHeight))
         layout(constraints.maxWidth, constraints.maxHeight) {
             desktopPlaceable.place(geometry.left, geometry.desktopTop)
-            if (geometry.imeOccluded) {
+            if (fullscreen || geometry.imeOccluded) {
                 // Only this small overlay owns hit targets; no full-screen gesture layer.
                 controlsPlaceable.place(geometry.left + (geometry.width - controlsPlaceable.width).coerceAtLeast(0),
                     geometry.desktopTop + (geometry.localDesktopHeight - controlsPlaceable.height).coerceAtLeast(0))

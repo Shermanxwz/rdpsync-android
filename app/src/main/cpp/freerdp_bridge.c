@@ -23,6 +23,9 @@
 #include <freerdp/input.h>
 #include <freerdp/update.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/gdi/gfx.h>
+#include <freerdp/client/rdpgfx.h>
+#include <freerdp/codecs.h>
 #include <freerdp/version.h>
 #include <freerdp/graphics.h>
 #include <freerdp/client.h>
@@ -35,6 +38,7 @@
 #include "rdpsync_geometry.h"
 #include "rdpsync_certificate.h"
 #include "rdpsync_context.h"
+#include "rdpsync_gfx_policy.h"
 
 #define TAG "FreeRDP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -68,6 +72,20 @@ struct RdpSession {
     uint64_t max_monitor_area;
     int resize_pending, resize_width, resize_height, resize_scale;
     int touch_available;
+    RdpgfxClientContext* gfx;
+    int gfx_ready, gfx_last_codec;
+    int64_t gfx_commands;
+    RdpGfxBudget gfx_budget;
+    RdpGfxCacheBudget gfx_cache_budget;
+    pcRdpgfxResetGraphics gfx_reset;
+    pcRdpgfxCreateSurface gfx_create;
+    pcRdpgfxDeleteSurface gfx_delete;
+    pcRdpgfxMapSurfaceToOutput gfx_map;
+    pcRdpgfxMapSurfaceToScaledOutput gfx_map_scaled;
+    pcRdpgfxSurfaceCommand gfx_command;
+    pcRdpgfxSurfaceToCache gfx_cache;
+    pcRdpgfxEvictCacheEntry gfx_evict;
+    pcRdpgfxOnOpen gfx_open;
     char expected_fingerprint[65], endpoint_host[256], endpoint_name[256];
     int endpoint_port, expected_pin_state, certificate_verified, certificate_challenge, certificate_superseded;
     RdpCertificateInfo certificate;
@@ -205,6 +223,272 @@ static BOOL desktop_resize(rdpContext* ctx) {
     return !ctx->gdi || gdi_resize(ctx->gdi, width, height);
 }
 
+/* RDPGFX uses upstream software decoding and the SAME GDI primary/dirty paint
+ * callbacks as classic updates. Never advertise H.264 without a decoder. All
+ * callbacks run on the protocol owner (SynchronousDynamicChannels=TRUE). */
+static RdpSession* gfx_session(RdpgfxClientContext* gfx) {
+    rdpGdi* gdi = gfx ? gfx->custom : NULL;
+    RdpSession* s = gdi ? s_from_ctx(gdi->context) : NULL;
+    return s && s->gfx == gfx ? s : NULL;
+}
+static UINT gfx_reject(RdpSession* s, const char* phase) {
+    if (s) {
+        s_error(s, "图形管线请求无效或超出安全内存限制");
+        char message[96]; snprintf(message, sizeof(message), "gfx=rejected-%s", phase);
+        s_diag(s, message);
+    }
+    return ERROR_INVALID_DATA;
+}
+static UINT gfx_reset(RdpgfxClientContext* gfx, const RDPGFX_RESET_GRAPHICS_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready || !pdu ||
+        !rdpsync_valid_frame_size((int)pdu->width, (int)pdu->height) || pdu->monitorCount > 1)
+        return gfx_reject(s, "reset");
+    if (pdu->monitorCount) {
+        const MONITOR_DEF* m = pdu->monitorDefArray;
+        if (!m || m->left != 0 || m->top != 0 || m->right != (INT32)pdu->width - 1 ||
+            m->bottom != (INT32)pdu->height - 1) return gfx_reject(s, "monitor-layout");
+    }
+    return s->gfx_reset(gfx, pdu);
+}
+static UINT gfx_create(RdpgfxClientContext* gfx, const RDPGFX_CREATE_SURFACE_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready || !pdu ||
+        (pdu->pixelFormat != GFX_PIXEL_FORMAT_XRGB_8888 && pdu->pixelFormat != GFX_PIXEL_FORMAT_ARGB_8888) ||
+        rdpsync_gfx_reserve(&s->gfx_budget, pdu->surfaceId, pdu->width, pdu->height) < 0)
+        return gfx_reject(s, "surface-budget");
+    UINT result = s->gfx_create(gfx, pdu);
+    if (result != CHANNEL_RC_OK) rdpsync_gfx_release(&s->gfx_budget, pdu->surfaceId);
+    return result;
+}
+static UINT gfx_delete(RdpgfxClientContext* gfx, const RDPGFX_DELETE_SURFACE_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready || !pdu) return ERROR_INVALID_DATA;
+    UINT result = s->gfx_delete(gfx, pdu);
+    if (result == CHANNEL_RC_OK) rdpsync_gfx_release(&s->gfx_budget, pdu->surfaceId);
+    return result;
+}
+static UINT gfx_map(RdpgfxClientContext* gfx, const RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    rdpGdi* gdi = gfx ? gfx->custom : NULL;
+    const int slot = s && pdu ? rdpsync_gfx_slot(&s->gfx_budget, pdu->surfaceId) : -1;
+    if (!s || !s->gfx_ready || !gdi || slot < 0 ||
+        !rdpsync_gfx_output_fits(gdi->width, gdi->height, pdu->outputOriginX, pdu->outputOriginY,
+            s->gfx_budget.slots[slot].width, s->gfx_budget.slots[slot].height))
+        return gfx_reject(s, "output-map");
+    return s->gfx_map(gfx, pdu);
+}
+static UINT gfx_map_scaled(RdpgfxClientContext* gfx, const RDPGFX_MAP_SURFACE_TO_SCALED_OUTPUT_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    rdpGdi* gdi = gfx ? gfx->custom : NULL;
+    if (!s || !s->gfx_ready || !gdi || !pdu || rdpsync_gfx_slot(&s->gfx_budget, pdu->surfaceId) < 0 ||
+        !rdpsync_gfx_output_fits(gdi->width, gdi->height, pdu->outputOriginX, pdu->outputOriginY,
+            pdu->targetWidth, pdu->targetHeight)) return gfx_reject(s, "scaled-output-map");
+    return s->gfx_map_scaled(gfx, pdu);
+}
+static UINT gfx_command(RdpgfxClientContext* gfx, const RDPGFX_SURFACE_COMMAND* cmd) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready || !cmd) return gfx_reject(s, "codec");
+    /* GDI's unknown/ProgressiveV2 default can otherwise return success without
+     * painting. Fail explicitly instead of silently displaying stale frames. */
+    switch (cmd->codecId) {
+        case RDPGFX_CODECID_UNCOMPRESSED: case RDPGFX_CODECID_CAVIDEO:
+        case RDPGFX_CODECID_CLEARCODEC: case RDPGFX_CODECID_PLANAR:
+        case RDPGFX_CODECID_ALPHA: case RDPGFX_CODECID_CAPROGRESSIVE: break;
+        default: return gfx_reject(s, "unsupported-codec");
+    }
+    UINT result = s->gfx_command(gfx, cmd);
+    if (result == CHANNEL_RC_OK) {
+        pthread_mutex_lock(&s->mutex);
+        s->gfx_last_codec = (int)cmd->codecId; ++s->gfx_commands;
+        pthread_mutex_unlock(&s->mutex);
+    }
+    return result;
+}
+static UINT gfx_evict(RdpgfxClientContext* gfx, const RDPGFX_EVICT_CACHE_ENTRY_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready || !pdu || pdu->cacheSlot == 0 || pdu->cacheSlot > RDPSYNC_GFX_CACHE_SLOTS)
+        return gfx_reject(s, "cache-slot");
+    UINT result = s->gfx_evict(gfx, pdu);
+    if (result == CHANNEL_RC_OK) rdpsync_gfx_cache_release(&s->gfx_cache_budget, pdu->cacheSlot);
+    return result;
+}
+static UINT gfx_cache(RdpgfxClientContext* gfx, const RDPGFX_SURFACE_TO_CACHE_PDU* pdu) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready || !pdu) return gfx_reject(s, "cache");
+    int slot = rdpsync_gfx_slot(&s->gfx_budget, pdu->surfaceId);
+    const RECTANGLE_16* r = &pdu->rectSrc;
+    if (slot < 0 || r->right <= r->left || r->bottom <= r->top ||
+        r->right > s->gfx_budget.slots[slot].width || r->bottom > s->gfx_budget.slots[slot].height)
+        return gfx_reject(s, "cache-rectangle");
+    uint64_t cost = rdpsync_gfx_cache_cost(&s->gfx_cache_budget, pdu->cacheSlot,
+        r->right - r->left, r->bottom - r->top);
+    if (!cost) return gfx_reject(s, "cache-budget");
+    UINT result = s->gfx_cache(gfx, pdu);
+    if (result == CHANNEL_RC_OK) {
+        rdpsync_gfx_cache_release(&s->gfx_cache_budget, pdu->cacheSlot);
+        s->gfx_cache_budget.slots[pdu->cacheSlot - 1] = cost;
+        s->gfx_cache_budget.bytes += cost;
+    }
+    return result;
+}
+static UINT gfx_open(RdpgfxClientContext* gfx, BOOL* advertise, BOOL* acknowledge) {
+    RdpSession* s = gfx_session(gfx);
+    if (!s || !s->gfx_ready) {
+        /* rdpgfx_on_open would overwrite an error if it still sent caps. */
+        if (advertise) *advertise = FALSE;
+        if (acknowledge) *acknowledge = FALSE;
+        return CHANNEL_RC_INITIALIZATION_ERROR;
+    }
+    return s->gfx_open ? s->gfx_open(gfx, advertise, acknowledge) : CHANNEL_RC_OK;
+}
+static BOOL gfx_attach(RdpSession* s, RdpgfxClientContext* gfx) {
+    rdpGdi* gdi = s && s->instance && s->instance->context ? s->instance->context->gdi : NULL;
+    if (!s || !gfx || s->gfx) return FALSE;
+    s->gfx = gfx;
+    s->gfx_open = gfx->OnOpen;
+    gfx->OnOpen = gfx_open;
+    if (!gdi) return FALSE;
+    if (!gdi_graphics_pipeline_init(gdi, gfx)) {
+        /* Upstream allocates codecs BEFORE initializing gfx->mux. The ordinary
+         * uninit would delete an uninitialized mutex on this partial path. */
+        freerdp_client_codecs_free(gfx->codecs); gfx->codecs = NULL;
+        gdi->gfx = NULL;
+        return FALSE;
+    }
+    s->gfx_reset = gfx->ResetGraphics; gfx->ResetGraphics = gfx_reset;
+    s->gfx_create = gfx->CreateSurface; gfx->CreateSurface = gfx_create;
+    s->gfx_delete = gfx->DeleteSurface; gfx->DeleteSurface = gfx_delete;
+    s->gfx_map = gfx->MapSurfaceToOutput; gfx->MapSurfaceToOutput = gfx_map;
+    s->gfx_map_scaled = gfx->MapSurfaceToScaledOutput; gfx->MapSurfaceToScaledOutput = gfx_map_scaled;
+    s->gfx_command = gfx->SurfaceCommand; gfx->SurfaceCommand = gfx_command;
+    s->gfx_cache = gfx->SurfaceToCache; gfx->SurfaceToCache = gfx_cache;
+    s->gfx_evict = gfx->EvictCacheEntry; gfx->EvictCacheEntry = gfx_evict;
+    pthread_mutex_lock(&s->mutex); s->gfx_ready = 1; pthread_mutex_unlock(&s->mutex);
+    return TRUE;
+}
+static void gfx_detach(RdpSession* s, RdpgfxClientContext* gfx) {
+    if (!s || !gfx || s->gfx != gfx) return;
+    /* DVC OnClose already deletes surfaces before raising ChannelDisconnected.
+     * Keep GDI alive until PostFinalDisconnect so custom/context remain valid. */
+    if (s->gfx_ready) gdi_graphics_pipeline_uninit(s->instance->context->gdi, gfx);
+    gfx->custom = NULL;
+    gfx->OnOpen = s->gfx_open;
+    s->gfx = NULL;
+    memset(&s->gfx_budget, 0, sizeof(s->gfx_budget));
+    memset(&s->gfx_cache_budget, 0, sizeof(s->gfx_cache_budget));
+    pthread_mutex_lock(&s->mutex); s->gfx_ready = 0; pthread_mutex_unlock(&s->mutex);
+}
+
+/* Offline Android gate: execute the actual linked GDI/GFX callbacks, not a
+ * second renderer implementation. Only the DVC surface-ID storage is local;
+ * no socket, certificate, credential or server is involved. */
+typedef struct { void* surfaces[4]; void* cache[RDPSYNC_GFX_CACHE_SLOTS]; } GfxProbeStorage;
+static UINT gfx_probe_set(RdpgfxClientContext* gfx, UINT16 id, void* surface) {
+    if (id >= 4) return ERROR_INVALID_PARAMETER;
+    ((GfxProbeStorage*)gfx->handle)->surfaces[id] = surface;
+    return CHANNEL_RC_OK;
+}
+static void* gfx_probe_get(RdpgfxClientContext* gfx, UINT16 id) {
+    return id < 4 ? ((GfxProbeStorage*)gfx->handle)->surfaces[id] : NULL;
+}
+static UINT gfx_probe_ids(RdpgfxClientContext* gfx, UINT16** ids, UINT16* count) {
+    *ids = calloc(4, sizeof(UINT16)); *count = 0;
+    if (!*ids) return CHANNEL_RC_NO_MEMORY;
+    for (UINT16 i = 0; i < 4; ++i) if (gfx_probe_get(gfx, i)) (*ids)[(*count)++] = i;
+    return CHANNEL_RC_OK;
+}
+static UINT gfx_probe_cache_set(RdpgfxClientContext* gfx, UINT16 slot, void* entry) {
+    if (!slot || slot > RDPSYNC_GFX_CACHE_SLOTS) return ERROR_INVALID_INDEX;
+    ((GfxProbeStorage*)gfx->handle)->cache[slot - 1] = entry;
+    return CHANNEL_RC_OK;
+}
+static void* gfx_probe_cache_get(RdpgfxClientContext* gfx, UINT16 slot) {
+    return slot && slot <= RDPSYNC_GFX_CACHE_SLOTS ? ((GfxProbeStorage*)gfx->handle)->cache[slot - 1] : NULL;
+}
+static BOOL gfx_runtime_check(RdpSession* s) {
+    BOOL okay = FALSE;
+    GfxProbeStorage storage = {0};
+    RdpgfxClientContext gfx = { .handle = &storage, .SetSurfaceData = gfx_probe_set,
+        .GetSurfaceData = gfx_probe_get, .GetSurfaceIds = gfx_probe_ids,
+        .SetCacheSlotData = gfx_probe_cache_set, .GetCacheSlotData = gfx_probe_cache_get };
+    rdpContext* ctx = s->instance->context;
+    if (!freerdp_settings_set_uint32(ctx->settings, FreeRDP_DesktopWidth, 256) ||
+        !freerdp_settings_set_uint32(ctx->settings, FreeRDP_DesktopHeight, 192) ||
+        !gdi_init(s->instance, PIXEL_FORMAT_RGBA32)) return FALSE;
+    ctx->update->BeginPaint = begin_paint; ctx->update->EndPaint = end_paint;
+    ctx->update->DesktopResize = desktop_resize;
+    if (!gfx_attach(s, &gfx)) goto done;
+#define PROBE_GFX(call) do { if ((call) != CHANNEL_RC_OK) goto done; } while (0)
+    for (int round = 0; round < 2; ++round) {
+        UINT16 width = round ? 512 : 256, height = round ? 256 : 192;
+        RDPGFX_RESET_GRAPHICS_PDU reset = { .width = width, .height = height };
+        PROBE_GFX(gfx.ResetGraphics(&gfx, &reset));
+        RDPGFX_CREATE_SURFACE_PDU create = { .surfaceId = 1, .width = width, .height = height,
+            .pixelFormat = GFX_PIXEL_FORMAT_XRGB_8888 };
+        PROBE_GFX(gfx.CreateSurface(&gfx, &create));
+        RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU map = { .surfaceId = 1 };
+        PROBE_GFX(gfx.MapSurfaceToOutput(&gfx, &map));
+        RDPGFX_START_FRAME_PDU start = { .frameId = (UINT32)(round * 2 + 1) };
+        RDPGFX_END_FRAME_PDU end = { .frameId = start.frameId };
+        RECTANGLE_16 full = {0, 0, width, height};
+        RDPGFX_SOLID_FILL_PDU fill = { .surfaceId = 1, .fillPixel = {51, 34, 17, 0},
+            .fillRectCount = 1, .fillRects = &full };
+        PROBE_GFX(gfx.StartFrame(&gfx, &start));
+        PROBE_GFX(gfx.SolidFill(&gfx, &fill));
+        PROBE_GFX(gfx.EndFrame(&gfx, &end));
+        if (s->fb_width != width || s->fb_height != height || !s->fb_pixels ||
+            s->fb_pixels[(size_t)(height - 1) * width + width - 1] != 0xff332211U) goto done;
+        s->dirty = (RdpDirtyRect){0};
+        const int64_t previous_frame = s->frame_id;
+        BYTE red[4] = {0, 0, 255, 0};
+        UINT32 x = width - 2, y = height - 2;
+        RDPGFX_SURFACE_COMMAND command = { .surfaceId = 1, .codecId = RDPGFX_CODECID_UNCOMPRESSED,
+            .format = PIXEL_FORMAT_BGRX32, .left = x, .top = y, .right = x + 1, .bottom = y + 1,
+            .width = 1, .height = 1, .length = sizeof(red), .data = red };
+        ++start.frameId; ++end.frameId;
+        PROBE_GFX(gfx.StartFrame(&gfx, &start));
+        PROBE_GFX(gfx.SurfaceCommand(&gfx, &command));
+        PROBE_GFX(gfx.EndFrame(&gfx, &end));
+        if (s->frame_id != previous_frame + 1 || s->dirty.x != (int)x || s->dirty.y != (int)y ||
+            s->dirty.width != 1 || s->dirty.height != 1 || s->fb_pixels[(size_t)y * width + x] != 0xff0000ffU)
+            goto done;
+        /* Execute actual upstream allocation, replacement-before-eviction and
+         * boundary slot handling; the accounting must match live pixel bytes. */
+        RDPGFX_SURFACE_TO_CACHE_PDU cache = { .surfaceId = 1, .cacheSlot = 4096,
+            .rectSrc = {0, 0, 17, 3} };
+        PROBE_GFX(gfx.SurfaceToCache(&gfx, &cache));
+        if (s->gfx_cache_budget.bytes != 240 || !storage.cache[4095]) goto done;
+        cache.rectSrc.right = 32;
+        PROBE_GFX(gfx.SurfaceToCache(&gfx, &cache));
+        if (s->gfx_cache_budget.bytes != 384 || !storage.cache[4095]) goto done;
+        RDPGFX_EVICT_CACHE_ENTRY_PDU evict = { .cacheSlot = 4096 };
+        PROBE_GFX(gfx.EvictCacheEntry(&gfx, &evict));
+        if (s->gfx_cache_budget.bytes || storage.cache[4095]) goto done;
+        RDPGFX_DELETE_SURFACE_PDU remove = { .surfaceId = 1 };
+        PROBE_GFX(gfx.DeleteSurface(&gfx, &remove));
+        if (s->gfx_budget.bytes) goto done;
+    }
+    okay = s->gfx_commands == 2;
+done:
+    if (s->gfx_ready) {
+        for (UINT16 id = 0; id < 4; ++id) if (storage.surfaces[id]) {
+            RDPGFX_DELETE_SURFACE_PDU remove = { .surfaceId = id };
+            if (gfx.DeleteSurface(&gfx, &remove) != CHANNEL_RC_OK) okay = FALSE;
+        }
+    }
+    if (s->gfx_ready) for (UINT16 slot = 1; slot <= RDPSYNC_GFX_CACHE_SLOTS; ++slot) {
+        if (storage.cache[slot - 1]) {
+            RDPGFX_EVICT_CACHE_ENTRY_PDU evict = { .cacheSlot = slot };
+            if (gfx.EvictCacheEntry(&gfx, &evict) != CHANNEL_RC_OK) okay = FALSE;
+        }
+    }
+    gfx_detach(s, &gfx);
+    gdi_free(s->instance);
+    return okay;
+#undef PROBE_GFX
+}
+
 // ====== Pointer handling ======
 typedef struct { rdpPointer pointer; size_t size; void* data; } AppPointer;
 
@@ -279,7 +563,14 @@ static void channel_connected(void* context, const ChannelConnectedEventArgs* ev
     RdpSession* s = s_from_ctx(context);
     if (!s) return;
     pthread_mutex_lock(&s->channel_mutex);
-    freerdp_client_OnChannelConnectedEventHandler(context, event);
+    if (strcmp(event->name, RDPGFX_DVC_CHANNEL_NAME) == 0) {
+        if (!gfx_attach(s, event->pInterface)) {
+            s_error(s, "无法初始化远程图形管线，已阻止不完整会话");
+            s_diag(s, "gfx=initialization-failed");
+            atomic_store(&s->terminating, 1);
+            freerdp_abort_connect_context(s->instance->context);
+        }
+    } else freerdp_client_OnChannelConnectedEventHandler(context, event);
     if (strcmp(event->name, DISP_DVC_CHANNEL_NAME) == 0) {
         s->disp = event->pInterface;
         if (s->disp) {
@@ -306,10 +597,13 @@ static void channel_disconnected(void* context, const ChannelDisconnectedEventAr
     if (strcmp(event->name, RDPEI_DVC_CHANNEL_NAME) == 0) {
         pthread_mutex_lock(&s->mutex); s->touch_available = 0; pthread_mutex_unlock(&s->mutex);
     }
-    freerdp_client_OnChannelDisconnectedEventHandler(context, event);
+    if (strcmp(event->name, RDPGFX_DVC_CHANNEL_NAME) == 0) gfx_detach(s, event->pInterface);
+    else freerdp_client_OnChannelDisconnectedEventHandler(context, event);
     pthread_mutex_unlock(&s->channel_mutex);
 }
 static BOOL pre_connect(freerdp* instance) {
+    RdpSession* s = s_from_ctx(instance->context);
+    if (s) s_diag(s, "connection=pre-connect");
     if (PubSub_SubscribeChannelConnected(instance->context->pubSub, channel_connected) != CHANNEL_RC_OK ||
         PubSub_SubscribeChannelDisconnected(instance->context->pubSub, channel_disconnected) != CHANNEL_RC_OK)
         return FALSE;
@@ -327,6 +621,7 @@ static BOOL post_connect(freerdp* instance) {
     const int verified = session->certificate_verified && !session->certificate_superseded;
     pthread_mutex_unlock(&session->mutex);
     if (!verified) return FALSE;
+    s_diag(session, "connection=post-connect");
     /* Reject a server override before GDI allocates its primary surface. */
     const UINT32 width = freerdp_settings_get_uint32(instance->context->settings, FreeRDP_DesktopWidth);
     const UINT32 height = freerdp_settings_get_uint32(instance->context->settings, FreeRDP_DesktopHeight);
@@ -338,7 +633,13 @@ static BOOL post_connect(freerdp* instance) {
     instance->context->update->DesktopResize = desktop_resize;
     return TRUE;
 }
-static void post_disconnect(freerdp* instance) { gdi_free(instance); }
+static void post_final_disconnect(freerdp* instance) {
+    /* Core invokes this only AFTER closing dynamic channels, whose GFX
+     * surface/codec cleanup still references the primary GDI context. */
+    gdi_free(instance);
+    PubSub_UnsubscribeChannelConnected(instance->context->pubSub, channel_connected);
+    PubSub_UnsubscribeChannelDisconnected(instance->context->pubSub, channel_disconnected);
+}
 
 // ====== Authentication callbacks ======
 static BOOL authenticate_ex(freerdp* instance, char** username, char** password, char** domain, rdp_auth_reason reason) {
@@ -417,7 +718,10 @@ static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t le
 }
 static BOOL reject_redirect(freerdp* instance) {
     RdpSession* s = instance && instance->context ? s_from_ctx(instance->context) : NULL;
-    if (s) s_error(s, "已阻止服务器重定向；请为新目标创建独立连接并验证证书");
+    if (s) {
+        s_error(s, "已阻止服务器重定向；请为新目标创建独立连接并验证证书");
+        s_diag(s, "redirect=blocked; trusted handover is not implemented");
+    }
     return FALSE;
 }
 static BOOL configure_security(rdpSettings* settings) {
@@ -496,7 +800,11 @@ static BOOL configure_session_profile(rdpSettings* settings, int width, int heig
      * Both microphone capture and actual playback remain explicitly disabled. */
     PROFILE_SETTING(bool, FreeRDP_AudioPlayback, FALSE);
     PROFILE_SETTING(bool, FreeRDP_AudioCapture, FALSE);
-    PROFILE_SETTING(bool, FreeRDP_SupportGraphicsPipeline, FALSE);
+    /* GNOME Remote Desktop requires real RDPGFX even when AVC is disabled.
+     * Upstream GDI handles RemoteFX progressive/planar/uncompressed decoding. */
+    PROFILE_SETTING(bool, FreeRDP_SupportGraphicsPipeline, !compatibility);
+    PROFILE_SETTING(bool, FreeRDP_GfxSmallCache, TRUE);
+    PROFILE_SETTING(bool, FreeRDP_BitmapCachePersistEnabled, FALSE);
     PROFILE_SETTING(bool, FreeRDP_GfxH264, FALSE);
     PROFILE_SETTING(bool, FreeRDP_GfxAVC444, FALSE);
     PROFILE_SETTING(bool, FreeRDP_GfxAVC444v2, FALSE);
@@ -524,7 +832,7 @@ static BOOL client_ctx_new(freerdp* instance, rdpContext* context) {
     instance->LoadChannels = load_session_channels;
     instance->PreConnect = pre_connect;
     instance->PostConnect = post_connect;
-    instance->PostDisconnect = post_disconnect;
+    instance->PostFinalDisconnect = post_final_disconnect;
     instance->AuthenticateEx = authenticate_ex;
     instance->VerifyX509Certificate = verify_x509_certificate;
     instance->Redirect = reject_redirect;
@@ -878,6 +1186,10 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
                 invariant = certificate_context_failure(instance, probe, 1);
                 if (invariant) { failed = invariant; result = 0; }
             }
+            if (result && !compatibility) {
+                failed = "图形管线实际绘制与尺寸更新";
+                result = gfx_runtime_check(probe);
+            }
             if (instance) {
                 /* Terminate loaded addins; no socket or authentication exists. */
                 (void)freerdp_disconnect(instance);
@@ -885,6 +1197,7 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
             }
             pthread_mutex_destroy(&probe->channel_mutex);
             pthread_mutex_destroy(&probe->mutex);
+            free(probe->fb_pixels);
             free(probe);
         }
     }
@@ -977,7 +1290,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(
     if (invariant) { failure_stage = invariant; session_destroy(session); goto failure; }
     /* Preserve earlier initialization milestones instead of overwriting them. */
     s_diag(session, "engine=FreeRDP " FREERDP_VERSION_FULL);
-    s_diag(session, "codec=GDI (no H.264)");
+    s_diag(session, "renderer=software GDI; AVC disabled");
     s_diag(session, "certificate=profile-settings-ready");
     s_diag(session, compatibility ? "connection=compatibility-retry" : "display-control=requested");
     s_diag(session, touch && !compatibility ? "rdpei=requested" : "rdpei=disabled");
@@ -1094,10 +1407,12 @@ JNIEXPORT jstring JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetDiag(J
     if (s) {
         pthread_mutex_lock(&s->mutex);
         snprintf(text, sizeof(text), "%srdpei=%s\ndisplay-state=%d\nframe=%dx%d\n"
-                 "rtt-ms=%lld\nbandwidth-kbps=%lld\ninput-queue-drops=%lld\n",
+                 "rtt-ms=%lld\nbandwidth-kbps=%lld\ninput-queue-drops=%lld\n"
+                 "gfx=%s\ngfx-last-codec=%d\ngfx-decoded-commands=%lld\n",
                  s->diag, s->touch_available ? "connected" : "not-negotiated", s->disp_state,
                  s->fb_width, s->fb_height, (long long)s->rtt_ms, (long long)s->bandwidth_kbps,
-                 (long long)s->input_drops);
+                 (long long)s->input_drops, s->gfx_ready ? "software-ready" : "not-negotiated",
+                 s->gfx_last_codec, (long long)s->gfx_commands);
         pthread_mutex_unlock(&s->mutex);
     }
     pthread_mutex_unlock(&g_lock);

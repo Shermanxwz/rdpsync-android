@@ -8,6 +8,7 @@ import org.junit.Test
 
 class SessionUiDefaultsTest {
     @Test fun newSessionStartsInDirectTouchWithBalancedFitWindow() {
+        assertTrue(SessionUiDefaults.FULLSCREEN)
         assertFalse(SessionUiDefaults.POINTER_MODE)
         val settings = SessionUiDefaults.displaySettings(null, null, false)
         assertEquals(DisplayQuality.BALANCED, settings.quality)

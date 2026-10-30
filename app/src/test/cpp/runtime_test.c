@@ -50,12 +50,15 @@ int main(void) {
     assert(bool_options[FreeRDP_SupportDynamicChannels]);
     assert(!bool_options[FreeRDP_AudioCapture] && !bool_options[FreeRDP_AudioPlayback]);
     assert(!bool_options[FreeRDP_RedirectDrives] && !bool_options[FreeRDP_RedirectHomeDrive]);
-    assert(!bool_options[FreeRDP_RedirectClipboard] && !bool_options[FreeRDP_SupportGraphicsPipeline]);
+    assert(!bool_options[FreeRDP_RedirectClipboard] && bool_options[FreeRDP_SupportGraphicsPipeline]);
+    assert(bool_options[FreeRDP_GfxSmallCache] && !bool_options[FreeRDP_BitmapCachePersistEnabled]);
+    assert(!bool_options[FreeRDP_GfxH264] && !bool_options[FreeRDP_GfxAVC444] && !bool_options[FreeRDP_GfxAVC444v2]);
     assert(uint_options[FreeRDP_DesktopWidth] == 1280 && uint_options[FreeRDP_DesktopHeight] == 720);
     assert(configure_session_profile(NULL, 1280, 720, TRUE, TRUE));
     assert(!bool_options[FreeRDP_NetworkAutoDetect] && !bool_options[FreeRDP_DeviceRedirection]);
     assert(!bool_options[FreeRDP_SupportDisplayControl] && !bool_options[FreeRDP_MultiTouchInput]);
     assert(!bool_options[FreeRDP_SupportDynamicChannels]);
+    assert(!bool_options[FreeRDP_SupportGraphicsPipeline]);
     RdpSyncContext profile_context = {0}; freerdp profile_instance = {0};
     profile_instance.context = &profile_context.common.context;
     assert(load_session_channels(&profile_instance));

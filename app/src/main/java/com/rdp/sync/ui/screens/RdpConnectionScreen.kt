@@ -2,6 +2,7 @@ package com.rdp.sync.ui.screens
 
 import android.content.Context
 import android.content.res.Configuration
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.ZoomOutMap
@@ -53,6 +55,7 @@ import com.rdp.sync.security.CertificateTrustStore
 import com.rdp.sync.security.PendingCertificateTrust
 import com.rdp.sync.network.RdpInputDispatcher
 import com.rdp.sync.ui.rdp.RdpDesktopView
+import com.rdp.sync.ui.rdp.SessionSystemBars
 import com.rdp.sync.ui.rdp.SessionUiDefaults
 import com.rdp.sync.ui.rdp.SessionViewportLayout
 import kotlinx.coroutines.Dispatchers
@@ -76,6 +79,8 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     val configuration = LocalConfiguration.current
     val landscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val wideLandscapeToolbar = configuration.screenWidthDp >= 520
+    var fullscreen by remember(device.id) { mutableStateOf(SessionUiDefaults.FULLSCREEN) }
+    SessionSystemBars(fullscreen)
     var expandedLandscapeTools by remember(device.id) { mutableStateOf(false) }
     val compactLandscape = landscape && !expandedLandscapeTools
     val preferences = remember(context) { context.getSharedPreferences("session_preferences", Context.MODE_PRIVATE) }
@@ -235,6 +240,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     }
 
     SessionViewportLayout(
+        fullscreen = fullscreen,
         onLogicalViewport = {
             if (it.width > 0 && it.height > 0) {
                 viewportSize = it
@@ -247,6 +253,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) "已连接" else status, style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
                 navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
                 actions = {
+                    IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, "进入全屏") }
                     if (landscape) IconButton(onClick = { expandedLandscapeTools = false }) { Icon(Icons.Default.Fullscreen, "收起会话工具") }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
                     IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
@@ -302,6 +309,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                             IconButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Icon(Icons.Default.ZoomOutMap, "复位视图") }
                         }
                         IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
+                        IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, "进入全屏") }
                         IconButton(onClick = { expandedLandscapeTools = true }) { Icon(Icons.Default.FullscreenExit, "展开会话工具") }
                     }
                 } else {
@@ -330,8 +338,11 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             }
         },
         imeControls = {
-            SessionImeControls(input, imeVisible, onHideKeyboard = { desktopView?.hideKeyboard() },
-                onSettings = { showSettings = true }, onExit = ::exitSession)
+            SessionFloatingControls(input, fullscreen, imeVisible, pointerMode, isConnected,
+                onKeyboard = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() },
+                onPointerMode = { pointerMode = !pointerMode },
+                onChromeMode = { fullscreen = !fullscreen }, onSettings = { showSettings = true },
+                onPaste = { showPaste = true }, onResetZoom = { desktopView?.resetZoom() }, onExit = ::exitSession)
         }
     )
     pendingTrust?.let { pending ->
@@ -375,33 +386,53 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
 
 
 @Composable
-private fun SessionImeControls(input: RdpInputDispatcher, visible: Boolean, onHideKeyboard: () -> Unit,
-                               onSettings: () -> Unit, onExit: () -> Unit) {
+private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boolean, imeVisible: Boolean,
+    pointerMode: Boolean, connected: Boolean, onKeyboard: () -> Unit, onPointerMode: () -> Unit,
+    onChromeMode: () -> Unit, onSettings: () -> Unit, onPaste: () -> Unit, onResetZoom: () -> Unit, onExit: () -> Unit) {
     var showTools by remember { mutableStateOf(false) }
-    LaunchedEffect(visible) { if (!visible) showTools = false }
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
+    val menuScroll = rememberScrollState()
+    val menuScope = rememberCoroutineScope()
+    // Nonfocusable popup keeps the IME owner; handle Back locally instead of
+    // letting an open session menu accidentally navigate away from the desktop.
+    BackHandler(enabled = showTools) { showTools = false }
+    LaunchedEffect(fullscreen, imeVisible) { showTools = false }
+    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
         tonalElevation = 6.dp, shadowElevation = 4.dp) {
-        // Only these three 48dp buttons occupy the cropped desktop. Keyboard shortcuts
-        // remain accessible in the popup instead of consuming a permanent extra row.
-        Row(Modifier.padding(4.dp)) {
-            IconButton(onClick = { showTools = false; onHideKeyboard() }, modifier = Modifier.size(48.dp)) {
+        // Fullscreen leaves only one recoverable 48dp handle. The nonfocusable menu
+        // preserves the desktop's InputConnection; no full-screen gesture layer exists.
+        Row(Modifier.padding(if (fullscreen) 0.dp else 4.dp)) {
+            if (!fullscreen) IconButton(onClick = { showTools = false; onKeyboard() }, modifier = Modifier.size(48.dp)) {
                 Icon(Icons.Default.Keyboard, "显示或隐藏键盘")
             }
             Box {
-                IconButton(onClick = { showTools = true }, modifier = Modifier.size(48.dp)) {
-                    Icon(Icons.Default.Settings, "会话工具")
+                IconButton(onClick = { menuScope.launch {
+                    // Every opening starts with keyboard/exit, not the last shortcut.
+                    menuScroll.scrollTo(0)
+                    showTools = true
+                } }, modifier = Modifier.size(48.dp)) {
+                    Icon(if (fullscreen) Icons.Default.MoreVert else Icons.Default.Settings,
+                        if (fullscreen) "会话菜单" else "会话工具")
                 }
                 DropdownMenu(expanded = showTools, onDismissRequest = { showTools = false },
-                    properties = PopupProperties(focusable = false)) {
+                    scrollState = menuScroll, properties = PopupProperties(focusable = false)) {
+                    if (fullscreen) DropdownMenuItem(text = { Text("显示或隐藏键盘") }, enabled = connected,
+                        onClick = { showTools = false; onKeyboard() })
+                    if (fullscreen) DropdownMenuItem(text = { Text("断开") }, onClick = { showTools = false; onExit() })
+                    DropdownMenuItem(text = { Text(if (fullscreen) "显示工具栏" else "进入全屏") },
+                        onClick = { showTools = false; onChromeMode() })
+                    DropdownMenuItem(text = { Text(if (pointerMode) "切换到直接触摸" else "切换到触控板") }, enabled = connected,
+                        onClick = { showTools = false; onPointerMode() })
                     DropdownMenuItem(text = { Text("显示与网络设置") }, onClick = { showTools = false; onSettings() })
-                    DropdownMenuItem(text = { Text("Esc") }, onClick = { showTools = false; input.enqueueKeyStroke(0x01) })
-                    DropdownMenuItem(text = { Text("Tab") }, onClick = { showTools = false; input.enqueueKeyStroke(0x0F) })
-                    DropdownMenuItem(text = { Text("Ctrl+C") }, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2E) })
-                    DropdownMenuItem(text = { Text("Ctrl+V") }, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2F) })
-                    DropdownMenuItem(text = { Text("Ctrl+Alt+Del") }, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x38, 0xE053) })
+                    DropdownMenuItem(text = { Text("发送文字") }, enabled = connected, onClick = { showTools = false; onPaste() })
+                    DropdownMenuItem(text = { Text("复位视图") }, enabled = connected, onClick = { showTools = false; onResetZoom() })
+                    DropdownMenuItem(text = { Text("Esc") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x01) })
+                    DropdownMenuItem(text = { Text("Tab") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x0F) })
+                    DropdownMenuItem(text = { Text("Ctrl+C") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2E) })
+                    DropdownMenuItem(text = { Text("Ctrl+V") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2F) })
+                    DropdownMenuItem(text = { Text("Ctrl+Alt+Del") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x38, 0xE053) })
                 }
             }
-            IconButton(onClick = onExit, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "断开") }
+            if (!fullscreen) IconButton(onClick = onExit, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "断开") }
         }
     }
 }

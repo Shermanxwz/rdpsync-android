@@ -67,6 +67,8 @@ class RdpFixtureInstrumentedTest {
         val showing = mutableStateOf(true)
         val device = mutableStateOf(Device(id = 900001, name = "Isolated CI fixture", host = "10.0.2.2", port = 3389,
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768))
+        val originalBars = systemBarVisibility()
+        measurements.put("original_system_bars", originalBars)
         val connectStarted = SystemClock.elapsedRealtime()
         compose.runOnUiThread { compose.activity.setContent { MaterialTheme { if (showing.value) RdpConnectionScreen(device.value) { showing.value = false } } } }
         try {
@@ -80,11 +82,13 @@ class RdpFixtureInstrumentedTest {
                 RdpConnector.getDiag().contains("connection=compatibility-retry"))
             measurements.put("latency_method", "Android injected touch (40ms hold) to matching synthetic response color in UiAutomation screen capture; 100ms polling + screenshot overhead included. Not click-to-photon or physical handset/radio latency.")
             waitFor("configured profile resolution") { RdpConnector.getWidth() == 1024 && RdpConnector.getHeight() == 768 }
-            compose.onNodeWithContentDescription("切换到触控板").assertExists()
+            assertFullscreenDefault("initial_fullscreen")
             assertColor(40, 40, Color.RED)
             assertColor(136, 40, Color.GREEN)
             assertColor(232, 40, Color.BLUE)
-            screenshot("01-direct-touch-profile")
+            screenshot("01-direct-touch-fullscreen-profile")
+            useBorderedToolbar()
+            compose.onNodeWithContentDescription("切换到触控板").assertExists()
 
             repeat(5) { tapAndObserve() }
             measurements.put("normal_touch_to_observed_remote_frame_ms", latencySamples.joinToString(","))
@@ -190,8 +194,31 @@ class RdpFixtureInstrumentedTest {
             assertColor(compactWidth - 80, compactHeight - 80, Color.rgb(17, 34, 51))
             measurements.put("landscape_controls_preserved_session", true)
             screenshot("04c-landscape-compact-restored")
-            exerciseImePreservingRemoteSession(compactWidth, compactHeight, beforeRotateGeneration,
+            tapAccessibleControl("进入全屏")
+            waitFor("fullscreen increases actual remote viewport without reconnect", 20_000) {
+                RdpConnector.getHeight() > compactHeight && fixtureSize(RdpConnector.getWidth(), RdpConnector.getHeight())
+            }
+            assertFullscreenDefault("landscape_fullscreen")
+            assertEquals(beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
+            assertEquals(beforeRotateSessionId, fixtureState().getString("session_id"))
+            assertEquals(beforeRotateDesktopPid, fixtureState().getInt("desktop_pid"))
+            val fullscreenWidth = RdpConnector.getWidth()
+            val fullscreenHeight = RdpConnector.getHeight()
+            assertColor(fullscreenWidth - 80, fullscreenHeight - 80, Color.rgb(17, 34, 51))
+            screenshot("04f-landscape-true-fullscreen")
+            exerciseFullscreenMenuBack(beforeRotateGeneration, beforeRotateSessionId, beforeRotateDesktopPid)
+            exerciseTransientSystemBars(fullscreenWidth, fullscreenHeight, beforeRotateGeneration,
+                beforeRotateSessionId, beforeRotateDesktopPid)
+            exerciseImePreservingRemoteSession(fullscreenWidth, fullscreenHeight, beforeRotateGeneration,
                 beforeRotateSessionId, beforeRotateDesktopPid, desktopBounds().getInt("height"))
+            useBorderedToolbar()
+            waitFor("opt-in toolbar restores actual compact resolution", 20_000) {
+                actualSize(compactWidth, compactHeight) && fixtureSize(compactWidth, compactHeight)
+            }
+            assertEquals(beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
+            assertEquals(beforeRotateSessionId, fixtureState().getString("session_id"))
+            assertEquals(beforeRotateDesktopPid, fixtureState().getInt("desktop_pid"))
+            measurements.put("fullscreen_toolbar_roundtrip_preserved_session", true)
             tapAndObserve()
             measurements.put("native_telemetry_normal", RdpConnector.nativeGetTelemetry().joinToString(","))
             measurements.put("display_control_state", RdpConnector.nativeGetDisplayControlState())
@@ -209,6 +236,8 @@ class RdpFixtureInstrumentedTest {
             waitFor("same-pin reconnect without a new trust prompt", 60_000) { RdpConnector.isConnected() && fixtureReady() }
             compose.onNodeWithText("确认服务器证书").assertDoesNotExist()
             compose.onNodeWithText("服务器证书已改变").assertDoesNotExist()
+            assertFullscreenDefault("same_pin_reentry_fullscreen")
+            useBorderedToolbar()
             compose.onNodeWithContentDescription("切换到触控板").assertExists()
             measurements.put("same_pin_reconnect_without_prompt", true)
             compose.runOnUiThread { showing.value = false }
@@ -218,6 +247,8 @@ class RdpFixtureInstrumentedTest {
             compose.runOnUiThread { device.value = device.value.copy(id = 900002, port = 3390); showing.value = true }
             approveCertificate(expectedFingerprint, changed = false, authRequestsBefore = beforeWeakTrust)
             waitFor("weak-link session frame", 90_000) { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && fixtureReady() }
+            assertFullscreenDefault("weak_reentry_fullscreen")
+            useBorderedToolbar()
             compose.onNodeWithContentDescription("切换到触控板").assertExists()
             assertNotEquals("explicit new session gets a new native generation", beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
             compose.onNodeWithContentDescription("显示与网络设置").performClick()
@@ -269,6 +300,13 @@ class RdpFixtureInstrumentedTest {
             screenshot("07-rotated-certificate-approved")
             compose.runOnUiThread { showing.value = false }
             waitFor("rotated-certificate teardown") { !RdpConnector.isConnected() }
+            waitFor("leaving fullscreen restores original system bar visibility") {
+                val now = systemBarVisibility()
+                now.getBoolean("status") == originalBars.getBoolean("status") &&
+                    now.getBoolean("navigation") == originalBars.getBoolean("navigation")
+            }
+            measurements.put("exit_restored_system_bars", systemBarVisibility())
+            screenshot("08-exit-restored-system-bars")
             waitFor("rotated-certificate X session terminated", 90_000) { !fixtureReady() }
             assertTrue(RdpConnector.connectDevice("10.0.2.2", 3389, "rdpfixture", "rdpsync-fixture-only", "",
                 width = 800, height = 600, enableTouchInput = false, compatibilityMode = true, expectedFingerprint = changedFingerprint))
@@ -323,6 +361,126 @@ class RdpFixtureInstrumentedTest {
         JSONObject(socket.getInputStream().bufferedReader().readText().substringAfter("\r\n\r\n"))
     }
 
+    private fun systemBarVisibility(): JSONObject {
+        val result = JSONObject()
+        compose.runOnUiThread {
+            val insets = requireNotNull(ViewCompat.getRootWindowInsets(compose.activity.window.decorView))
+            result.put("status", insets.isVisible(WindowInsetsCompat.Type.statusBars()))
+                .put("navigation", insets.isVisible(WindowInsetsCompat.Type.navigationBars()))
+        }
+        return result
+    }
+
+    private fun exerciseFullscreenMenuBack(generation: Long, sessionId: String, pid: Int) {
+        val before = fixtureState()
+        tapAccessibleControl("会话菜单")
+        compose.onNodeWithText("显示或隐藏键盘").assertIsDisplayed()
+        compose.onNodeWithText("断开").assertIsDisplayed()
+        assertTrue("Real system Back must be accepted", instrumentation.uiAutomation.performGlobalAction(
+            android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
+        waitFor("Back dismisses only the fullscreen popup") {
+            compose.onAllNodesWithText("显示工具栏").fetchSemanticsNodes().isEmpty() &&
+                compose.onAllNodesWithContentDescription("会话菜单").fetchSemanticsNodes().size == 1 && desktopHasWindowFocus()
+        }
+        val previous = RdpConnector.pollDisplayStatus()
+        waitFor("session loop remains active after Back") { RdpConnector.pollDisplayStatus() !== previous }
+        val after = fixtureState()
+        assertTrue(RdpConnector.isConnected())
+        assertEquals(generation, RdpConnector.nativeGetTelemetry()[11])
+        assertEquals(sessionId, after.getString("session_id"))
+        assertEquals(pid, after.getInt("desktop_pid"))
+        assertEquals("Menu/Back must not leak remote pointer input", before.getInt("clicks"), after.getInt("clicks"))
+        assertEquals("Back must not become a remote key", before.getJSONArray("keys").toString(), after.getJSONArray("keys").toString())
+        measurements.put("fullscreen_menu_back_dismissed_without_session_or_input_change", true)
+    }
+
+    private fun exerciseTransientSystemBars(width: Int, height: Int, generation: Long, sessionId: String, pid: Int) {
+        val bounds = desktopBounds()
+        val x = bounds.getInt("window_left") + bounds.getInt("window_width") / 2f
+        val top = bounds.getInt("window_top") + 1f
+        val distance = minOf(200f, bounds.getInt("window_height") * 0.2f)
+        val events = JSONArray()
+        measurements.put("transient_system_bar_swipe", events)
+        val down = SystemClock.uptimeMillis()
+        fun event(action: Int, y: Float) {
+            val e = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 0).apply { source = InputDevice.SOURCE_TOUCHSCREEN }
+            try {
+                val accepted = instrumentation.uiAutomation.injectInputEvent(e, true)
+                events.put(JSONObject().put("action", action).put("x", x).put("y", y).put("accepted", accepted))
+                assertTrue("System edge swipe injection must be accepted", accepted)
+            } finally { e.recycle() }
+        }
+        event(MotionEvent.ACTION_DOWN, top)
+        try {
+            for (i in 1..8) { SystemClock.sleep(20); event(MotionEvent.ACTION_MOVE, top + distance * i / 8) }
+        } finally { event(MotionEvent.ACTION_UP, top + distance) }
+        val observations = JSONArray()
+        measurements.put("transient_system_bar_observations", observations)
+        var everChanged = false
+        fun observe(): JSONObject {
+            val b = systemBarVisibility()
+            val server = fixtureState()
+            val requested = RdpConnector.pollDisplayStatus().requested
+            everChanged = everChanged || !RdpConnector.isConnected() || !actualSize(width, height) ||
+                server.getInt("width") != width || server.getInt("height") != height ||
+                server.getString("session_id") != sessionId || server.getInt("desktop_pid") != pid ||
+                RdpConnector.nativeGetTelemetry()[11] != generation ||
+                requested?.let { it.width != width || it.height != height } == true
+            b.put("elapsed_ms", SystemClock.elapsedRealtime()).put("client_width", RdpConnector.getWidth())
+                .put("client_height", RdpConnector.getHeight()).put("server_width", server.getInt("width"))
+                .put("server_height", server.getInt("height")).put("native_generation", RdpConnector.nativeGetTelemetry()[11])
+                .put("ever_changed", everChanged)
+            observations.put(b)
+            return b
+        }
+        waitFor("physical edge swipe reveals transient Android system bars", 5_000) {
+            val b = observe(); b.getBoolean("status") || b.getBoolean("navigation")
+        }
+        screenshot("04g-transient-system-bars-visible")
+        waitFor("transient Android bars auto-hide without a remote resize", 12_000) {
+            val b = observe(); !b.getBoolean("status") && !b.getBoolean("navigation")
+        }
+        assertFalse("Transient bars must not resize or reconnect the remote desktop: $observations", everChanged)
+        assertFullscreenDefault("after_transient_bars_fullscreen")
+        assertColor(40, 40, Color.RED)
+        measurements.put("transient_bars_preserved_remote_session", true)
+    }
+
+    private fun assertFullscreenDefault(key: String) {
+        waitFor("fullscreen hides system bars and fills the cutout-safe window") {
+            val b = desktopBounds()
+            !b.getBoolean("status_bar_visible") && !b.getBoolean("navigation_bar_visible") &&
+                b.getInt("left") == b.getInt("window_left") + b.getInt("cutout_left") &&
+                b.getInt("top") == b.getInt("window_top") + b.getInt("cutout_top") &&
+                b.getInt("width") == b.getInt("window_width") - b.getInt("cutout_left") - b.getInt("cutout_right") &&
+                b.getInt("height") == b.getInt("window_height") - b.getInt("cutout_top") - b.getInt("cutout_bottom")
+        }
+        compose.onAllNodes(hasContentDescription("会话菜单") and hasClickAction()).assertCountEquals(1)
+        compose.onNodeWithContentDescription("会话菜单").assertIsDisplayed()
+        listOf("显示或隐藏键盘", "切换到触控板", "显示与网络设置", "断开", "进入全屏").forEach {
+            compose.onNodeWithContentDescription(it).assertDoesNotExist()
+        }
+        measurements.put(key, desktopBounds())
+    }
+
+    private fun useBorderedToolbar() {
+        tapAccessibleControl("会话菜单")
+        // New sessions still use direct touch; its toggle is in the hidden menu.
+        compose.onNodeWithText("切换到触控板").assertExists()
+        compose.onNodeWithText("显示工具栏").performScrollTo().performClick()
+        waitFor("explicit toolbar opt-in restores bordered controls") {
+            compose.onAllNodesWithContentDescription("进入全屏").fetchSemanticsNodes().size == 1 &&
+                desktopBounds().getBoolean("status_bar_visible")
+        }
+    }
+
+    private fun tapSessionKeyboard() {
+        tapAccessibleControl("会话菜单")
+        compose.onNodeWithText("显示或隐藏键盘").assertIsDisplayed()
+        compose.onNodeWithText("断开").assertIsDisplayed()
+        tapObservedAppPopupItem("显示或隐藏键盘")
+    }
+
     private fun selectResolution(label: String) {
         compose.onNodeWithContentDescription("显示与网络设置").performClick()
         val control = hasText(label) and hasClickAction()
@@ -365,6 +523,12 @@ class RdpFixtureInstrumentedTest {
                 .put("safe_left", safe.left).put("safe_top", safe.top)
                 .put("safe_right", safe.right).put("safe_bottom", safe.bottom)
                 .put("ime_bottom", insets.getInsets(WindowInsetsCompat.Type.ime()).bottom)
+                .put("status_bar_visible", insets.isVisible(WindowInsetsCompat.Type.statusBars()))
+                .put("navigation_bar_visible", insets.isVisible(WindowInsetsCompat.Type.navigationBars()))
+                .put("cutout_left", insets.getInsets(WindowInsetsCompat.Type.displayCutout()).left)
+                .put("cutout_top", insets.getInsets(WindowInsetsCompat.Type.displayCutout()).top)
+                .put("cutout_right", insets.getInsets(WindowInsetsCompat.Type.displayCutout()).right)
+                .put("cutout_bottom", insets.getInsets(WindowInsetsCompat.Type.displayCutout()).bottom)
                 .put("height_fraction_of_window", view.height.toDouble() / view.rootView.height.coerceAtLeast(1))
         }
         return result
@@ -391,7 +555,7 @@ class RdpFixtureInstrumentedTest {
             val beforePatchSpan = observedPatchSpan(40, 40, Color.RED)
             measurements.put("ime_pre_scale", beforeViewport.scale).put("ime_pre_red_patch_span_px", beforePatchSpan)
             shellOutput("settings put secure show_ime_with_hard_keyboard 1")
-            tapAccessibleControl("显示或隐藏键盘")
+            tapSessionKeyboard()
             waitFor("software IME visible and local desktop viewport reduced") {
                 imeVisible() && desktopBounds().getInt("height") < fullViewHeight
             }
@@ -440,13 +604,18 @@ class RdpFixtureInstrumentedTest {
             measurements.put("ime_readable_scale", imeViewport.scale).put("ime_red_patch_span_px", imePatchSpan)
                 .put("ime_unobscured_height_px", availableHeight)
                 .put("ime_desktop_fraction_of_unobscured_area", imeBounds.getInt("height").toDouble() / availableHeight)
+            compose.onAllNodes(hasContentDescription("会话菜单") and hasClickAction()).assertCountEquals(1)
+            compose.onNodeWithContentDescription("会话菜单").assertIsDisplayed()
             listOf("显示或隐藏键盘", "会话工具", "断开").forEach { label ->
-                val control = hasContentDescription(label) and hasClickAction()
-                compose.onAllNodes(control).assertCountEquals(1)
-                compose.onNode(control).assertIsDisplayed()
+                compose.onNodeWithContentDescription(label).assertDoesNotExist()
             }
             val clicksBeforeTools = fixtureState().getInt("clicks")
-            tapAccessibleControl("会话工具")
+            tapAccessibleControl("会话菜单")
+            // Both essential actions must fit together even in the short IME-free
+            // region; the later shortcut check must scroll a real popup.
+            compose.onNodeWithText("显示或隐藏键盘").assertIsDisplayed()
+            compose.onNodeWithText("断开").assertIsDisplayed()
+            screenshot("04d0-fullscreen-ime-menu-essential-actions")
             listOf("Esc", "Tab", "Ctrl+C", "Ctrl+V", "Ctrl+Alt+Del", "显示与网络设置").forEach { label ->
                 compose.onNodeWithText(label).performScrollTo().assertIsDisplayed()
             }
@@ -469,7 +638,7 @@ class RdpFixtureInstrumentedTest {
             measurements.put("ime_tools_touch_and_software_typing_passed", true)
             screenshot("04d-landscape-ime-visible")
             val clicksBeforeHide = fixtureState().getInt("clicks")
-            tapAccessibleControl("显示或隐藏键盘")
+            tapSessionKeyboard()
             waitFor("IME hidden and compact local viewport restored") {
                 !imeVisible() && desktopBounds().getInt("height") == fullViewHeight
             }
@@ -573,8 +742,13 @@ class RdpFixtureInstrumentedTest {
                 target != null
             }
             val rect = requireNotNull(target)
-            measurements.put("ime_tools_popup_hit", JSONObject().put("label", label).put("screen_bounds", rect.toShortString()))
-            screenshot("04d1-ime-tools-popup")
+            val hit = JSONObject().put("label", label).put("screen_bounds", rect.toShortString())
+            val hits = measurements.optJSONArray("popup_physical_hits") ?: JSONArray().also { measurements.put("popup_physical_hits", it) }
+            hits.put(hit)
+            if (label == "Esc") {
+                measurements.put("ime_tools_popup_hit", hit)
+                screenshot("04d1-ime-tools-popup")
+            }
             // The menu deliberately does not take IME focus. Enumerate actual app
             // windows, not only the active window or the main activity's origin.
             injectSingleTap(rect.exactCenterX(), rect.exactCenterY())

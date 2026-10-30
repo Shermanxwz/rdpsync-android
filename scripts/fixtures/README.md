@@ -169,3 +169,44 @@ separately records the actual child exit code and natural-versus-cleanup origin.
 Fresh run/PID and frame-hash metadata are mandatory. Both old-server classifications
 are compatibility observations, not a guarantee of reliable old-server support.
 They do not retroactively change historical failed workflow outcomes.
+
+## Native GNOME Remote Desktop (additional, not an xrdp substitute)
+
+`Native GNOME RDP emulator integration` adds two independent standard Ubuntu 24.04
+hosted jobs using the distribution's **GNOME Remote Desktop 46.x**, Mutter,
+PipeWire/WirePlumber and a synthetic GTK **Wayland** surface. Installed package
+versions, source-package identities, daemon hashes and linked libraries are
+retained; a different GNOME major version fails setup rather than silently
+changing this baseline.
+
+- `headless-extend` uses GNOME's per-user `--headless` mode and genuine virtual
+  monitor/DISP resize. Both decoded dimensions and the GTK/GDK actual monitor
+  must change, with the same native connection and Wayland process/session.
+- `screen-share-mirror` mirrors an existing Mutter virtual primary monitor. It
+  must deliver real pixels and input and retain the actual fixed monitor after a
+  different client size is requested. This is an explicit capability boundary,
+  not a live-resize pass.
+
+Neither mode runs GDM/system **Remote Login**, server redirection, a Windows
+server, or a user's desktop. GNOME requires real NLA here; synthetic credential
+environment variables are the upstream integration-test credential source, not
+an authentication bypass. Certificate approval still uses the complete fixture
+DER SHA-256. The existing separate TLS boundary tests remain the evidence that
+unknown/changed pins stop before application credential bytes.
+
+GRD's wildcard listener lives in a private network namespace with only its own
+loopback interface. Permission-restricted Unix sockets relay to **127.0.0.1**
+ports 33891 and 8768 on the disposable runner. No firewall, global routing,
+external address, user account or user network configuration is changed. A
+private HOME/runtime/D-Bus session contains all fixture settings. Artifacts
+include only explicit evidence directories, never the private TLS key or HOME.
+
+Before Android, a pinned unmodified official FreeRDP 3.32.2 **classic/no-GFX**
+client connects using verified certificate pin and NLA. The negative control
+requires GNOME's exact missing-Graphics-Pipeline rejection, not merely any
+nonzero exit. The Android positive then requires native GFX frame decoding,
+actual Android touch coordinates arriving at Wayland, returned response pixels,
+and View InputConnection text. Actual Gboard key/IME/crop/fullscreen interaction
+remains covered by the separate mandatory full xrdp UI scenario. Software
+progressive graphics is not H264 or hardware decoding. No GNOME pass is claimed
+until actual runtime artifacts have been inspected.
