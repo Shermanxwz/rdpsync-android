@@ -17,10 +17,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
@@ -48,6 +50,9 @@ internal fun SessionViewportLayout(
     val root = host.rootView
     var rootSize by remember(root) { mutableStateOf(IntSize(root.width, root.height)) }
     var layoutOrigin by remember(root) { mutableStateOf(IntOffset.Zero) }
+    // Presentation only: unplaced children still publish Compose semantics. This
+    // state follows measurement, but must never feed back into viewport geometry.
+    var imeChromeActive by remember { mutableStateOf(false) }
     val rootLocation = remember { IntArray(2) }
     DisposableEffect(root) {
         val listener = View.OnLayoutChangeListener { _, left, top, right, bottom, _, _, _, _ ->
@@ -61,10 +66,10 @@ internal fun SessionViewportLayout(
         root.getLocationInWindow(rootLocation)
         layoutOrigin = IntOffset(position.x.roundToInt() - rootLocation[0], position.y.roundToInt() - rootLocation[1])
     }, content = {
-        Box { header() }
+        Box(Modifier.inactiveChrome(imeChromeActive)) { header() }
         Box { desktop() }
-        Box { toolbar() }
-        Box { imeControls() }
+        Box(Modifier.inactiveChrome(imeChromeActive)) { toolbar() }
+        Box(Modifier.inactiveChrome(!imeChromeActive)) { imeControls() }
     }) { children, constraints ->
         val originX = layoutOrigin.x
         val originY = layoutOrigin.y
@@ -92,6 +97,7 @@ internal fun SessionViewportLayout(
         val controlsPlaceable = children[3].measure(chromeConstraints.copy(minWidth = 0))
         val geometry = SessionViewportGeometry.calculate(windowWidth, windowHeight, constraints.maxWidth, constraints.maxHeight,
             originX, originY, safe, ime, headerPlaceable.height, toolbarPlaceable.height)
+        imeChromeActive = geometry.imeOccluded
         val desktopPlaceable = children[1].measure(Constraints.fixed(geometry.width, geometry.localDesktopHeight))
         onLogicalViewport(IntSize(geometry.width, geometry.logicalDesktopHeight))
         layout(constraints.maxWidth, constraints.maxHeight) {
@@ -107,3 +113,7 @@ internal fun SessionViewportLayout(
         }
     }
 }
+
+/** Keep inactive chrome measured without offering phantom actions or focus targets. */
+private fun Modifier.inactiveChrome(inactive: Boolean): Modifier =
+    if (inactive) clearAndSetSemantics { }.focusProperties { canFocus = false } else this
