@@ -31,7 +31,14 @@ def main():
     if not command:
         parser.error('reference client command is required')
     out = args.out.resolve()
-    run_id = str(uuid.uuid4())
+    run_id = os.environ.get('RDPSYNC_REFERENCE_ATTEMPT_ID')
+    if run_id is not None:
+        if str(uuid.UUID(run_id)) != run_id or (out / 'attempt-id.txt').read_text().strip() != run_id:
+            raise ValueError('matrix attempt identity mismatch')
+    else:
+        # Standalone manual diagnostic, not a matrix preflight.
+        run_id = str(uuid.uuid4())
+        (out / 'attempt-id.txt').write_text(run_id + '\n')
     (out / 'run-id.txt').write_text(run_id + '\n')
     record = {'schema_version': 1, 'run_id': run_id, 'case_exit': 70,
               'client_pid': None, 'client_returncode': None,

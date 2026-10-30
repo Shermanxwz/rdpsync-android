@@ -144,6 +144,15 @@ class RdpFixtureInstrumentedTest {
             measurements.put("landscape_compact_viewport", compactBounds)
             assertTrue("compact landscape desktop must occupy at least 72% of the full window: $compactBounds",
                 compactBounds.getDouble("height_fraction_of_window") >= 0.72)
+            assertTrue("remote pixels must stay below visible status/cutout overlays: $compactBounds",
+                compactBounds.getInt("top") >= compactBounds.getInt("window_top") + compactBounds.getInt("safe_top"))
+            assertTrue("remote pixels must avoid visible side system/cutout overlays: $compactBounds",
+                compactBounds.getInt("left") >= compactBounds.getInt("window_left") + compactBounds.getInt("safe_left") &&
+                    compactBounds.getInt("left") + compactBounds.getInt("width") <=
+                    compactBounds.getInt("window_left") + compactBounds.getInt("window_width") - compactBounds.getInt("safe_right"))
+            assertTrue("remote pixels must stay above visible bottom system/cutout overlays: $compactBounds",
+                compactBounds.getInt("top") + compactBounds.getInt("height") <=
+                    compactBounds.getInt("window_top") + compactBounds.getInt("window_height") - compactBounds.getInt("safe_bottom"))
             listOf("切换到触控板", "显示或隐藏键盘", "显示与网络设置", "断开", "展开会话工具").forEach { label ->
                 val control = hasContentDescription(label) and hasClickAction()
                 compose.onAllNodes(control).assertCountEquals(1)
@@ -336,10 +345,17 @@ class RdpFixtureInstrumentedTest {
         compose.runOnUiThread {
             val view = desktop()
             val location = IntArray(2)
+            val rootLocation = IntArray(2)
             view.getLocationOnScreen(location)
+            view.rootView.getLocationOnScreen(rootLocation)
+            val safe = requireNotNull(ViewCompat.getRootWindowInsets(view)).getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
             result.put("left", location[0]).put("top", location[1])
                 .put("width", view.width).put("height", view.height)
+                .put("window_left", rootLocation[0]).put("window_top", rootLocation[1])
                 .put("window_width", view.rootView.width).put("window_height", view.rootView.height)
+                .put("safe_left", safe.left).put("safe_top", safe.top)
+                .put("safe_right", safe.right).put("safe_bottom", safe.bottom)
                 .put("height_fraction_of_window", view.height.toDouble() / view.rootView.height.coerceAtLeast(1))
         }
         return result

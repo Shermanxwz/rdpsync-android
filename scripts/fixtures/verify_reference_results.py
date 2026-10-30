@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict positive resize and explicitly named old-server negative controls.
+"""Strict positive resize and explicitly named old-server characterization.
 
 Never turns arbitrary failures into passes. Raw harness and child statuses stay
 in their original artifacts; the negative outcome means incompatibility was
@@ -61,6 +61,42 @@ def same_session(initial, later):
             (later['session_id'], later['desktop_pid']), 'server UUID/PID changed')
 
 
+def observed_resize_after_failure(data, initial):
+    record = data.get('post_failure_server_observation')
+    require(isinstance(record, dict), 'fresh bounded post-failure observation missing')
+    start, end = record.get('started_monotonic'), record.get('ended_monotonic')
+    error_at = data.get('error_observed_monotonic')
+    require(all(type(t) in (int, float) and math.isfinite(t) for t in (start, end, error_at)),
+            'invalid observation timestamps')
+    require(data['resize_requested_monotonic'] <= error_at <= start <= error_at + 3.0 and
+            start <= end <= start + 3.0 and
+            record.get('budget_seconds') == 2.0, 'observation freshness/bound invalid')
+    # The two-second poll has a small scheduling allowance, not an unbounded
+    # retry; all network calls use the remaining budget. No target is inferred.
+    observations = record.get('observations')
+    require(isinstance(observations, list) and 1 <= len(observations) <= 32, 'missing/bad observation sequence')
+    previous = start
+    resized = None
+    for observation in observations:
+        require(isinstance(observation, dict), 'malformed observation')
+        at = observation.get('observed_monotonic')
+        require(type(at) in (int, float) and math.isfinite(at) and previous <= at <= end,
+                'stale/out-of-order observation')
+        previous = at
+        actual = observation.get('state')
+        require(isinstance(actual, dict), 'server observation failed')
+        size = (actual.get('width'), actual.get('height'))
+        require(size in ((1024, 768), (1280, 720)), 'unexpected observed server dimensions')
+        server_state(actual, *size)
+        same_session(initial, actual)
+        if size == (1280, 720):
+            resized = actual
+    require(resized is not None, 'requested server resize was never actually observed')
+    require([1024, 768] in resized.get('resizes', []) and [1280, 720] in resized.get('resizes', []),
+            'observed server resize history missing')
+    return resized
+
+
 def frame(directory, data, name, width, height, clicks):
     frames = data.get('frames')
     require(isinstance(frames, dict), 'frame verification metadata missing')
@@ -86,7 +122,9 @@ def verify_case(directory, variant, raw_exit, flush, sync):
     data = load(directory / 'result.json')
     process = load(directory / 'process-result.json')
     run_id = (directory / 'run-id.txt').read_text().strip()
-    require(valid_uuid(run_id) and data.get('run_id') == run_id and process.get('run_id') == run_id,
+    attempt_id = (directory / 'attempt-id.txt').read_text().strip()
+    require(valid_uuid(run_id) and attempt_id == run_id and
+            data.get('run_id') == run_id and process.get('run_id') == run_id,
             'missing/stale per-run identity')
     require(data.get('schema_version') == 2 and process.get('schema_version') == 1, 'unsupported evidence schema')
     require(integer(data.get('client_pid'), 1) and data['client_pid'] == process.get('client_pid'),
@@ -105,10 +143,11 @@ def verify_case(directory, variant, raw_exit, flush, sync):
     require('SupportGraphicsPipeline=FALSE; RDPGFX channel not built.' in profile, 'classic-GDI profile missing')
     initial, final = data.get('initial_server'), data.get('final_server')
     server_state(initial, 1024, 768)
-    server_state(final, 1280, 720)
+    require(isinstance(final, dict), 'immediate/final server snapshot missing')
+    final_size = (final.get('width'), final.get('height'))
+    require(final_size in ((1024, 768), (1280, 720)), 'wrong immediate/final server dimensions')
+    server_state(final, *final_size)
     same_session(initial, final)
-    require([1024, 768] in final.get('resizes', []) and [1280, 720] in final.get('resizes', []),
-            'server resize history missing')
     requested = data.get('resize_requested_monotonic')
     require(type(requested) in (float, int) and math.isfinite(requested) and requested > 0,
             'resize request timestamp missing')
@@ -118,13 +157,16 @@ def verify_case(directory, variant, raw_exit, flush, sync):
     resize = log.find('new size 1280x720')
     require(resize >= 0 and '--> CONNECTION_STATE_ACTIVE' in log[:resize], 'no initially active session before resize')
     require('DisplayControlCapsPdu: setting the window as resizable' in log[:resize], 'DISP caps were not ready')
-    if variant == 'apt-0.9.24':
+    require(variant in ('apt-0.9.24', 'upstream-0.10.6.1'), 'unknown server variant')
+    observed = final
+    if variant == 'apt-0.9.24' and raw_exit == 1:
         require(raw_exit == 1 and data.get('passed') is False and data.get('stage') == 'resize',
                 'old control must fail the raw resize case with exit 1')
         require(data.get('error') == 'Official client exited before comparison completed', 'unexpected old-server failure')
         require(data.get('client_alive_at_finish') is False and process.get('client_exit_origin') == 'natural',
                 'client did not terminate naturally before cleanup')
         require(process['client_returncode'] >= 0, 'child was externally terminated by a signal')
+        observed = observed_resize_after_failure(data, initial)
         warning = re.search(r'\[rdp_handle_sc_flags\][^\n]*\[CONNECTION_STATE_FINALIZATION_CLIENT_SYNC\]'
                             r'[^\n]*expected flag FINALIZE_SC_SYNCHRONIZE_PDU[^\n]*NO_FLAG_SET', log[resize:])
         require(warning is not None, 'missing exact reactivation synchronization failure')
@@ -137,12 +179,14 @@ def verify_case(directory, variant, raw_exit, flush, sync):
         require('AutoReconnect not enabled, quitting.' in suffix, 'missing explicit no-reconnect termination')
         outcome = 'old interoperability failure reproduced'
     else:
-        require(variant == 'upstream-0.10.6.1', 'unknown server variant')
         require(raw_exit == 0 and data.get('passed') is True and data.get('stage') == 'complete' and
                 data.get('client_alive_at_finish') is True and process.get('client_exit_origin') == 'cleanup-signal',
-                'current server did not complete a live positive resize')
-        require('error' not in data and '--> CONNECTION_STATE_ACTIVE' in log[resize:], 'current reactivation incomplete')
-        require('DATA_PDU_TYPE_UPDATE - update_recv() failed' not in log, 'current protocol failure')
+                'server did not complete a live positive resize')
+        server_state(final, 1280, 720)
+        require([1024, 768] in final.get('resizes', []) and [1280, 720] in final.get('resizes', []),
+                'server resize history missing')
+        require('error' not in data and '--> CONNECTION_STATE_ACTIVE' in log[resize:], 'reactivation incomplete')
+        require('DATA_PDU_TYPE_UPDATE - update_recv() failed' not in log, 'positive case contains protocol failure')
         resized = data.get('resized_server')
         server_state(resized, 1280, 720)
         same_session(initial, resized)
@@ -151,9 +195,12 @@ def verify_case(directory, variant, raw_exit, flush, sync):
                 'post-resize input was not observed')
         frame(directory, data, 'after.png', 1280, 720, resized['clicks'])
         frame(directory, data, 'after-input.png', 1280, 720, final['clicks'])
-        outcome = 'current server live resize passed'
+        outcome = ('current server live resize passed' if variant == 'upstream-0.10.6.1'
+                   else 'old server live resize passed in this attempt')
     return {'outcome': outcome, 'raw_case_exit': raw_exit, 'client_returncode': process['client_returncode'],
-            'client_exit_origin': process['client_exit_origin'], 'run_id': run_id, 'client_sha256': binary_hash}
+            'client_exit_origin': process['client_exit_origin'], 'run_id': run_id, 'client_sha256': binary_hash,
+            'immediate_or_final_server_size': list(final_size),
+            'verified_observed_server_size': [observed['width'], observed['height']]}
 
 
 def verify_matrix(root):
@@ -176,8 +223,12 @@ def verify_matrix(root):
         hashes.add(case['client_sha256'])
         cases.append(dict(flush=pair[0], synchronous_dynamic_channels=pair[1], **case))
     require(len(hashes) == 1, 'client binary changed between controlled cases')
+    failed = sum(case['outcome'] == 'old interoperability failure reproduced' for case in cases)
     return {'schema_version': 1, 'validated': True, 'server_variant': variant, 'cases': cases,
-            'meaning': 'Known incompatibility reproduced; old-server resize is NOT supported.' if
+            'live_resize_positive_cases': len(cases) - failed, 'reactivation_failure_cases': failed,
+            'meaning': 'Old-server compatibility characterization: proven successes and/or the exact '
+                       'known reactivation failure only. A reproduced failure is NOT a resize success; '
+                       'successes in this run do not establish reliable old-server compatibility.' if
             variant == 'apt-0.9.24' else 'Current-server positive live-resize controls passed.'}
 
 

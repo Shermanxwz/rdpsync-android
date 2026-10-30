@@ -25,7 +25,6 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -54,6 +53,7 @@ import com.rdp.sync.security.PendingCertificateTrust
 import com.rdp.sync.network.RdpInputDispatcher
 import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.rdp.SessionUiDefaults
+import com.rdp.sync.ui.rdp.SessionViewportLayout
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -233,92 +233,94 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
         connecting = false
     }
 
-    Column(Modifier.fillMaxSize()
-        .then(if (compactLandscape) Modifier.statusBarsPadding() else Modifier)
-        .navigationBarsPadding().imePadding()) {
-        if (!compactLandscape) TopAppBar(
-            title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) "已连接" else status, style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
-            navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
-            actions = {
-                if (landscape) IconButton(onClick = { expandedLandscapeTools = false }) { Icon(Icons.Default.Fullscreen, "收起会话工具") }
-                IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
-                IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
-            }
-        )
-        Box(Modifier.weight(1f).fillMaxWidth().background(Color(0xFF020617)).onSizeChanged {
-            // The IME is a local occlusion, not a request to rearrange Windows.
-            if (!imeVisible && it.width > 0 && it.height > 0) viewportSize = it
-        }, contentAlignment = Alignment.Center) {
-            if (isConnected) {
-                AndroidView(
-                    factory = { RdpDesktopView(it, input).also { view -> desktopView = view; view.setPointerMode(pointerMode) } },
-                    update = { it.setPointerMode(pointerMode) },
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                if (connecting) CircularProgressIndicator()
-                Spacer(Modifier.height(12.dp))
-                Text(status, color = Color.White, textAlign = TextAlign.Center)
-                Spacer(Modifier.height(12.dp))
-                Button(onClick = { showReconnect = true }) { Text("重新连接") }
-                TextButton(onClick = { diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true }) { Text("查看诊断") }
-            }
-        }
-        Surface(tonalElevation = 6.dp) {
-            if (compactLandscape) Column(Modifier.fillMaxWidth()) {
-                // Reserve only 56dp for tools, not a header plus static hints.
-                // Telemetry text never changes this geometry.
-                Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
-                    if (wideLandscapeToolbar) Column(Modifier.weight(1f)) {
-                        Text(device.name, style = MaterialTheme.typography.labelMedium, maxLines = 1)
-                        Text(when {
-                            inputWarning.isNotBlank() -> "输入异常，请查看设置"
-                            reconnectRequired -> "显示设置需重连"
-                            isConnected -> "已连接"
-                            else -> status
-                        }, style = MaterialTheme.typography.labelSmall, maxLines = 1,
-                            color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else LocalContentColor.current)
-                    }
-                    IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
-                        Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
-                    }
-                    IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
-                    if (wideLandscapeToolbar) {
-                        IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
-                        IconButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Icon(Icons.Default.ZoomOutMap, "复位视图") }
-                    }
+    SessionViewportLayout(
+        onLogicalViewport = { if (it.width > 0 && it.height > 0) viewportSize = it },
+        header = {
+            if (!compactLandscape) TopAppBar(
+                windowInsets = WindowInsets(0, 0, 0, 0),
+                title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) "已连接" else status, style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
+                navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+                actions = {
+                    if (landscape) IconButton(onClick = { expandedLandscapeTools = false }) { Icon(Icons.Default.Fullscreen, "收起会话工具") }
                     IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
-                    IconButton(onClick = { expandedLandscapeTools = true }) { Icon(Icons.Default.FullscreenExit, "展开会话工具") }
+                    IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
                 }
-                if (imeVisible) SessionKeyboardShortcuts(input)
-            } else {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+            )
+        },
+        desktop = {
+            Box(Modifier.fillMaxSize().background(Color(0xFF020617)), contentAlignment = Alignment.Center) {
+                if (isConnected) {
+                    AndroidView(
+                        factory = { RdpDesktopView(it, input).also { view -> desktopView = view; view.setPointerMode(pointerMode) } },
+                        update = { it.setPointerMode(pointerMode) },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    if (connecting) CircularProgressIndicator()
+                    Spacer(Modifier.height(12.dp))
+                    Text(status, color = Color.White, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(12.dp))
+                    Button(onClick = { showReconnect = true }) { Text("重新连接") }
+                    TextButton(onClick = { diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true }) { Text("查看诊断") }
+                }
+            }
+        },
+        toolbar = {
+            Surface(tonalElevation = 6.dp) {
+                if (compactLandscape) Column(Modifier.fillMaxWidth()) {
+                    // Reserve only 56dp for tools, not a header plus static hints.
+                    // Telemetry text never changes this geometry.
+                    Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
+                        if (wideLandscapeToolbar) Column(Modifier.weight(1f)) {
+                            Text(device.name, style = MaterialTheme.typography.labelMedium, maxLines = 1)
+                            Text(when {
+                                inputWarning.isNotBlank() -> "输入异常，请查看设置"
+                                reconnectRequired -> "显示设置需重连"
+                                isConnected -> "已连接"
+                                else -> status
+                            }, style = MaterialTheme.typography.labelSmall, maxLines = 1,
+                                color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else LocalContentColor.current)
+                        }
                         IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
                             Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
                         }
                         IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
-                        IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
-                        TextButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Text("复位视图") }
-                        TextButton(onClick = { showSettings = true }) { Text("画质") }
+                        if (wideLandscapeToolbar) {
+                            IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
+                            IconButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Icon(Icons.Default.ZoomOutMap, "复位视图") }
+                        }
+                        IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
+                        IconButton(onClick = { expandedLandscapeTools = true }) { Icon(Icons.Default.FullscreenExit, "展开会话工具") }
                     }
-                    Text(if (pointerMode) "触控板：滑动移指针，轻点单击；长按右键，长按后拖动。" else "直接触摸；双指缩放/平移。兼容模式支持长按右键、长按后拖动。", style = MaterialTheme.typography.labelSmall, minLines = 2, maxLines = 2, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
-                    // Always reserve exactly two text lines. Status wrapping must not
-                    // change our viewport and trigger a resize/ack/resize feedback loop.
-                    Text(
-                        text = inputWarning.ifBlank { if (reconnectRequired) "$displaySummary · 点此重连" else displaySummary.ifBlank { "等待显示协商…" } },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
-                        minLines = 2, maxLines = 2,
-                        modifier = Modifier.fillMaxWidth().clickable(enabled = reconnectRequired) { showReconnect = true }
-                    )
-                    if (imeVisible) SessionKeyboardShortcuts(input)
+                } else {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+                            IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
+                                Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
+                            }
+                            IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
+                            IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
+                            TextButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Text("复位视图") }
+                            TextButton(onClick = { showSettings = true }) { Text("画质") }
+                        }
+                        Text(if (pointerMode) "触控板：滑动移指针，轻点单击；长按右键，长按后拖动。" else "直接触摸；双指缩放/平移。兼容模式支持长按右键、长按后拖动。", style = MaterialTheme.typography.labelSmall, minLines = 2, maxLines = 2, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+                        // Always reserve exactly two text lines. Status wrapping must not
+                        // change our viewport and trigger a resize/ack/resize feedback loop.
+                        Text(
+                            text = inputWarning.ifBlank { if (reconnectRequired) "$displaySummary · 点此重连" else displaySummary.ifBlank { "等待显示协商…" } },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                            minLines = 2, maxLines = 2,
+                            modifier = Modifier.fillMaxWidth().clickable(enabled = reconnectRequired) { showReconnect = true }
+                        )
+                    }
                 }
             }
-        }
-    }
+        },
+        keyboardShortcuts = { Surface(tonalElevation = 6.dp) { SessionKeyboardShortcuts(input) } }
+    )
     pendingTrust?.let { pending ->
         CertificateTrustDialog(pending, savingTrust, trustError, onCancel = ::dismissCertificate, onTrust = {
             if (!savingTrust && pendingTrust == pending && endpoint == pending.endpoint && trustGuard.isActive()) {

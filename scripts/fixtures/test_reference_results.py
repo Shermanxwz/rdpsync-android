@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic mutation tests for the *actual* evidence validator, no RDP host."""
 import copy
+import ast
 import hashlib
 import json
 import pathlib
@@ -54,6 +55,10 @@ def make_case(directory, variant='apt-0.9.24', flush='TRUE', sync='FALSE'):
     data['frames']['before.png'] = image_proof(directory, 'before.png', 1024, 768, 0)
     if old:
         data['error'] = 'Official client exited before comparison completed'
+        data['error_observed_monotonic'] = 12.6
+        data['post_failure_server_observation'] = {
+            'started_monotonic': 12.7, 'ended_monotonic': 12.8, 'budget_seconds': 2.0,
+            'observations': [{'observed_monotonic': 12.75, 'state': copy.deepcopy(final)}]}
     else:
         data['resized_server'] = dict(final, clicks=0)
         data['clicks_before_post_resize'] = 0
@@ -65,6 +70,7 @@ def make_case(directory, variant='apt-0.9.24', flush='TRUE', sync='FALSE'):
     write_json(directory / 'result.json', data)
     write_json(directory / 'process-result.json', process)
     (directory / 'run-id.txt').write_text(run_id)
+    (directory / 'attempt-id.txt').write_text(run_id)
     (directory / 'exit-code.txt').write_text(str(process['case_exit']))
     (directory / 'source-revision.txt').write_text(verify.SOURCE_REVISION)
     (directory / 'version.txt').write_text('This is FreeRDP version 3.32.2 (97eff6d)')
@@ -104,6 +110,33 @@ class ReferenceEvidenceTest(unittest.TestCase):
         make_case(self.root, 'upstream-0.10.6.1')
         self.assertEqual(self.check('upstream-0.10.6.1', 0)['outcome'], 'current server live resize passed')
 
+    def test_real_old_positive_is_not_forced_into_negative_class(self):
+        make_case(self.root, 'upstream-0.10.6.1')
+        self.assertEqual(self.check('apt-0.9.24', 0)['outcome'], 'old server live resize passed in this attempt')
+
+    def test_immediate_snapshot_preserved_while_fresh_observation_settles(self):
+        self.change_data(lambda d: d.update(final_server=copy.deepcopy(d['initial_server'])))
+        self.assertEqual(self.check()['outcome'], 'old interoperability failure reproduced')
+        self.assertEqual(json.loads((self.root / 'result.json').read_text())['final_server']['width'], 1024)
+
+    def test_unobserved_target_and_stale_or_unbounded_observation_rejected(self):
+        original = copy.deepcopy(self.data)
+        mutations = [
+            lambda d: d.pop('post_failure_server_observation'),
+            lambda d: d['post_failure_server_observation'].update(ended_monotonic=99),
+            lambda d: (d['post_failure_server_observation'].update(started_monotonic=100, ended_monotonic=100.2),
+                       d['post_failure_server_observation']['observations'][0].update(observed_monotonic=100.1)),
+            lambda d: d['post_failure_server_observation']['observations'][0].update(observed_monotonic=1),
+            lambda d: d['post_failure_server_observation']['observations'][0].update(state=copy.deepcopy(d['initial_server'])),
+            lambda d: d['post_failure_server_observation']['observations'][0]['state'].update(session_id=str(uuid.uuid4())),
+        ]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                self.data = copy.deepcopy(original)
+                self.change_data(mutate)
+                with self.assertRaises(verify.InvalidEvidence):
+                    self.check()
+
     def test_old_mutations_rejected(self):
         original = copy.deepcopy(self.data)
         mutations = {
@@ -112,7 +145,6 @@ class ReferenceEvidenceTest(unittest.TestCase):
             'timeout': lambda d: d.update(error='Timed out during resize'),
             'client alive': lambda d: d.update(client_alive_at_finish=True),
             'unexpected pass': lambda d: d.update(passed=True),
-            'no resize': lambda d: d['final_server'].update(width=1024, height=768),
             'UUID changed': lambda d: d['final_server'].update(session_id=str(uuid.uuid4())),
             'PID changed': lambda d: d['final_server'].update(desktop_pid=9999),
             'initial unready': lambda d: d['initial_server'].update(ready=False),
@@ -184,6 +216,13 @@ class ReferenceEvidenceTest(unittest.TestCase):
         with self.assertRaises(verify.InvalidEvidence):
             self.check(raw=0)
 
+    def test_new_preflight_failure_cannot_reuse_old_complete_artifacts(self):
+        # Everything previously valid remains, including raw case exit 1. Only
+        # the matrix-issued attempt changed before a simulated early failure.
+        (self.root / 'attempt-id.txt').write_text(str(uuid.uuid4()))
+        with self.assertRaisesRegex(verify.InvalidEvidence, 'stale'):
+            self.check()
+
     def test_current_alive_and_post_input_count_required(self):
         for mutation in (lambda d: d.update(client_alive_at_finish=False),
                          lambda d: d['final_server'].update(clicks=0)):
@@ -210,12 +249,70 @@ class ReferenceEvidenceTest(unittest.TestCase):
         second = self.root / 'flush-FALSE-sync-TRUE'
         run_id = (first / 'run-id.txt').read_text()
         (second / 'run-id.txt').write_text(run_id)
+        (second / 'attempt-id.txt').write_text(run_id)
         for name in ('result.json', 'process-result.json'):
             data = json.loads((second / name).read_text())
             data['run_id'] = run_id
             write_json(second / name, data)
         with self.assertRaisesRegex(verify.InvalidEvidence, 'reused'):
             verify.verify_matrix(self.root)
+
+    def test_mixed_old_matrix_counts_real_outcomes_separately(self):
+        (self.root / 'server-variant.txt').write_text('apt-0.9.24')
+        (self.root / 'active-xrdp-version.txt').write_text('xrdp 0.9.24\n')
+        rows = ['flush\tsynchronous_dynamic_channels\texit_code']
+        for index, (flush, sync) in enumerate(sorted(verify.PROFILES)):
+            positive = index == 0
+            make_case(self.root / f'flush-{flush}-sync-{sync}',
+                      'upstream-0.10.6.1' if positive else 'apt-0.9.24', flush, sync)
+            rows.append(f'{flush}\t{sync}\t{0 if positive else 1}')
+        (self.root / 'results.tsv').write_text('\n'.join(rows) + '\n')
+        result = verify.verify_matrix(self.root)
+        self.assertEqual(result['live_resize_positive_cases'], 1)
+        self.assertEqual(result['reactivation_failure_cases'], 3)
+
+
+class ActualObservationFunctionTest(unittest.TestCase):
+    def observer(self, states):
+        # Execute the exact production function without importing the checker
+        # main, replacing only loopback I/O and the clock for deterministic time.
+        source = pathlib.Path(__file__).with_name('reference_resize_check.py')
+        function = next(n for n in ast.parse(source.read_text()).body
+                        if isinstance(n, ast.FunctionDef) and n.name == 'observe_failure_state')
+
+        class Clock:
+            now = 0.0
+            def monotonic(self): return self.now
+            def sleep(self, seconds): self.now += seconds
+
+        clock = Clock()
+        calls = []
+        def fetch(timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 0.4)
+            clock.now += min(timeout, 0.01)
+            value = states[min(len(calls), len(states) - 1)]
+            calls.append(value)
+            return copy.deepcopy(value)
+        namespace = {'time': clock, 'state': fetch}
+        exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), 'exec'), namespace)
+        return namespace['observe_failure_state'], calls
+
+    def test_poll_records_transition_without_inventing_it(self):
+        initial = {'session_id': 'same', 'desktop_pid': 10, 'width': 1024, 'height': 768}
+        resized = dict(initial, width=1280, height=720)
+        observer, calls = self.observer([initial, resized])
+        result = observer(initial)
+        self.assertEqual([o['state']['width'] for o in result['observations']], [1024, 1280])
+        self.assertEqual(len(calls), 2)
+        self.assertLessEqual(result['ended_monotonic'] - result['started_monotonic'], 2.0)
+
+    def test_poll_stops_at_budget_without_target_inference(self):
+        initial = {'session_id': 'same', 'desktop_pid': 10, 'width': 1024, 'height': 768}
+        observer, _ = self.observer([initial])
+        result = observer(initial)
+        self.assertTrue(all(o['state']['width'] == 1024 for o in result['observations']))
+        self.assertLessEqual(result['ended_monotonic'] - result['started_monotonic'], 2.0)
 
 
 class ActualProcessStatusTest(unittest.TestCase):

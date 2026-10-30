@@ -131,16 +131,28 @@ Windows/NLA interoperability, physical-phone performance, or older-server suppor
 
 The current reference gate runs
 `python3 scripts/fixtures/verify_reference_results.py build/reference-evidence`
-and retains `validated-outcomes.json`. Each original-server case can satisfy only
-the named negative control **“old interoperability failure reproduced”**: it must
-first receive the exact initial pixels and DISP capability, really resize the same
-X desktop UUID/PID, and then fail naturally with the precise
-`FINALIZATION_CLIENT_SYNC` / Synchronize / Update rejection. Build/authentication
-failures, missing images, forced cleanup, signal crashes, stale metadata, or any
-other failure do not qualify. Current-server cases still require all positive
-resize/pixel/input/liveness checks. Raw `results.tsv` and case `exit-code.txt`
-remain unchanged; `process-result.json` separately records the actual child exit
-code and natural-versus-cleanup origin. Fresh run/PID and frame-hash metadata are
-mandatory. A successful negative-control classification is not successful resize
-support on that old server, and it does not retroactively change historical failed
-workflow outcomes.
+and retains `validated-outcomes.json`. The old-server race is not deterministic:
+[run 40986954644](https://github.com/Shermanxwz/rdpsync-android/actions/runs/40986954644)
+received a complete resized frame and post-resize click in one old-server profile,
+while the other three exited with the reactivation error. The strict gate for that
+run remained red because two failure snapshots had not yet observed the X desktop
+resize. Those raw outcomes and immediate snapshots remain unchanged.
+
+Each original-server case is now classified separately: either **“old server live
+resize passed in this attempt”**, requiring exactly the same positive
+pixel/resize/input/liveness proof as the current server, or **“old interoperability
+failure reproduced”**. The latter must first receive exact initial pixels and DISP
+capability, really resize the same X desktop UUID/PID, and then fail naturally with
+the precise `FINALIZATION_CLIENT_SYNC` / Synchronize / Update rejection. A separate
+bounded, timestamped read-only observation may capture fixture metadata settling
+after client exit; it does not retry the client, infer a resize, replace the original
+failure snapshot, or convert failure into successful display support.
+Build/authentication failures, missing images, forced cleanup, signal crashes, stale
+metadata, and all other unexplained failures remain errors. Current-server cases
+still require all four positive resize/pixel/input/liveness outcomes.
+
+Raw `results.tsv` and case `exit-code.txt` remain unchanged; `process-result.json`
+separately records the actual child exit code and natural-versus-cleanup origin.
+Fresh run/PID and frame-hash metadata are mandatory. Both old-server classifications
+are compatibility observations, not a guarantee of reliable old-server support.
+They do not retroactively change historical failed workflow outcomes.

@@ -21,8 +21,12 @@ for flush in TRUE FALSE; do
     reset_fixture
     profile="$OUT/flush-$flush-sync-$sync"
     mkdir -p "$profile"
+    # Issue freshness before invoking any case preflight. A failed invocation
+    # must never validate artifacts left by a previous run in this directory.
+    attempt_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+    printf '%s\n' "$attempt_id" >"$profile/attempt-id.txt"
     set +e
-    bash "$ROOT/scripts/fixtures/run-reference-resize.sh" "$flush" "$sync" "$profile" >"$profile/runner.log" 2>&1
+    RDPSYNC_REFERENCE_ATTEMPT_ID="$attempt_id" bash "$ROOT/scripts/fixtures/run-reference-resize.sh" "$flush" "$sync" "$profile" >"$profile/runner.log" 2>&1
     result=$?
     set -e
     printf '%s\t%s\t%s\n' "$flush" "$sync" "$result" | tee -a "$OUT/results.tsv"
@@ -38,6 +42,7 @@ for flush in TRUE FALSE; do
 done
 reset_fixture
 # Raw failures remain in results.tsv/exit-code.txt and actual child status in
-# process-result.json. Only the exact documented old-server failure is a valid
-# negative control; it is never labelled a successful old-server resize.
+# process-result.json. Old-server characterization accepts only independently
+# proven live resize OR the exact documented reactivation failure, with distinct
+# labels; a reproduced failure is never counted as a successful resize.
 python3 "$ROOT/scripts/fixtures/verify_reference_results.py" "$OUT"

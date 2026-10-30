@@ -33,9 +33,9 @@ jobs:
           bash scripts/fixtures/build-reference-client.sh >build/reference-evidence/client-build.log 2>&1
       - name: Start versioned disposable loopback server
         run: bash scripts/fixtures/start-reference-server.sh '${{ matrix.server }}' >build/reference-evidence/server-build.log 2>&1
-      - name: Reject unrelated failures in strict outcome validator
+      - name: Reject unsupported outcomes and stale characterization evidence
         run: python3 scripts/fixtures/test_reference_results.py
-      - name: Compare flush and synchronous-channel settings, no GFX
+      - name: Characterize old compatibility and require current live resize, no GFX
         run: bash scripts/fixtures/run-reference-matrix.sh
       - name: Collect and clean only this job's fixture
         if: always()

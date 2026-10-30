@@ -24,9 +24,34 @@ def alive():
         return False
 
 
-def state():
-    with urllib.request.urlopen('http://127.0.0.1:8765/state', timeout=2) as response:
+def state(timeout=2):
+    with urllib.request.urlopen('http://127.0.0.1:8765/state', timeout=timeout) as response:
         return json.load(response)
+
+
+def observe_failure_state(initial):
+    """Record fresh server observations; never replace the immediate snapshot.
+
+    The desktop polls XRandR every 250ms. Its HTTP metadata can lag a completed
+    server resize when the client already rejected the reactivation sequence.
+    """
+    start = time.monotonic()
+    deadline = start + 2.0
+    observations = []
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            actual = state(timeout=min(0.4, remaining))
+            observations.append({'observed_monotonic': time.monotonic(), 'state': actual})
+            identity = (actual.get('session_id'), actual.get('desktop_pid'))
+            if identity != (initial.get('session_id'), initial.get('desktop_pid')):
+                break
+            if (actual.get('width'), actual.get('height')) == (1280, 720):
+                break
+        except (OSError, ValueError) as exc:
+            observations.append({'observed_monotonic': time.monotonic(), 'error': type(exc).__name__})
+        time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+    return {'started_monotonic': start, 'ended_monotonic': time.monotonic(),
+            'budget_seconds': 2.0, 'observations': observations}
 
 
 def wait_for(predicate, seconds=35):
@@ -114,10 +139,14 @@ try:
     result.update(passed=True, stage='complete', final_server=after)
 except Exception as exc:
     result['error'] = str(exc)
+    result['error_observed_monotonic'] = time.monotonic()
     try:
         result['final_server'] = state()
     except Exception:
         pass
+    if (result['stage'] == 'resize' and
+            str(exc) == 'Official client exited before comparison completed' and not alive()):
+        result['post_failure_server_observation'] = observe_failure_state(result.get('initial_server', {}))
     raise
 finally:
     result['client_alive_at_finish'] = alive()
