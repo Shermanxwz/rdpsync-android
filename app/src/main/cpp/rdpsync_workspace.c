@@ -31,7 +31,7 @@ typedef struct {
     int fd, parent_fd;
     dev_t dev;
     ino_t ino;
-    uint32_t access, share, granted_access;
+    uint32_t access, share, granted_access, create_options, create_disposition;
     bool append_only, write_through;
     bool directory, read_only, pending, forced_delete;
     char name[RDP_WS_MAX_NAME + 1];
@@ -523,7 +523,7 @@ uint32_t rdp_ws_open(RdpWorkspace* ws, uint64_t owner, const char* path,
     memset(target, 0, sizeof(*target));
     target->fd = fd; fd = -1; target->parent_fd = parent; parent = -1;
     target->owner = owner; target->id = ws->next_handle++; target->access = access; target->share = share_access;
-    target->granted_access = desired_access; target->write_through = (options & 2U) != 0;
+    target->granted_access = desired_access; target->create_options = options; target->create_disposition = disposition; target->write_through = (options & 2U) != 0;
     target->append_only = (desired_access & 4U) && !(desired_access & (2U | UINT32_C(0x40000000) | UINT32_C(0x10000000)));
     target->directory = S_ISDIR(st.st_mode); target->read_only = read_only;
     target->dev = st.st_dev; target->ino = st.st_ino;
@@ -621,17 +621,26 @@ uint32_t rdp_ws_truncate(RdpWorkspace* ws, uint64_t owner, uint32_t handle, uint
     pthread_mutex_unlock(&ws->mutex); return rc;
 }
 
-uint32_t rdp_ws_set_delete(RdpWorkspace* ws, uint64_t owner, uint32_t handle, bool deleting) {
+static uint32_t set_delete(RdpWorkspace* ws, uint64_t owner, uint32_t handle, bool deleting, bool legacy_wire) {
     if (!ws) return RDP_WS_INVALID_PARAMETER;
     pthread_mutex_lock(&ws->mutex);
     WorkspaceHandle* h = get_handle(ws, owner, handle); uint32_t rc = RDP_WS_INVALID_HANDLE;
     if (h) {
-        if (!h->name[0] || h->read_only || !(h->access & RDP_WS_DELETE)) rc = RDP_WS_ACCESS_DENIED;
+        /* A legacy command is not an access grant. Fixed metadata-open only. */
+        bool legacy_eligible = legacy_wire && owner != 0 &&
+            h->granted_access == 0x00100080U && h->create_options == 0x20U && h->create_disposition == RDP_WS_FILE_OPEN && h->share == 7;
+        if (!h->name[0] || h->read_only || (!(h->access & RDP_WS_DELETE) && !legacy_eligible)) rc = RDP_WS_ACCESS_DENIED;
         else if (deleting && h->directory && !directory_empty(h->fd)) rc = RDP_WS_DIRECTORY_NOT_EMPTY;
         else {
             struct stat current;
             rc = fstat(h->fd, &current) ? from_errno(errno) : RDP_WS_OK;
             if (rc == RDP_WS_OK && !h->directory && !(current.st_mode & S_IWUSR)) rc = RDP_WS_ACCESS_DENIED;
+            if (rc == RDP_WS_OK && legacy_wire) {
+                struct stat named;
+                if (!(current.st_mode & S_IWUSR) || !same_inode(h, &current) || regular_or_directory(&current) != RDP_WS_OK ||
+                    fstatat(h->parent_fd, h->name, &named, AT_SYMLINK_NOFOLLOW) ||
+                    !same_inode(h, &named)) rc = RDP_WS_ACCESS_DENIED;
+            }
             for (size_t i = 0; i < RDP_WS_MAX_HANDLES && rc == RDP_WS_OK; i++) {
                 WorkspaceHandle* other = &ws->handles[i];
                 if (other->id && other != h && other->dev == h->dev && other->ino == h->ino && !(other->share & RDP_WS_DELETE))
@@ -644,6 +653,14 @@ uint32_t rdp_ws_set_delete(RdpWorkspace* ws, uint64_t owner, uint32_t handle, bo
         }
     }
     pthread_mutex_unlock(&ws->mutex); return rc;
+}
+
+uint32_t rdp_ws_set_delete(RdpWorkspace* ws, uint64_t owner, uint32_t handle, bool deleting) {
+    return set_delete(ws, owner, handle, deleting, false);
+}
+uint32_t rdp_ws_wire_legacy_delete(RdpWorkspace* ws, uint64_t owner, uint32_t handle) {
+    if (!owner) return RDP_WS_ACCESS_DENIED;
+    return set_delete(ws, owner, handle, true, true);
 }
 
 uint32_t rdp_ws_rename(RdpWorkspace* ws, uint64_t owner, uint32_t handle, const char* new_path, bool replace) {

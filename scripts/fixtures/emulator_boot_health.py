@@ -208,6 +208,62 @@ class Gate:
             except Exception as error:
                 self.report.setdefault('diagnostic_errors', []).append(str(error))
 
+    def recheck_owned_transport(self, name):
+        # Never reconnect/restart adb or any device. Observe only the same sole
+        # action-owned serial; an extra/unauthorized device remains fatal.
+        output = self.command(['adb', 'devices'], name)
+        listed = [line.split() for line in output.splitlines()[1:] if line.strip()]
+        if listed not in ([[SERIAL, 'device']], [[SERIAL, 'offline']]):
+            raise ValueError('Transport changed away from the sole owned emulator')
+
+    def await_boot_completed(self):
+        for attempt in range(1, 6):
+            name = f'boot-completed-{attempt:02d}'
+            output = self.command([*self.adb, 'shell', 'getprop', 'sys.boot_completed'],
+                                  name, allowed=(0, 1, 255))
+            row = self.report['commands'][-1]
+            error = self.out.joinpath(name + '.stderr.txt').read_text().strip()
+            if row['returncode'] == 0 and output.strip() == '1':
+                self.report['boot_completed_attempts'] = attempt
+                return
+            pending = row['returncode'] == 0 and output.strip() in ('', '0')
+            offline = row['returncode'] in (1, 255) and error in ('adb: device offline', 'error: device offline')
+            if not (pending or offline):
+                raise RuntimeError('Unknown boot-completion failure; no startup retry permitted')
+            self.report.setdefault('startup_transport_waits', []).append(
+                {'phase': 'boot-completed', 'attempt': attempt, 'reason': 'offline' if offline else 'boot-pending'})
+            if attempt == 5:
+                raise RuntimeError('Owned boot-completion did not become ready within five observations')
+            self.recheck_owned_transport(f'boot-devices-{attempt:02d}')
+            self.sleep(min(1, max(0, self.deadline - self.now())))
+
+    def prepare_logcat(self, home):
+        # Clear startup logs only after archived initial evidence and healthy
+        # pre-instrumentation snapshots. Never repeat app/tests or a timed-out
+        # mutation. Explicit observed logd/transport failures get <=3 attempts.
+        for attempt in range(1, 4):
+            if not self.snapshot(home)['healthy']:
+                raise RuntimeError('Startup health changed before logcat preparation')
+            name = f'logcat-clear-{attempt:02d}'
+            self.command([*self.adb, 'logcat', '-b', 'all', '-d'], name + '-before')
+            output = self.command([*self.adb, 'logcat', '-c'], name, allowed=(0, 1, 255))
+            row = self.report['commands'][-1]
+            error = self.out.joinpath(name + '.stderr.txt').read_text().strip()
+            if row['returncode'] == 0:
+                if not self.snapshot(home)['healthy']:
+                    raise RuntimeError('Startup health changed after logcat preparation')
+                self.report['logcat_clear_attempts'] = attempt
+                self.report['logcat_clear_verified'] = True
+                return
+            message = (output.strip() + '\n' + error).strip()
+            transient = message in ("failed to clear the 'main' log", 'adb: device offline', 'error: device offline')
+            self.report.setdefault('startup_transport_waits', []).append(
+                {'phase': 'logcat-clear', 'attempt': attempt, 'reason': message})
+            if not transient or attempt == 3:
+                raise RuntimeError('Logcat preparation failed; no instrumentation permitted')
+            self.recheck_owned_transport(f'logcat-devices-{attempt:02d}')
+            self.sleep(min(1, max(0, self.deadline - self.now())))
+
     def await_home(self):
         history = self.report.setdefault('home_resolution_observations', [])
         while self.now() < self.deadline:
@@ -247,8 +303,7 @@ class Gate:
         self.report['sdk'] = int(sdk)
         self.device_authorized = True
         self.evidence('initial')
-        if self.shell(['getprop', 'sys.boot_completed'], 'boot-completed').strip() != '1':
-            raise ValueError('Emulator action returned before boot completion')
+        self.await_boot_completed()
         home = self.await_home()
         package = home.split('/')[0]
         self.report['home_component'] = home
@@ -289,6 +344,9 @@ class Gate:
                         raise TimeoutError('Final health observation exceeded the startup deadline')
                     classification = ('recovered_boot' if original_pid else 'self_recovered_boot'
                                       if self.report.get('observed_active_launcher_error') else 'pristine_boot')
+                    self.prepare_logcat(home)
+                    if self.now() > self.deadline:
+                        raise TimeoutError('Logcat preparation exceeded startup deadline')
                     self.report.update(success=True, classification=classification,
                                        healthy_observation_count=stable_count, stable_seconds=self.now() - stable_since)
                     # Startup readiness is the last health observation. Do not add

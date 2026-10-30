@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include "../../main/cpp/rdpsync_drive.c"
 wLog* WLog_Get(const char* name){(void)name;return NULL;}
 BOOL WLog_IsLevelActive(wLog* log,DWORD level){(void)log;(void)level;return FALSE;}
@@ -45,7 +46,7 @@ static uint32_t request(Fixture* f,uint32_t major,uint32_t minor,uint32_t handle
 static uint32_t create(Fixture* f,const char* path,uint32_t access,uint32_t disposition,uint32_t options){BYTE body[32+8192]={0};put32(body,access);put32(body+16,7);put32(body+20,disposition);put32(body+24,options);size_t n=path_bytes(path,body+32);put32(body+28,(uint32_t)n);uint32_t status=request(f,IRP_MJ_CREATE,0,0,body,n+32);if(status)fprintf(stderr,"create %s failed %08x\n",path,status);assert(status==STATUS_SUCCESS);assert(sent_size==21);return get32(sent+16);}
 static void write_file(Fixture* f,uint32_t h,uint64_t off,const void* data,size_t n){BYTE* body=calloc(1,32+n);assert(body);put32(body,(uint32_t)n);put64(body+4,off);memcpy(body+32,data,n);assert(!request(f,IRP_MJ_WRITE,0,h,body,32+n));assert(get32(sent+16)==n&&sent_size==21);free(body);}
 static void read_file(Fixture* f,uint32_t h,uint64_t off,size_t n,const void* expected,size_t actual){BYTE body[32]={0};put32(body,(uint32_t)n);put64(body+4,off);assert(!request(f,IRP_MJ_READ,0,h,body,32));assert(get32(sent+16)==actual&&sent_size==20+actual);assert(!memcmp(sent+20,expected,actual));}
-static uint32_t set(Fixture* f,uint32_t h,uint32_t type,const BYTE* data,size_t n){BYTE body[32+8192]={0};assert(n<=8192);put32(body,type);put32(body+4,(uint32_t)n);memcpy(body+32,data,n);return request(f,IRP_MJ_SET_INFORMATION,0,h,body,32+n);}
+static uint32_t set(Fixture* f,uint32_t h,uint32_t type,const BYTE* data,size_t n){BYTE body[32+8192]={0};assert(n<=8192);put32(body,type);put32(body+4,(uint32_t)n);if(n)memcpy(body+32,data,n);return request(f,IRP_MJ_SET_INFORMATION,0,h,body,32+n);}
 static uint32_t directory(Fixture* f,uint32_t h,const char* pattern,bool initial){BYTE body[32+8192]={0};put32(body,FileNamesInformation);body[4]=initial;size_t n=path_bytes(pattern,body+32);put32(body+5,(uint32_t)n);return request(f,IRP_MJ_DIRECTORY_CONTROL,IRP_MN_QUERY_DIRECTORY,h,body,32+n);}
 static void utf_tests(void){size_t n;const uint16_t wide[]={0x732b,0xd83d,0xde00};char* text=rdpsync_utf16_to_utf8(wide,3,&n);assert(text&&n==7&&!memcmp(text,"猫😀",7));size_t units;uint16_t* copy=rdpsync_utf8_to_utf16(text,n,&units);assert(copy&&units==3&&!memcmp(wide,copy,sizeof(wide)));free(text);free(copy);const char* bad[]={"\xc0\x80","\xed\xa0\x80","\xf4\x90\x80\x80","\xe7\x8c","\x80","\xf0\x80\x80\x80"};for(size_t i=0;i<sizeof(bad)/sizeof(*bad);i++)assert(!rdpsync_utf8_to_utf16(bad[i],strlen(bad[i]),&n));const uint16_t invalid[][2]={{0xd800,0},{0xdc00,0},{'a',0},{0xd800,'a'}};for(size_t i=0;i<4;i++)assert(!rdpsync_utf16_to_utf8(invalid[i],2,&n));char path[RDP_WS_MAX_PATH+1];BYTE bytes[]={0,0xd8};assert(wire_path(bytes,2,0,path)==STATUS_OBJECT_NAME_INVALID);const char* attacks[]={"../escape","a//b","C:secret","a/..","trail.","a?","a/*/b"};for(size_t i=0;i<sizeof(attacks)/sizeof(*attacks);i++){BYTE encoded[128];size_t len=path_bytes(attacks[i],encoded);assert(wire_path(encoded,len,0,path)!=0);}BYTE term[]={'a',0,0,0};assert(!wire_path(term,4,0,path)&&!strcmp(path,"a"));assert(wire_path(term,3,0,path)!=0);}
 static void filesystem_tests(void){Fixture f;setup(&f,2);uint32_t h=create(&f,"a.txt",GENERIC_READ|GENERIC_WRITE|DELETE|FILE_WRITE_ATTRIBUTES,FILE_CREATE,FILE_NON_DIRECTORY_FILE);const BYTE data[]={0,255,2,3,4,5};write_file(&f,h,0,data,sizeof(data));read_file(&f,h,2,9,data+2,4);assert(!request(&f,0x07,0,h,NULL,0));BYTE query[4];put32(query,FileStandardInformation);assert(!request(&f,IRP_MJ_QUERY_INFORMATION,0,h,query,4));assert(get32(sent+16)==22&&get64(sent+28)==6);BYTE size[8];put64(size,3);assert(!set(&f,h,FileEndOfFileInformation,size,8));read_file(&f,h,0,9,data,3);BYTE rename[128]={1,0};size_t n=path_bytes("renamed.txt",rename+6);put32(rename+2,(uint32_t)n+2);assert(!set(&f,h,FileRenameInformation,rename,n+8));assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));h=create(&f,"RENAMED.TXT",GENERIC_READ|DELETE,FILE_OPEN,FILE_NON_DIRECTORY_FILE);read_file(&f,h,0,3,data,3);BYTE deleting=1;assert(!set(&f,h,FileDispositionInformation,&deleting,1));assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));uint32_t root=create(&f,"",FILE_LIST_DIRECTORY|FILE_READ_ATTRIBUTES,FILE_OPEN,FILE_DIRECTORY_FILE);assert(directory(&f,root,"*",true)==STATUS_NO_MORE_FILES);h=create(&f,"a.txt",GENERIC_READ|GENERIC_WRITE,FILE_CREATE,FILE_NON_DIRECTORY_FILE);assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));assert(!directory(&f,root,"*",true));assert(get32(sent+28)==10);assert(directory(&f,root,"",false)==STATUS_NO_MORE_FILES);assert(request(&f,IRP_MJ_DEVICE_CONTROL,0,root,NULL,0)==STATUS_NOT_SUPPORTED);put32(query,FileFsFullSizeInformation);assert(!request(&f,IRP_MJ_QUERY_VOLUME_INFORMATION,0,0,query,4));assert(get32(sent+16)==32&&get64(sent+20)==RDP_WS_MAX_BYTES/4096);cleanup(&f);}
@@ -258,4 +259,124 @@ static void missing_name_wire_status_tests(void) {
     cleanup(&f);
 }
 
-int main(void){protocol_owner=pthread_self();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
+
+/* Pinned xrdp create uses broad WRITE_DAC intent even for ordinary mkdir. */
+static void xrdp_broad_create_tests(void) {
+    Fixture f; setup(&f, 2);
+    BYTE body[256] = {0};
+    put32(body, 0x0016019f); put32(body+12, FILE_ATTRIBUTE_DIRECTORY);
+    put32(body+16, 7); put32(body+20, FILE_CREATE); put32(body+24, 0x21);
+    size_t n = path_bytes("/xrdp-directory", body+32)+2; put32(body+28, (uint32_t)n);
+    assert(!request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n));
+    uint32_t h = get32(sent+16);
+    /* Neither explicit security operation becomes implemented or authorized. */
+    assert(request(&f, 0x14, 0, h, NULL, 0) == (uint32_t)STATUS_NOT_SUPPORTED);
+    assert(request(&f, 0x15, 0, h, NULL, 0) == (uint32_t)STATUS_NOT_SUPPORTED);
+    assert(!request(&f, IRP_MJ_CLOSE, 0, h, NULL, 0));
+    memset(body+32, 0, sizeof(body)-32); n = path_bytes("/xrdp-file", body+32)+2;
+    put32(body+28, (uint32_t)n); put32(body+12, FILE_ATTRIBUTE_NORMAL); put32(body+24, 0x44);
+    assert(!request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n)); h=get32(sent+16);
+    write_file(&f, h, 0, "test", 4); read_file(&f, h, 0, 4, "test", 4);
+    assert(!request(&f, IRP_MJ_CLOSE, 0, h, NULL, 0));
+    put32(body, 0x0016019f);
+    put64(body+4, 1);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_SUPPORTED);
+    put64(body+4, 0); put32(body+20, FILE_OPEN);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_SUPPORTED);
+    put32(body+20, FILE_CREATE); put32(body+24, 0x20);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_SUPPORTED);
+    put32(body+24, 0x44); put32(body+12, FILE_ATTRIBUTE_DIRECTORY);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_SUPPORTED);
+    put32(body+12, FILE_ATTRIBUTE_NORMAL);
+    put32(body, WRITE_DAC); put32(body+20, FILE_OPEN);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_SUPPORTED);
+    put32(body+20, FILE_CREATE);
+    /* Extra security-owner/SACL intents are not broadened by this compatibility. */
+    put32(body, 0x0016019f | 0x80000);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_NOT_SUPPORTED);
+    cleanup(&f); setup(&f, 1);
+    put32(body, 0x0016019f);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_ACCESS_DENIED);
+    /* Even a WRITE_DAC-only read-style request cannot bypass read-only mode. */
+    put32(body, 0x40000); put32(body+20, FILE_OPEN);
+    assert(request(&f, IRP_MJ_CREATE, 0, 0, body, 32+n) == (uint32_t)STATUS_ACCESS_DENIED);
+    uint32_t local=0, info=0;
+    assert(rdp_ws_open(f.ws, 0, "xrdp-file", FILE_READ_ATTRIBUTES, 7, FILE_OPEN, 0,
+                      false, 0, &local, &info) == RDP_WS_OBJECT_NAME_NOT_FOUND);
+    cleanup(&f);
+}
+
+
+static uint32_t legacy_metadata(Fixture* f, const char* path) {
+    return create(f, path, 0x00100080U, FILE_OPEN, 0x20);
+}
+static void seed_file(Fixture* f, const char* path) {
+    uint32_t h=0, info=0;
+    assert(!rdp_ws_open(f->ws, 0, path, GENERIC_READ|GENERIC_WRITE, 7,
+                       FILE_CREATE, FILE_NON_DIRECTORY_FILE, false, 0, &h, &info));
+    assert(!rdp_ws_close(f->ws, 0, h));
+}
+static void legacy_delete_tests(void) {
+    Fixture f; setup(&f, 2); BYTE yes=1;
+    seed_file(&f, "victim"); uint32_t h=legacy_metadata(&f, "/victim");
+    assert(set(&f,h,FileDispositionInformation,&yes,1)==(uint32_t)STATUS_ACCESS_DENIED);
+    assert(!set(&f,h,FileDispositionInformation,NULL,0));
+    /* No stored-rights upgrade: ordinary cancellation remains denied. */
+    BYTE no=0; assert(set(&f,h,FileDispositionInformation,&no,1)==(uint32_t)STATUS_ACCESS_DENIED);
+    assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));
+    uint32_t local=0,info=0;
+    assert(rdp_ws_open(f.ws,0,"victim",GENERIC_READ,7,FILE_OPEN,0,false,0,&local,&info)==RDP_WS_OBJECT_NAME_NOT_FOUND);
+    seed_file(&f,"leased");
+    assert(!rdp_ws_open(f.ws,0,"leased",GENERIC_READ,3,FILE_OPEN,0,false,0,&local,&info));
+    h=legacy_metadata(&f,"/leased");
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_SHARING_VIOLATION);
+    assert(!rdp_ws_close(f.ws,0,local)); assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));
+    h=create(&f,"/leased",FILE_READ_ATTRIBUTES,FILE_OPEN,0x20);
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_ACCESS_DENIED);
+    assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));
+    for (int variant=0;variant<3;variant++) {
+        BYTE open_body[256]={0};put32(open_body,0x00100080U);
+        put32(open_body+16,variant==1?3:7);put32(open_body+20,variant==2?FILE_OPEN_IF:FILE_OPEN);
+        put32(open_body+24,variant==0?0:0x20);
+        size_t n=path_bytes("/leased",open_body+32)+2;put32(open_body+28,(uint32_t)n);
+        assert(!request(&f,IRP_MJ_CREATE,0,0,open_body,32+n));h=get32(sent+16);
+        assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_ACCESS_DENIED);
+        assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));
+    }
+    h=legacy_metadata(&f,"/leased");
+    assert(rdp_ws_wire_legacy_delete(f.ws,0,h)==RDP_WS_ACCESS_DENIED);
+    assert(rdp_ws_wire_legacy_delete(f.ws,42,h)==RDP_WS_INVALID_HANDLE);
+    char path[256],old[256]; snprintf(path,sizeof(path),"%s/shared-drive/leased",f.home);snprintf(old,sizeof(old),"%s/shared-drive/old",f.home);
+    assert(!rename(path,old)); int fd=open(path,O_CREAT|O_EXCL|O_WRONLY,0600); assert(fd>=0);close(fd);
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_ACCESS_DENIED);
+    assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));
+    h=legacy_metadata(&f,"/leased"); assert(!chmod(path,0400));
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_ACCESS_DENIED);
+    assert(!chmod(path,0600)); assert(!request(&f,IRP_MJ_CLOSE,0,h,NULL,0));
+    uint32_t dir=create(&f,"/dir",FILE_LIST_DIRECTORY,FILE_CREATE,FILE_DIRECTORY_FILE);
+    assert(!request(&f,IRP_MJ_CLOSE,0,dir,NULL,0));seed_file(&f,"dir/child");
+    dir=legacy_metadata(&f,"/dir");
+    assert(set(&f,dir,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_DIRECTORY_NOT_EMPTY);
+    assert(!request(&f,IRP_MJ_CLOSE,0,dir,NULL,0));
+    dir=legacy_metadata(&f,"/");
+    assert(set(&f,dir,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_ACCESS_DENIED);
+    assert(!request(&f,IRP_MJ_CLOSE,0,dir,NULL,0));
+    dir=create(&f,"/empty-dir",FILE_LIST_DIRECTORY,FILE_CREATE,FILE_DIRECTORY_FILE);
+    assert(!request(&f,IRP_MJ_CLOSE,0,dir,NULL,0));dir=legacy_metadata(&f,"/empty-dir");
+    assert(!set(&f,dir,FileDispositionInformation,NULL,0));
+    assert(!request(&f,IRP_MJ_CLOSE,0,dir,NULL,0));
+    h=legacy_metadata(&f,"/leased");
+    f.drive->revoked=true;
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_DEVICE_NOT_READY);
+    f.drive->revoked=false;
+    BYTE malformed[33]={0};put32(malformed,FileDispositionInformation);
+    assert(request(&f,IRP_MJ_SET_INFORMATION,0,h,malformed,sizeof(malformed))==(uint32_t)STATUS_INVALID_PARAMETER);
+    rdp_ws_close_owner(f.ws,41);
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_INVALID_HANDLE);
+    cleanup(&f);setup(&f,1);seed_file(&f,"ro");h=legacy_metadata(&f,"/ro");
+    assert(set(&f,h,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_MEDIA_WRITE_PROTECTED);
+    assert(rdp_ws_wire_legacy_delete(f.ws,41,h)==RDP_WS_ACCESS_DENIED);
+    cleanup(&f);
+}
+
+int main(void){protocol_owner=pthread_self();legacy_delete_tests();xrdp_broad_create_tests();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}

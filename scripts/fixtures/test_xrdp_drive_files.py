@@ -7,7 +7,7 @@ import unittest
 
 from xrdp_drive_files import (BLOCK, LARGE_SIZE, SMALL, expected_large_digest,
                              original_manifest, owned_drive, hash_file, inspect_imports,
-                             expect_denied, read_stall_range)
+                             expect_denied, read_stall_range, check_nonempty_rmdir)
 
 
 class DriveFilesTest(unittest.TestCase):
@@ -101,6 +101,46 @@ class DriveFilesTest(unittest.TestCase):
         with self.assertRaises(ValueError): hash_file(target, 2)
         link = self.drive / 'link'; link.hardlink_to(target)
         with self.assertRaises(ValueError): hash_file(target, 1)
+
+    def test_nonempty_rmdir_records_unchanged_identity_and_content(self):
+        child = self.drive / 'child'; child.write_bytes(b'fixture')
+        result = check_nonempty_rmdir(self.drive, child)
+        self.assertTrue(result['unchanged'])
+        self.assertEqual(result['before'], result['after'])
+        def mapped(): raise OSError(errno.EBADF, 'pinned xrdp mapping')
+        self.assertEqual(check_nonempty_rmdir(self.drive, child, operation=mapped)['denied']['errno'], errno.EBADF)
+        with self.assertRaises(OSError): expect_denied(mapped)
+
+    def test_nonempty_rmdir_rejects_success_unrelated_error_and_mutation(self):
+        child = self.drive / 'child'; child.write_bytes(b'fixture')
+        with self.assertRaises(AssertionError):
+            check_nonempty_rmdir(self.drive, child, operation=lambda: None)
+        def unrelated(): raise OSError(errno.ECONNREFUSED, 'not filesystem')
+        with self.assertRaises(OSError): check_nonempty_rmdir(self.drive, child, operation=unrelated)
+        def mutate():
+            child.write_bytes(b'changed')
+            raise OSError(errno.EBADF, 'must not pass')
+        with self.assertRaises(AssertionError): check_nonempty_rmdir(self.drive, child, operation=mutate)
+        def disappear():
+            child.unlink()
+            raise OSError(errno.EBADF, 'must not pass')
+        with self.assertRaises(FileNotFoundError): check_nonempty_rmdir(self.drive, child, operation=disappear)
+
+    def test_nonempty_rmdir_rejects_same_content_replacement(self):
+        child = self.drive / 'child'; child.write_bytes(b'fixture')
+        def replace():
+            child.rename(self.drive / 'old-child')
+            child.write_bytes(b'fixture')
+            raise OSError(errno.EBADF, 'must not pass')
+        with self.assertRaises(AssertionError): check_nonempty_rmdir(self.drive, child, operation=replace)
+
+    def test_nonempty_rmdir_rejects_directory_replacement(self):
+        child = self.drive / 'child'; child.write_bytes(b'fixture')
+        def replace():
+            self.drive.rename(self.mount / 'old-drive')
+            self.drive.mkdir(); child.write_bytes(b'fixture')
+            raise OSError(errno.EBADF, 'must not pass')
+        with self.assertRaises(AssertionError): check_nonempty_rmdir(self.drive, child, operation=replace)
 
     def test_negative_operation_cannot_pass_on_success_or_unrelated_failure(self):
         with self.assertRaises(AssertionError): expect_denied(lambda: None)

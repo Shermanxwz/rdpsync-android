@@ -73,7 +73,6 @@ adb_owned shell settings put system user_rotation 0
 python3 scripts/fixtures/emulator_boot_health.py "$OUT/boot-health"
 adb_owned shell wm size >"$OUT/wm-size.txt"
 adb_owned shell wm density >"$OUT/wm-density.txt"
-adb_owned logcat -c
 adb_owned shell rm -rf /sdcard/Download/rdpsync-product-ui
 adb_owned shell test ! -e /sdcard/Download/rdpsync-product-ui
 adb_owned shell date +%s >"$OUT/evidence-start-device-seconds.txt"

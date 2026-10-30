@@ -296,4 +296,83 @@ class HomeReadinessTests(unittest.TestCase):
         self.assertFalse(any('googlesdksetup' in ' '.join(c) for c in actions))
 
 
+
+class StartupReadinessTests(unittest.TestCase):
+    exercise = PolicyTests.exercise
+
+    def flaky(self, phase, errors):
+        class Flaky(FakeAdb):
+            attempts = 0
+            def run(self, args, **kwargs):
+                target = ('sys.boot_completed' in args if phase == 'boot' else args[-2:] == ['logcat', '-c'])
+                if target:
+                    self.attempts += 1
+                    if self.attempts <= len(errors):
+                        self.clock += .05; self.calls.append(args)
+                        error = errors[self.attempts-1]
+                        if error == 'timeout': raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+                        return subprocess.CompletedProcess(args, 1, b'', error.encode())
+                return super().run(args, **kwargs)
+        return Flaky()
+
+    def test_observed_boot_offline_then_real_success_no_recovery(self):
+        fake = self.flaky('boot', ['adb: device offline'])
+        report = self.exercise(fake)
+        self.assertTrue(report['success']); self.assertEqual(2, report['boot_completed_attempts'])
+        self.assertEqual(0, report['recovery_count'])
+        self.assertEqual('offline', report['startup_transport_waits'][0]['reason'])
+
+    def test_persistent_boot_offline_bounded_to_five_observations(self):
+        fake = self.flaky('boot', ['adb: device offline'] * 10)
+        report = self.exercise(fake, True)
+        self.assertFalse(report['success']); self.assertEqual(5, fake.attempts)
+        self.assertFalse(any('force-stop' in c or 'start' in c for c in fake.calls))
+
+    def test_unknown_boot_error_not_retried(self):
+        fake = self.flaky('boot', ['permission denied'])
+        self.exercise(fake, True); self.assertEqual(1, fake.attempts)
+
+    def test_logclear_observed_main_failure_requires_later_actual_success(self):
+        fake = self.flaky('logclear', ["failed to clear the 'main' log"])
+        report = self.exercise(fake)
+        self.assertTrue(report['logcat_clear_verified']); self.assertEqual(2, report['logcat_clear_attempts'])
+        self.assertEqual(0, report['recovery_count'])
+        self.assertEqual(1, len(report['startup_transport_waits']))
+
+    def test_persistent_logclear_never_permits_instrumentation(self):
+        fake = self.flaky('logclear', ["failed to clear the 'main' log"] * 5)
+        report = self.exercise(fake, True)
+        self.assertFalse(report['success']); self.assertEqual(3, fake.attempts)
+        self.assertNotIn('logcat_clear_verified', report)
+
+    def test_unknown_logclear_error_not_retried(self):
+        fake = self.flaky('logclear', ['Permission denied'])
+        self.exercise(fake, True); self.assertEqual(1, fake.attempts)
+
+    def test_uncertain_logclear_timeout_not_retried(self):
+        fake = self.flaky('logclear', ['timeout'])
+        self.exercise(fake, True); self.assertEqual(1, fake.attempts)
+
+    def test_extra_device_during_readiness_fails_closed(self):
+        fake = self.flaky('boot', ['adb: device offline'])
+        original = fake.run
+        def added(args, **kwargs):
+            if args == ['adb', 'devices'] and fake.attempts:
+                fake.calls.append(args)
+                return subprocess.CompletedProcess(args, 0,
+                    b'List of devices attached\nemulator-5554\tdevice\nphysical\tdevice\n', b'')
+            return original(args, **kwargs)
+        fake.run = added
+        self.exercise(fake, True); self.assertEqual(1, fake.attempts)
+
+    def test_logclear_success_does_not_mask_changed_health(self):
+        fake = FakeAdb(); original = fake.run
+        def changed(args, **kwargs):
+            result = original(args, **kwargs)
+            if args[-2:] == ['logcat', '-c']: fake.error = 'systemui'
+            return result
+        fake.run = changed
+        report = self.exercise(fake, True)
+        self.assertFalse(report['success']); self.assertNotIn('logcat_clear_verified', report)
+
 if __name__ == '__main__': unittest.main()

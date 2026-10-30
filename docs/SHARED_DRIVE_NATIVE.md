@@ -34,6 +34,28 @@ namespace: at most one device-root prefix is stripped before broker traversal;
 it never becomes an OS absolute path. A single terminal wire NUL is accepted. Own JNI/wire conversions use one strict
 scalar codec, avoiding modified UTF-8 and attached-thread JNI-local accumulation.
 
+Pinned xrdp includes `WRITE_DAC` in its ordinary create access mask. In explicit
+read/write mode only, the exact combined `0x0016019f`, `FILE_CREATE`, share-all,
+zero-allocation request with the observed directory (`0x21`/DIRECTORY) or regular
+file (`0x44`/NORMAL) options/attributes tolerates this ancillary bit without
+granting it to the broker handle. Other DAC intents remain unsupported. Actual security query/set IRPs remain unsupported; no remote
+ACL mutation, owner change, or privilege is enabled. Read-only mode still denies
+this write intent, and other unsupported security-access bits still fail.
+
+The stock xrdp zero-length `FileDispositionInformation` form means delete=true.
+Only this payload-free form uses a separate wire-only broker operation: active
+remote-owner RW handles require either existing DELETE access or the exact
+metadata open (`0x00100080`, OPEN, options `0x20`, share-all). It revalidates the
+current named inode under the broker mutex, writable state, non-root/empty-dir
+rules and conflicting delete-sharing leases. No stored handle access is upgraded;
+normal one-byte disposition and all local/JNI operations retain DELETE checks.
+This is a documented legacy command shape, not detection or trust of a peer name.
+
+The pinned xrdp remove callback reports `STATUS_DIRECTORY_NOT_EMPTY` as Linux
+`EBADF`. The synthetic nonempty-rmdir negative control accepts that errno only
+for this operation and requires unchanged directory/child inode identities and
+child SHA-256. The production status and general denial checks are unchanged.
+
 Unsupported requests/classes/options return defined errors, not fake success:
 security descriptors/ACLs, reparse points/links, notifications, locks, device
 controls, unsupported attributes and settable birth/change times, and growing

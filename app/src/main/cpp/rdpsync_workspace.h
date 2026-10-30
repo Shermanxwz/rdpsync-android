@@ -101,6 +101,9 @@ uint32_t rdp_ws_truncate(RdpWorkspace* workspace, uint64_t owner, uint32_t handl
 uint32_t rdp_ws_rename(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,
     const char* new_path, bool replace);
 uint32_t rdp_ws_set_delete(RdpWorkspace* workspace, uint64_t owner, uint32_t handle, bool deleting);
+/* Wire-only length-zero disposition; never exposed by JNI/local API.
+ * Requires remote owner, RW handle, exact legacy shape or existing DELETE. */
+uint32_t rdp_ws_wire_legacy_delete(RdpWorkspace* workspace, uint64_t owner, uint32_t handle);
 /* -1 leaves a timestamp unchanged; 0 is the Unix epoch, not a sentinel. */
 uint32_t rdp_ws_set_basic(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,
     uint32_t attributes, int64_t access_millis, int64_t write_millis);

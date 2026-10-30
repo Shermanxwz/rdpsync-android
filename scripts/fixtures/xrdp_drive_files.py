@@ -147,6 +147,35 @@ def readonly_check(drive):
     return {'create_denied': denial, 'no_created_entry': True}
 
 
+
+def check_nonempty_rmdir(directory, child, *, operation=None):
+    """Pinned xrdp maps DIRECTORY_NOT_EMPTY to EBADF; scope it to this command.
+
+    An error alone is not enough: the exact directory/child identities and child
+    contents must remain unchanged. No generic denial allowlist is broadened.
+    """
+    def snapshot():
+        parent_info, child_info = directory.lstat(), child.lstat()
+        if child.parent != directory or not stat.S_ISDIR(parent_info.st_mode):
+            raise ValueError('Nonempty delete control needs an actual directory and direct child')
+        return {'directory_identity': [parent_info.st_dev, parent_info.st_ino],
+                'child_identity': [child_info.st_dev, child_info.st_ino],
+                'child': hash_file(child, child_info.st_size)}
+    before = snapshot()
+    try:
+        (directory.rmdir if operation is None else operation)()
+    except OSError as error:
+        if error.errno not in (errno.ENOTEMPTY, errno.EACCES, errno.EPERM, errno.EROFS, errno.EBADF):
+            raise
+        denial = {'errno': error.errno, 'error': type(error).__name__}
+    else:
+        raise AssertionError('Nonempty directory removal unexpectedly succeeded')
+    after = snapshot()
+    if before != after:
+        raise AssertionError('Denied rmdir changed directory/child identity or content')
+    return {'denied': denial, 'unchanged': True, 'before': before, 'after': after}
+
+
 def exercise_rw(drive):
     """Actual mounted operations, no shell commands and no user-provided paths."""
     root = drive / 'remote-created'
@@ -175,7 +204,7 @@ def exercise_rw(drive):
     assert not source.exists() and not same.exists()
     after_rename = hash_file(moved, len(final_bytes))
     assert after_rename == after_write
-    nonempty = expect_denied(first.rmdir)
+    nonempty = check_nonempty_rmdir(first, empty)
     empty.unlink(); first.rmdir()
     assert not first.exists()
     empty_dir = root / 'empty-dir'; empty_dir.mkdir(); empty_dir.rmdir()

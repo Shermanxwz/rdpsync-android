@@ -32,7 +32,6 @@ sha256sum "$APP_APK" "$TEST_APK" app/src/main/jniLibs/x86_64/*.so \
 "${ADB[@]}" shell wm size >"$OUT/wm-size.txt"
 "${ADB[@]}" shell wm density >"$OUT/wm-density.txt"
 python3 scripts/fixtures/emulator_boot_health.py "$OUT/boot-health"
-"${ADB[@]}" logcat -c
 STARTED=false
 COLLECTED=false
 REMOTE_PRIVATE="/sdcard/Android/data/$PACKAGE/files/api29-fullscreen-probe"

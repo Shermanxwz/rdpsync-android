@@ -192,7 +192,21 @@ static uint32_t process_create(RdpDrive* d, IRP* irp) {
     for (size_t i = 0; i < RDP_WS_MAX_HANDLES; ++i) if (!d->handles[i].id) { holder = &d->handles[i]; break; }
     if (!holder) return STATUS_INSUFFICIENT_RESOURCES;
     uint32_t handle = 0, information = 0;
-    status = rdp_ws_open(d->workspace, d->owner, path, get32(p), get32(p + 16),
+    /* xrdp includes WRITE_DAC in its fixed ordinary-create access mask.
+     * This device has no ACL operations: tolerate that ancillary intent only
+     * in explicit RW mode, without granting it to the broker handle. */
+    uint32_t desired_access = get32(p);
+    if (desired_access & WRITE_DAC) {
+        if (d->mode != 2) return STATUS_ACCESS_DENIED;
+        const uint32_t options = get32(p + 24);
+        const uint32_t attrs = get32(p + 12);
+        if (desired_access != 0x0016019fU || get32(p + 20) != FILE_CREATE ||
+            get32(p + 16) != 7 || get64(p + 4) != 0 ||
+            !((options == 0x21U && attrs == FILE_ATTRIBUTE_DIRECTORY) ||
+              (options == 0x44U && attrs == FILE_ATTRIBUTE_NORMAL))) return STATUS_NOT_SUPPORTED;
+        desired_access &= ~WRITE_DAC;
+    }
+    status = rdp_ws_open(d->workspace, d->owner, path, desired_access, get32(p + 16),
         get32(p + 20), get32(p + 24), d->mode == 1, get64(p + 4), &handle, &information);
     /* Match stock FreeRDP CREATE: a missing name is NO_SUCH_FILE on wire.
      * Keep broker/JNI errors and all other broker errors distinct. */
@@ -301,8 +315,17 @@ static uint32_t process_set(RdpDrive* d, IRP* irp) {
             break;
         }
         case FileDispositionInformation:
-            if (length != 1 || data[0] > 1) return STATUS_INVALID_PARAMETER;
-            status = rdp_ws_set_delete(d->workspace, d->owner, irp->FileId, data[0] != 0); break;
+            /* Stock FreeRDP defines legacy length-zero as delete=true.
+             * Ordinary one-byte requests retain strict per-handle DELETE rights. */
+            if (!length) {
+                if (Stream_GetRemainingLength(irp->input) != 32) return STATUS_INVALID_PARAMETER;
+                if (d->mode != 2) return STATUS_ACCESS_DENIED;
+                status = rdp_ws_wire_legacy_delete(d->workspace, d->owner, irp->FileId);
+            } else {
+                if (length != 1 || data[0] > 1) return STATUS_INVALID_PARAMETER;
+                status = rdp_ws_set_delete(d->workspace, d->owner, irp->FileId, data[0] != 0);
+            }
+            break;
         case FileRenameInformation: {
             if (length < 6 || data[0] > 1 || data[1] != 0) return STATUS_INVALID_PARAMETER;
             const uint32_t path_length = get32(data + 2);

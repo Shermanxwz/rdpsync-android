@@ -6,7 +6,6 @@ OUT=build/emulator-evidence
 mkdir -p "$OUT"
 sha256sum app/src/androidTest/java/com/rdp/sync/FixtureAppLocaleRule.kt >"$OUT/fixture-app-locale-source.sha256"
 python3 scripts/fixtures/emulator_boot_health.py "$OUT/boot-health"
-adb logcat -c
 adb shell settings put system accelerometer_rotation 0
 adb shell settings put system user_rotation 0
 adb shell getprop ro.build.fingerprint >build/emulator-evidence/emulator-fingerprint.txt
