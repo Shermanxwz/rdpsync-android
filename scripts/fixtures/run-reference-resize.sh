@@ -36,6 +36,9 @@ WaitForOutputBufferFlush=$FLUSH
 SynchronousDynamicChannels=$SYNC
 SupportGraphicsPipeline=FALSE; RDPGFX channel not built.
 No smart sizing. Actual server desktop and received RGB checked after resize.
+Reference uses upstream internal-channel build defaults, unlike Android's slim
+build. AINPUT is loaded unconditionally by official client channel loading;
+unrelated optional features and physical redirections are disabled below.
 All credentials and certificate belong only to the disposable loopback fixture.
 EOF
 # /gfx is an optional-value argument, not a reliable negative boolean flag in
@@ -46,6 +49,11 @@ TUNE+=",FreeRDP_SupportMonitorLayoutPdu:FALSE,FreeRDP_NetworkAutoDetect:TRUE,Fre
 TUNE+=",FreeRDP_AudioPlayback:FALSE,FreeRDP_AudioCapture:FALSE,FreeRDP_RedirectClipboard:FALSE"
 TUNE+=",FreeRDP_AutoReconnectionEnabled:FALSE"
 TUNE+=",FreeRDP_EncomspVirtualChannel:FALSE"
+TUNE+=",FreeRDP_RemdeskVirtualChannel:FALSE,FreeRDP_RemoteApplicationMode:FALSE"
+TUNE+=",FreeRDP_SupportEchoChannel:FALSE,FreeRDP_SupportGeometryTracking:FALSE,FreeRDP_SupportVideoOptimized:FALSE"
+TUNE+=",FreeRDP_RemoteAssistanceMode:FALSE,FreeRDP_LyncRdpMode:FALSE"
+TUNE+=",FreeRDP_RedirectDrives:FALSE,FreeRDP_RedirectHomeDrive:FALSE,FreeRDP_RedirectPrinters:FALSE"
+TUNE+=",FreeRDP_RedirectSmartCards:FALSE,FreeRDP_RedirectSerialPorts:FALSE,FreeRDP_RedirectParallelPorts:FALSE"
 "$CLIENT" /v:127.0.0.1:3389 /u:rdpfixture /p:rdpsync-fixture-only \
   /cert:fingerprint:sha256:"$FINGERPRINT" /sec:tls /size:1024x768 /bpp:32 \
   /gdi:sw /dynamic-resolution /t:rdpsync-reference /log-level:DEBUG \

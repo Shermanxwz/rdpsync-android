@@ -21,9 +21,12 @@ fi
 mkdir -p "$OUT"
 # CHANNEL_RDPGFX=OFF is deliberate: this comparison must exercise the same
 # classic GDI Deactivate/Reactivate path, not a newer GFX-only resize shortcut.
-# Official X11 keyboard code unconditionally references the ENCOMSP context;
-# build that dependency, but do not enable its channel in comparison sessions.
-cmake -S "$SOURCE" -B "$OUT" -G Ninja \
+# Keep upstream's default internal protocol channels: official X11 has
+# unconditional ENCOMSP context and RAIL helper references. Runtime settings
+# below disable unrelated features; this is not the Android slim build profile.
+# Drop only this disposable reference build's cached channel selections, so an
+# earlier slim attempt cannot silently override upstream defaults on a rerun.
+cmake -S "$SOURCE" -B "$OUT" -G Ninja -U 'CHANNEL_*' \
   -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF -DBUILD_SHARED_LIBS=ON \
   -DWITH_CLIENT=ON -DWITH_X11=ON -DWITH_CLIENT_SDL=OFF -DWITH_WAYLAND=OFF \
   -DWITH_SERVER=OFF -DWITH_SAMPLE=OFF -DWITH_SHADOW=OFF -DWITH_PROXY=OFF \
@@ -37,11 +40,7 @@ cmake -S "$SOURCE" -B "$OUT" -G Ninja \
   -DWITH_SERVER_CHANNELS=OFF -DCHANNEL_URBDRC=OFF \
   -DCHANNEL_RDPGFX=OFF -DCHANNEL_AUDIN=OFF -DCHANNEL_RDPECAM=OFF \
   -DCHANNEL_CLIPRDR=OFF -DCHANNEL_DRIVE=OFF -DCHANNEL_PRINTER=OFF \
-  -DCHANNEL_SMARTCARD=OFF -DCHANNEL_SERIAL=OFF -DCHANNEL_PARALLEL=OFF \
-  -DCHANNEL_AINPUT=OFF -DCHANNEL_ECHO=OFF -DCHANNEL_ENCOMSP=ON \
-  -DCHANNEL_GEOMETRY=OFF -DCHANNEL_LOCATION=OFF -DCHANNEL_RAIL=OFF \
-  -DCHANNEL_RDPEMSC=OFF -DCHANNEL_REMDESK=OFF -DCHANNEL_TELEMETRY=OFF \
-  -DCHANNEL_VIDEO=OFF
+  -DCHANNEL_SMARTCARD=OFF -DCHANNEL_SERIAL=OFF -DCHANNEL_PARALLEL=OFF
 cmake --build "$OUT" --target xfreerdp -j"${JOBS:-4}"
 CLIENT="$(find "$OUT/client/X11" -type f -name 'xfreerdp*' -executable | head -1)"
 [[ -n "$CLIENT" ]]
