@@ -85,6 +85,9 @@ try:
         capture_output=True, text=True, timeout=2).stdout.strip().splitlines(), 10)[0]
     # Desktop state can precede delivery; wait for observable pixels, not a sleep.
     wait_for_paint(window, 'before.png', 1024, 768, initial['clicks'])
+    result['stage'] = 'display-control-caps'
+    wait_for(lambda: 'DisplayControlCapsPdu: setting the window as resizable' in
+             (out / 'client.log').read_text(errors='replace'), 15)
     result['stage'] = 'resize'
     result['resize_requested_monotonic'] = time.monotonic()
     subprocess.run(['xdotool', 'windowsize', '--sync', window, '1280', '720'], check=True, timeout=8)
