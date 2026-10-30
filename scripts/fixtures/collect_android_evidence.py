@@ -25,6 +25,9 @@ CLASSIC_FRAMES = ['01-direct-touch-fullscreen-profile.png', '03-negotiated-hd.pn
                   '04e-landscape-ime-restored.png', '05-weak-link-live-session.png',
                   '06-changed-certificate-blocked.png', '07-rotated-certificate-approved.png',
                   '08-exit-restored-system-bars.png', '99-before-final-teardown.png']
+DRIVE_FRAMES = ['01-real-saf-imported-browser.png', '02-read-only-mounted.png', '03-read-write-mounted.png',
+                '04-real-saf-exported.png', '05-revoked-session-live.png', '06-persistent-after-reconnect.png',
+                '99-shared-drive-final.png']
 TRANSIENT_READ = re.compile(r'device offline|no devices/emulators found|device .* not found|'
                             r'connection reset|connection closed|protocol fault|error: closed', re.I)
 
@@ -34,7 +37,7 @@ def directories(kind):
         return ['rdpsync-evidence']
     prefix = 'gnome' if kind == 'gnome' else 'xrdp'
     return ([f'rdpsync-{prefix}-evidence'] if kind == 'gnome' else []) + [
-        f'rdpsync-{prefix}-transfer-evidence', f'rdpsync-{prefix}-transport-diagnostic']
+        f'rdpsync-{prefix}-transfer-evidence', f'rdpsync-{prefix}-transport-diagnostic'] + (['rdpsync-shared-drive-evidence'] if kind == 'xrdp' else [])
 
 
 def validate_ledger(directory, value):
@@ -46,7 +49,20 @@ def validate_ledger(directory, value):
         assert value.get('touch_attempts') and all(t.get('passed') is True for t in value['touch_attempts'])
     else:
         assert value.get('success') is True, f'Incomplete ledger: {directory}'
-        if directory.endswith('-transfer-evidence'):
+        if directory == 'rdpsync-shared-drive-evidence':
+            assert value.get('clipboard_used') is False and value.get('windows_os_covered') is False
+            assert value.get('saf_ui_covered') is True
+            for key in ('actual_import_picker_cancel_no_import', 'actual_export_picker_cancel_no_copy',
+                        'consent_cancel_kept_off', 'actual_ro_denied_write', 'actual_read_over_32mib',
+                        'collision_original_unchanged', 'paused_revoke_and_stale_handle_denied',
+                        'source_originals_unchanged', 'persistence_after_explicit_reconnect', 'disconnected'):
+                assert value.get(key) is True, f'Missing actual drive outcome: {key}'
+            assert value.get('actual_rw_operations') and value.get('peer_to_saf_export')
+            assert len(value.get('stalls', [])) == 2 and {x['phase'] for x in value['stalls']} == {'resume', 'cancel'}
+            assert all(x.get('actual_buffered_plateau') is True for x in value['stalls'])
+            assert len(value.get('touch_attempts', [])) == 2 and all(x.get('passed') is True for x in value['touch_attempts'])
+            assert len(value.get('synthetic_seed_cleanup', [])) == 5 and all(x.get('removed') is True for x in value['synthetic_seed_cleanup'])
+        elif directory.endswith('-transfer-evidence'):
             for key in ('offer_survived_dialog_hide', 'collision_original_unchanged', 'route_back_revoked_offer'):
                 assert value.get(key) is True, f'Missing transfer outcome: {key}'
             assert value.get('peer_to_saf_export') and value.get('synthetic_seed_cleanup')
@@ -131,6 +147,8 @@ class Collector:
                         raise
             for directory in directories(kind):
                 frames = list(CLASSIC_FRAMES) if kind == 'classic' else list(TRANSFER_FRAMES) if directory.endswith('-transfer-evidence') else []
+                if directory == 'rdpsync-shared-drive-evidence':
+                    frames = list(DRIVE_FRAMES)
                 if kind == 'classic':
                     frames.append('diagnostics.txt')
                     for phase in values.get(directory, {}).get('untrusted_certificate_phases', []):

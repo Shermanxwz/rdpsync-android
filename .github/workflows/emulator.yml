@@ -41,7 +41,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
           restore-keys: |
             rdp-native-x86_64-${{ runner.os }}-
       - name: Build actual x86_64 RDP libraries and instrumentation
@@ -59,7 +59,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
       - name: Start pinned isolated xrdp desktop and weak-link proxy
         run: |
           RDP_FIXTURE_PURPOSE=android-acceptance bash scripts/fixtures/start-reference-server.sh upstream-0.10.6.1 >build/pinned-server-build.log 2>&1
@@ -113,4 +113,5 @@ jobs:
             app/build/reports/androidTests/
             app/build/outputs/androidTest-results/
             native-build.log
+            build/freerdp-android/rdpsync-native-provenance-x86_64.json
             build/pinned-server-build.log

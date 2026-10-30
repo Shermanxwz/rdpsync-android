@@ -47,7 +47,8 @@ import kotlin.math.max
 /** Real xrdp/Xorg server on a disposable runner; no mocks stand in for pixels or input. */
 @RunWith(AndroidJUnit4::class)
 class RdpFixtureInstrumentedTest {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("rdpFixture")
+    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "rdp-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
@@ -55,6 +56,9 @@ class RdpFixtureInstrumentedTest {
     private var systemCoachmarkAcknowledged = false
 
     @Test fun realDesktopDisplayInputResizeAndWeakLink() {
+        measurements.put("fixture_app_locale", appLocale.receipt)
+        assertEquals("Explicit legacy fixture app language", "zh", compose.activity.resources.configuration.locales[0].language)
+        measurements.put("fixture_activity_locales", compose.activity.resources.configuration.locales.toLanguageTags())
         val enabled = InstrumentationRegistry.getArguments().getString("rdpFixture")
         assertEquals("This test requires the isolated CI fixture, never a user's host", "true", enabled)
         val nativeInitialized = RdpConnector.initialize(instrumentation.targetContext)

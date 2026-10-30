@@ -1,5 +1,24 @@
 # Preview verification and boundaries
 
+## Preview 3 acceptance contract
+
+Baseline release: `b0828910fa6ff4057e7a0825f8c3508e17b255c1` / Preview 2.
+RDPDR Shared-space, broker and product-UI changes were developed after this
+baseline; previous release results do not validate them. Each candidate requires
+its own exact-commit evidence. The release notes and generated CI reports identify
+the accepted commit, actual results and remaining limitations. The first coherent local
+Kotlin/Javac + JVM/lint snapshot passed 141 tests on 2026-10-30, before subsequent
+session integration and selected-object lease fixes. Native host checks and
+source-pin tests are likewise scoped snapshots, not new Android/RDPDR acceptance.
+
+Required evidence is the actual xrdp filesystem mount/IRPs and byte hashes,
+read-only/explicit-RW consent, concurrent local operations and identity-safe SAF
+selection, stalled-peer plateau/resume/cancel, truthful GNOME unsupported status,
+existing security/input/rendering gates, and the finite rendered UI matrix. Final
+CI must bind the new exact commit and Preview 3 APK; no persistent signing key or
+user-server configuration is introduced. See [design contract](SHARED_DRIVE_DESIGN.md).
+
+
 ## Build identity
 
 - FreeRDP: **3.32.2**, exact commit `97eff6ddfbbfaa8e42a126d362686bd001ff8bdc`.

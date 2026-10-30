@@ -1,5 +1,21 @@
 package com.rdp.sync.ui.screens
 
+import com.rdp.sync.R
+import com.rdp.sync.ui.components.UiMessages
+import com.rdp.sync.ui.sharedspace.SharedSpaceRoute
+import com.rdp.sync.ui.sharedspace.SharedDriveConsentDialog
+import com.rdp.sync.ui.sharedspace.SharedDriveStatusDialog
+import com.rdp.sync.network.SharedDriveAttemptGrant
+import com.rdp.sync.network.SharedDriveMode
+import com.rdp.sync.network.SharedDriveState
+import com.rdp.sync.network.SharedDriveStatus
+import com.rdp.sync.network.permitsAutomaticActivationRetry
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import com.rdp.sync.ui.components.ProductNotice
+import com.rdp.sync.ui.components.SectionHeading
+import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.WarningAmber
 import android.content.Context
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
@@ -77,7 +93,7 @@ private val sessionOwnership = Mutex()
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
+fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode = SharedDriveMode.OFF, onBack: () -> Unit) {
     val context = LocalContext.current
     // Configuration orientation is stable while the IME animates; viewport height is not.
     val configuration = LocalConfiguration.current
@@ -101,9 +117,19 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     // Static CLIPRDR is opt-in for this route only. Protocol activation grants no
     // access to phone files; every picker, publication and receive is still explicit.
     var fileTransferEnabled by remember(endpoint) { mutableStateOf(false) }
+    // Ephemeral consent only: never persisted in the profile or restored from a route argument.
+    var sharedDriveMode by remember(endpoint) { mutableStateOf(initialSharedDriveMode) }
+    var showSharedSpace by remember(endpoint) { mutableStateOf(false) }
+    var showDriveConsent by remember(endpoint) { mutableStateOf(false) }
+    var showDriveStatus by remember(endpoint) { mutableStateOf(false) }
+    var sharedDriveState by remember(endpoint, attempt) { mutableStateOf(SharedDriveState(
+        mode = sharedDriveMode, status = if (sharedDriveMode == SharedDriveMode.OFF) SharedDriveStatus.OFF else SharedDriveStatus.REQUESTED)) }
+    var driveActionError by remember(endpoint, attempt) { mutableStateOf("") }
+    var driveActionBusy by remember(endpoint, attempt) { mutableStateOf(false) }
     var showFileEnable by remember(endpoint) { mutableStateOf(false) }
     var showFileTransfer by remember(endpoint) { mutableStateOf(false) }
     var fileDirection by remember(endpoint) { mutableStateOf(FileTransferDirection.SEND) }
+    val attemptDriveGrant = remember(endpoint, attempt) { SharedDriveAttemptGrant(sharedDriveMode) }
     val credentialsUnavailable = device.credentialUnavailable
     val attemptNonce = remember(endpoint, attempt, credentialsUnavailable) { UUID.randomUUID().toString() }
     val trustGuard = remember(endpoint, attempt, credentialsUnavailable) { CertificateAttemptGuard() }
@@ -113,13 +139,13 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     var savingTrust by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
     var trustError by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
     val uiScope = rememberCoroutineScope()
-    var status by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("正在测量屏幕…") }
+    var status by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(context.getString(R.string.measuring_screen)) }
     var isConnected by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
     var connecting by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(true) }
     var viewportSize by remember(device.id) { mutableStateOf(IntSize.Zero) }
     var inputWarning by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
     var displaySummary by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("") }
-    var adaptiveReason by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf("等待会话测量") }
+    var adaptiveReason by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(context.getString(R.string.waiting_measurement)) }
     var reconnectRequired by remember(endpoint, attempt, credentialsUnavailable) { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showPaste by remember { mutableStateOf(false) }
@@ -146,15 +172,16 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     LaunchedEffect(settings) { RdpConnector.configureDisplay(settings) }
     LaunchedEffect(endpoint, attempt, credentialsUnavailable) {
         val connectionFileTransferEnabled = fileTransferEnabled
+        val connectionSharedDriveMode = sharedDriveMode
         if (credentialsUnavailable) {
-            status = if (device.passwordFormat == 2) "此配置未包含密码。请返回编辑设备，输入密码后再连接。"
-                else "保存的凭据无法解密。请返回编辑设备，重新输入密码后再连接。"
+            status = if (device.passwordFormat == 2) context.getString(R.string.connect_missing_password)
+                else context.getString(R.string.connect_locked_password)
             connecting = false
             return@LaunchedEffect
         }
         val connectionEndpoint = endpoint
         if (connectionEndpoint == null) {
-            status = "连接地址或服务器名称无效，无法安全验证证书。"
+            status = context.getString(R.string.connect_invalid_endpoint)
             connecting = false
             return@LaunchedEffect
         }
@@ -163,14 +190,17 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             try {
                 RdpConnector.configureDisplay(latestSettings)
                 val size = RdpConnector.resolveDisplay(viewportSize.width, viewportSize.height, device.width, device.height)
-                status = "正在连接（${size.width} × ${size.height}）…"
+                status = context.getString(R.string.connecting_size, size.width, size.height)
                 val expectedFingerprint = withContext(Dispatchers.IO) { trustStore.fingerprint(connectionEndpoint) }
                 val connectionUsername = device.username
                 val connectionPassword = device.password
                 val connectionDomain = device.domain
                 suspend fun connect(touch: Boolean, compatibility: Boolean) = withContext(Dispatchers.IO) {
-                    RdpConnector.connectDevice(connectionEndpoint.host, connectionEndpoint.port, connectionUsername, connectionPassword,
-                        connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height, touch, compatibility, expectedFingerprint.orEmpty(), fileTransferEnabled = connectionFileTransferEnabled)
+                    attemptDriveGrant.connect { grantedMode ->
+                        val connected = RdpConnector.connectDevice(connectionEndpoint.host, connectionEndpoint.port, connectionUsername, connectionPassword,
+                            connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height, touch, compatibility, expectedFingerprint.orEmpty(), fileTransferEnabled = connectionFileTransferEnabled, sharedDriveMode = grantedMode)
+                        connected to RdpConnector.sessionGeneration()
+                    }
                 }
                 if (!connect(true, false)) {
                     status = withContext(Dispatchers.IO) { RdpConnector.getStatus() }
@@ -184,14 +214,15 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 while (isActive) {
                     val snapshot = withContext(Dispatchers.IO) { Triple(RdpConnector.getStatus(), RdpConnector.isConnected(), RdpConnector.certificateChallenge()) }
                     status = snapshot.first
-                    if (input.overloadCount > 0) inputWarning = "输入队列繁忙，已安全释放按键。请重新操作。"
-                    if (input.failedTextSends > 0) inputWarning = "文字发送中断，可能只发送了部分内容，请检查远程文本。"
+                    if (input.overloadCount > 0) inputWarning = context.getString(R.string.input_busy)
+                    if (input.failedTextSends > 0) inputWarning = context.getString(R.string.text_interrupted)
                     isConnected = snapshot.second
+                    sharedDriveState = withContext(Dispatchers.IO) { RdpConnector.sharedDriveState() }
                     val challenge = snapshot.third
                     if (challenge != null) {
                         connecting = false
                         val proposal = CertificateTrustPolicy.propose(connectionEndpoint, attemptNonce, challenge.snapshot(), expectedFingerprint)
-                        if (proposal == null) status = "证书响应与当前连接不匹配，已拒绝连接。"
+                        if (proposal == null) status = context.getString(R.string.certificate_mismatch)
                         else if (pendingTrust == null && challenge.generation != dismissedCertificateGeneration && trustGuard.isActive()) pendingTrust = proposal
                     }
                     if (isConnected) {
@@ -213,14 +244,14 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                                         RdpConnector.sessionGeneration(), attemptNonce)
                                 }
                             } catch (cancelled: CancellationException) { throw cancelled }
-                            catch (_: Exception) { transferSetupError = "无法初始化文件传输，请重新连接后重试。" }
+                            catch (_: Exception) { transferSetupError = context.getString(R.string.transfer_init_error) }
                         }
                         try { transferController?.refreshCapability() }
                         catch (cancelled: CancellationException) { throw cancelled }
                         catch (_: Exception) {
                             transferController?.close()
                             transferController = null
-                            transferSetupError = "文件传输能力检查失败；远程桌面连接仍保留，请重连后重试。"
+                            transferSetupError = context.getString(R.string.transfer_check_error)
                         }
                     } else {
                         transferController?.close()
@@ -230,16 +261,25 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                     // Retain the existing, narrowly scoped RDPEI activation compatibility retry.
                     if (challenge == null && !isConnected && !previouslyConnected && !compatibilityRetried &&
                         (status.contains("0x0002001c", ignoreCase = true) || status.contains("Timeout waiting for activation", ignoreCase = true))) {
-                        compatibilityRetried = true
-                        status = "触摸通道协商失败，尝试兼容连接…"
-                        withContext(Dispatchers.IO) { RdpConnector.disconnect() }
-                        connect(false, true)
+                        if (permitsAutomaticActivationRetry(connectionSharedDriveMode)) {
+                            compatibilityRetried = true
+                            status = context.getString(R.string.touch_compat_retry)
+                            withContext(Dispatchers.IO) { RdpConnector.disconnect() }
+                            connect(false, true)
+                        } else {
+                            // Reusing a captured grant here could resurrect drive access after a
+                            // concurrent Stop sharing. No automatic new drive-enabled generation.
+                            connecting = false
+                            status = context.getString(R.string.drive_compatibility_manual)
+                        }
                     }
                     delay(1000)
                 }
             } finally {
                 // Cancellation of the Compose scope must not cancel key releases/disconnect.
+                attemptDriveGrant.requestRevocation()
                 withContext(NonCancellable + Dispatchers.IO) {
+                    attemptDriveGrant.revoke(RdpConnector::revokeSharedDrive)
                     transferController?.close()
                     transferController = null
                     input.shutdownAndJoin()
@@ -248,7 +288,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
             }
         }
     }
-    DisposableEffect(input, trustGuard) { onDispose { trustGuard.invalidate(); input.shutdown() } }
+    DisposableEffect(input, trustGuard, attemptDriveGrant) { onDispose { attemptDriveGrant.requestRevocation(); trustGuard.invalidate(); input.shutdown() } }
 
     fun saveSettings(value: SessionDisplaySettings) {
         settings = value
@@ -267,6 +307,7 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
     }
 
     fun exitSession() {
+        attemptDriveGrant.requestRevocation()
         transferController?.close()
         transferController = null
         trustGuard.invalidate()
@@ -279,11 +320,39 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
         fileDirection = direction
         if (fileTransferEnabled) showFileTransfer = true else showFileEnable = true
     }
+    fun openSharedSpace() {
+        desktopView?.hideKeyboard()
+        input.releasePressedInputs()
+        showSharedSpace = true
+    }
+    fun openSharedDrive() {
+        desktopView?.hideKeyboard()
+        input.releasePressedInputs()
+        driveActionError = ""
+        showDriveStatus = true
+    }
+    fun revokeSharedDrive() {
+        if (driveActionBusy) return
+        driveActionBusy = true
+        driveActionError = ""
+        attemptDriveGrant.requestRevocation() // Nonblocking even while connect is publishing its generation.
+        sharedDriveMode = SharedDriveMode.OFF
+        uiScope.launch {
+            val stopped = withContext(Dispatchers.IO) { attemptDriveGrant.revoke(RdpConnector::revokeSharedDrive) }
+            if (trustGuard.isActive()) {
+                sharedDriveState = withContext(Dispatchers.IO) { RdpConnector.sharedDriveState() }
+                driveActionBusy = false
+                if (!stopped) driveActionError = context.getString(R.string.drive_stop_failed)
+            }
+        }
+    }
     fun dismissCertificate() {
+        attemptDriveGrant.requestRevocation()
+        sharedDriveMode = SharedDriveMode.OFF
         dismissedCertificateGeneration = pendingTrust?.challenge?.generation ?: -1L
         trustGuard.invalidate()
         pendingTrust = null
-        status = "已取消证书信任；未发送登录凭据。"
+        status = context.getString(R.string.trust_cancelled)
         connecting = false
     }
 
@@ -298,13 +367,13 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
         header = {
             if (!compactLandscape) TopAppBar(
                 windowInsets = WindowInsets(0, 0, 0, 0),
-                title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) "已连接" else status, style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
-                navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+                title = { Column { Text(device.name, maxLines = 1); Text(if (isConnected) context.getString(R.string.connected) else UiMessages.text(context, status), style = MaterialTheme.typography.labelSmall, maxLines = 1) } },
+                navigationIcon = { IconButton(onClick = ::exitSession) { Icon(Icons.AutoMirrored.Filled.ArrowBack, context.getString(R.string.back)) } },
                 actions = {
-                    IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, "进入全屏") }
-                    if (landscape) IconButton(onClick = { expandedLandscapeTools = false }) { Icon(Icons.Default.Fullscreen, "收起会话工具") }
-                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
-                    IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
+                    IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, context.getString(R.string.fullscreen)) }
+                    if (landscape) IconButton(onClick = { expandedLandscapeTools = false }) { Icon(Icons.Default.Fullscreen, context.getString(R.string.collapse_tools)) }
+                    IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, context.getString(R.string.display_settings)) }
+                    IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, context.getString(R.string.disconnect)) }
                 }
             )
         },
@@ -323,10 +392,10 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 } else Column(Modifier.padding(20.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (connecting) CircularProgressIndicator()
                     Spacer(Modifier.height(12.dp))
-                    Text(status, color = Color.White, textAlign = TextAlign.Center)
+                    Text(UiMessages.text(context, status), color = Color.White, textAlign = TextAlign.Center)
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = { showReconnect = true }) { Text("重新连接") }
-                    TextButton(onClick = { diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true }) { Text("查看诊断") }
+                    Button(onClick = { showReconnect = true }) { Text(context.getString(R.string.reconnect)) }
+                    TextButton(onClick = { diagnostics = RdpConnector.getDiag().ifBlank { context.getString(R.string.no_diagnostics) }; showDiagnostics = true }) { Text(context.getString(R.string.view_diagnostics)) }
                 }
             }
         },
@@ -337,45 +406,45 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                     // Telemetry text never changes this geometry.
                     Row(Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
                         horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-                        IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, "断开") }
+                        IconButton(onClick = ::exitSession) { Icon(Icons.Default.Stop, context.getString(R.string.disconnect)) }
                         if (wideLandscapeToolbar) Column(Modifier.weight(1f)) {
                             Text(device.name, style = MaterialTheme.typography.labelMedium, maxLines = 1)
                             Text(when {
-                                inputWarning.isNotBlank() -> "输入异常，请查看设置"
-                                reconnectRequired -> "显示设置需重连"
-                                isConnected -> "已连接"
-                                else -> status
+                                inputWarning.isNotBlank() -> context.getString(R.string.input_warning)
+                                reconnectRequired -> context.getString(R.string.display_reconnect_required)
+                                isConnected -> context.getString(R.string.connected)
+                                else -> UiMessages.text(context, status)
                             }, style = MaterialTheme.typography.labelSmall, maxLines = 1,
                                 color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else LocalContentColor.current)
                         }
                         IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
-                            Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
+                            Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) context.getString(R.string.direct_touch) else context.getString(R.string.trackpad))
                         }
-                        IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
+                        IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, context.getString(R.string.toggle_keyboard)) }
                         if (wideLandscapeToolbar) {
-                            IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
-                            IconButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Icon(Icons.Default.ZoomOutMap, "复位视图") }
+                            IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, context.getString(R.string.send_text)) }
+                            IconButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Icon(Icons.Default.ZoomOutMap, context.getString(R.string.reset_view)) }
                         }
-                        IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, "显示与网络设置") }
-                        IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, "进入全屏") }
-                        IconButton(onClick = { expandedLandscapeTools = true }) { Icon(Icons.Default.FullscreenExit, "展开会话工具") }
+                        IconButton(onClick = { showSettings = true }) { Icon(Icons.Default.Settings, context.getString(R.string.display_settings)) }
+                        IconButton(onClick = { fullscreen = true }) { Icon(Icons.Default.Fullscreen, context.getString(R.string.fullscreen)) }
+                        IconButton(onClick = { expandedLandscapeTools = true }) { Icon(Icons.Default.FullscreenExit, context.getString(R.string.expand_tools)) }
                     }
                 } else {
                     Column(Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp)) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
                             IconButton(onClick = { pointerMode = !pointerMode }, enabled = isConnected) {
-                                Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) "切换到直接触摸" else "切换到触控板")
+                                Icon(if (pointerMode) Icons.Default.Mouse else Icons.Default.TouchApp, if (pointerMode) context.getString(R.string.direct_touch) else context.getString(R.string.trackpad))
                             }
-                            IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, "显示或隐藏键盘") }
-                            IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, "发送文字") }
-                            TextButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Text("复位视图") }
-                            TextButton(onClick = { showSettings = true }) { Text("画质") }
+                            IconButton(onClick = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() }, enabled = isConnected) { Icon(Icons.Default.Keyboard, context.getString(R.string.toggle_keyboard)) }
+                            IconButton(onClick = { showPaste = true }, enabled = isConnected) { Icon(Icons.Default.ContentPaste, context.getString(R.string.send_text)) }
+                            TextButton(onClick = { desktopView?.resetZoom() }, enabled = isConnected) { Text(context.getString(R.string.reset_view)) }
+                            TextButton(onClick = { showSettings = true }) { Text(context.getString(R.string.quality_short)) }
                         }
-                        Text(if (pointerMode) "触控板：滑动移指针，轻点单击；长按右键，长按后拖动。" else "直接触摸；双指缩放/平移。兼容模式支持长按右键、长按后拖动。", style = MaterialTheme.typography.labelSmall, minLines = 2, maxLines = 2, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
+                        Text(if (pointerMode) context.getString(R.string.trackpad_hint) else context.getString(R.string.touch_hint), style = MaterialTheme.typography.labelSmall, minLines = 2, maxLines = 2, modifier = Modifier.fillMaxWidth(), textAlign = TextAlign.Center)
                         // Always reserve exactly two text lines. Status wrapping must not
                         // change our viewport and trigger a resize/ack/resize feedback loop.
                         Text(
-                            text = inputWarning.ifBlank { if (reconnectRequired) "$displaySummary · 点此重连" else displaySummary.ifBlank { "等待显示协商…" } },
+                            text = UiMessages.text(context, inputWarning).ifBlank { if (reconnectRequired) context.getString(R.string.display_reconnect_summary, UiMessages.text(context, displaySummary)) else UiMessages.text(context, displaySummary).ifBlank { context.getString(R.string.waiting_display) } },
                             style = MaterialTheme.typography.labelSmall,
                             color = if (inputWarning.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
                             minLines = 2, maxLines = 2,
@@ -392,28 +461,49 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                 onChromeMode = { fullscreen = !fullscreen }, onSettings = { showSettings = true },
                 onPaste = { showPaste = true }, onResetZoom = { desktopView?.resetZoom() },
                 onSendFiles = { openFiles(FileTransferDirection.SEND) },
-                onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) }, onExit = ::exitSession)
+                onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) }, onExit = ::exitSession,
+                onSharedSpace = ::openSharedSpace, onSharedDrive = ::openSharedDrive)
         }
     )
+    if (showSharedSpace) Dialog(onDismissRequest = { showSharedSpace = false },
+        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
+        // Keep the underlying desktop/IME owner composed. This is not navigation away from the session.
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            SharedSpaceRoute(onBack = { showSharedSpace = false })
+        }
+    }
+    if (showDriveStatus) SharedDriveStatusDialog(sharedDriveState,
+        onOpenSpace = { showDriveStatus = false; openSharedSpace() },
+        onStopSharing = ::revokeSharedDrive,
+        onReconnect = { showDriveStatus = false; showDriveConsent = true },
+        onDismiss = { showDriveStatus = false }, actionError = driveActionError, busy = driveActionBusy,
+        canStop = sharedDriveMode != SharedDriveMode.OFF || sharedDriveState.mayRevoke)
+    if (showDriveConsent) SharedDriveConsentDialog(
+        serverLabel = "${device.name} · ${device.host}:${device.port}", reconnectRequired = true,
+        onConfirm = { readOnly ->
+            showDriveConsent = false
+            sharedDriveMode = if (readOnly) SharedDriveMode.READ_ONLY else SharedDriveMode.READ_WRITE
+            reconnect()
+        }, onDismiss = { showDriveConsent = false })
     transferController?.let { controller ->
         SessionFileTransferUi(controller, showFileTransfer, fileDirection,
             onReconnect = { showFileTransfer = false; showReconnect = true },
             onDismiss = { showFileTransfer = false })
     }
     if (showFileTransfer && isConnected && transferController == null && transferSetupError.isNotBlank()) {
-        AlertDialog(onDismissRequest = { showFileTransfer = false }, title = { Text("文件传输不可用") },
-            text = { Text(transferSetupError) }, confirmButton = { TextButton(onClick = { showFileTransfer = false }) { Text("关闭") } })
+        AlertDialog(onDismissRequest = { showFileTransfer = false }, title = { Text(context.getString(R.string.transfer_unavailable)) },
+            text = { Text(transferSetupError) }, confirmButton = { TextButton(onClick = { showFileTransfer = false }) { Text(context.getString(R.string.close)) } })
     }
     if (showFileEnable) AlertDialog(onDismissRequest = { showFileEnable = false },
-        title = { Text("启用文件传输并重新连接？") },
-        text = { Text("文件协议需要在连接开始时启用，因此会短暂断开当前连接；请先保存远程工作。此操作仅开启文件协议，不会访问手机文件或监听剪贴板。之后仍需逐次选择文件、确认提供或接收。当前仅支持普通文件，不支持文件夹。") },
+        title = { Text(context.getString(R.string.transfer_enable_title)) },
+        text = { Text(context.getString(R.string.transfer_enable_body)) },
         confirmButton = { TextButton(onClick = {
             showFileEnable = false
             fileTransferEnabled = true
             showFileTransfer = true
             reconnect()
-        }) { Text("启用并重新连接") } },
-        dismissButton = { TextButton(onClick = { showFileEnable = false }) { Text("取消") } })
+        }) { Text(context.getString(R.string.enable_reconnect)) } },
+        dismissButton = { TextButton(onClick = { showFileEnable = false }) { Text(context.getString(R.string.cancel)) } })
     pendingTrust?.let { pending ->
         CertificateTrustDialog(pending, savingTrust, trustError, onCancel = ::dismissCertificate, onTrust = {
             if (!savingTrust && pendingTrust == pending && endpoint == pending.endpoint && trustGuard.isActive()) {
@@ -428,40 +518,44 @@ fun RdpConnectionScreen(device: Device, onBack: () -> Unit) {
                     if (pendingTrust == pending && trustGuard.isActive()) {
                         savingTrust = false
                         if (saved) reconnect()
-                        else trustError = "无法保存信任，或证书请求已变化。未重新连接，请取消后重试并重新核对。"
+                        else trustError = context.getString(R.string.trust_save_error)
                     }
                 }
             }
         })
     }
     if (showSettings) DisplaySettingsDialog(settings, device,
-        sessionInfo = displaySummary.ifBlank { status }, adaptiveInfo = adaptiveReason,
-        inputWarning = inputWarning, reconnectRequired = reconnectRequired,
+        sessionInfo = UiMessages.text(context, displaySummary.ifBlank { status }), adaptiveInfo = UiMessages.text(context, adaptiveReason),
+        inputWarning = UiMessages.text(context, inputWarning), reconnectRequired = reconnectRequired,
         fileTransferConnected = isConnected,
         onSendFiles = { showSettings = false; openFiles(FileTransferDirection.SEND) },
         onReceiveFiles = { showSettings = false; openFiles(FileTransferDirection.RECEIVE) },
         onReconnect = { showSettings = false; showReconnect = true },
+        onSharedSpace = { showSettings = false; openSharedSpace() },
+        onSharedDrive = { showSettings = false; openSharedDrive() },
         onChange = ::saveSettings, onDismiss = { showSettings = false }, onDiagnostics = {
-        diagnostics = RdpConnector.getDiag().ifBlank { "暂无诊断信息" }; showDiagnostics = true
+        diagnostics = RdpConnector.getDiag().ifBlank { context.getString(R.string.no_diagnostics) }; showDiagnostics = true
     })
-    if (showReconnect) AlertDialog(onDismissRequest = { showReconnect = false }, title = { Text("重新连接远程桌面？") }, text = { Text("这会短暂断开当前连接，并用所选分辨率重新连接。不会替你保存远程程序中的工作。") },
-        confirmButton = { TextButton(onClick = { showReconnect = false; reconnect() }) { Text("重新连接") } }, dismissButton = { TextButton(onClick = { showReconnect = false }) { Text("取消") } })
+    if (showReconnect) AlertDialog(onDismissRequest = { showReconnect = false }, title = { Text(context.getString(R.string.reconnect_title)) }, text = { Text(context.getString(R.string.reconnect_body)) },
+        confirmButton = { TextButton(onClick = { showReconnect = false; reconnect() }) { Text(context.getString(R.string.reconnect)) } }, dismissButton = { TextButton(onClick = { showReconnect = false }) { Text(context.getString(R.string.cancel)) } })
     if (showPaste) {
         var text by remember { mutableStateOf(clipboard.getText()?.text.orEmpty()) }
-        AlertDialog(onDismissRequest = { showPaste = false }, title = { Text("发送文字") }, text = {
-            Column { OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth(), label = { Text("文字") }); Text("文字将作为键盘输入发送；不覆盖远程剪贴板。", style = MaterialTheme.typography.bodySmall) }
-        }, confirmButton = { TextButton(onClick = { input.enqueueText(text); showPaste = false }, enabled = isConnected) { Text("发送") } }, dismissButton = { TextButton(onClick = { showPaste = false }) { Text("取消") } })
+        AlertDialog(onDismissRequest = { showPaste = false }, title = { Text(context.getString(R.string.send_text)) }, text = {
+            Column { OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth(), label = { Text(context.getString(R.string.text_field)) }); Text(context.getString(R.string.text_input_help), style = MaterialTheme.typography.bodySmall) }
+        }, confirmButton = { TextButton(onClick = { input.enqueueText(text); showPaste = false }, enabled = isConnected) { Text(context.getString(R.string.send)) } }, dismissButton = { TextButton(onClick = { showPaste = false }) { Text(context.getString(R.string.cancel)) } })
     }
-    if (showDiagnostics) AlertDialog(onDismissRequest = { showDiagnostics = false }, title = { Text("诊断信息") }, text = { Text(diagnostics, modifier = Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall) },
-        confirmButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(diagnostics)); showDiagnostics = false }) { Text("复制并关闭") } }, dismissButton = { TextButton(onClick = { showDiagnostics = false }) { Text("关闭") } })
+    if (showDiagnostics) AlertDialog(onDismissRequest = { showDiagnostics = false }, title = { Text(context.getString(R.string.diagnostics)) }, text = { Text(diagnostics, modifier = Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall) },
+        confirmButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(diagnostics)); showDiagnostics = false }) { Text(context.getString(R.string.copy_close)) } }, dismissButton = { TextButton(onClick = { showDiagnostics = false }) { Text(context.getString(R.string.close)) } })
 }
 
 
 @Composable
-private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boolean, imeVisible: Boolean,
+internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boolean, imeVisible: Boolean,
     pointerMode: Boolean, connected: Boolean, onKeyboard: () -> Unit, onPointerMode: () -> Unit,
     onChromeMode: () -> Unit, onSettings: () -> Unit, onPaste: () -> Unit, onResetZoom: () -> Unit,
-    onSendFiles: () -> Unit, onReceiveFiles: () -> Unit, onExit: () -> Unit) {
+    onSendFiles: () -> Unit, onReceiveFiles: () -> Unit, onExit: () -> Unit,
+    onSharedSpace: () -> Unit = {}, onSharedDrive: () -> Unit = {}) {
+    val context = LocalContext.current
     var showTools by remember { mutableStateOf(false) }
     val menuScroll = rememberScrollState()
     val menuScope = rememberCoroutineScope()
@@ -475,7 +569,7 @@ private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boole
         // preserves the desktop's InputConnection; no full-screen gesture layer exists.
         Row(Modifier.padding(if (fullscreen) 0.dp else 4.dp)) {
             if (!fullscreen) IconButton(onClick = { showTools = false; onKeyboard() }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.Keyboard, "显示或隐藏键盘")
+                Icon(Icons.Default.Keyboard, context.getString(R.string.toggle_keyboard))
             }
             Box {
                 IconButton(onClick = { menuScope.launch {
@@ -484,22 +578,24 @@ private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boole
                     showTools = true
                 } }, modifier = Modifier.size(48.dp)) {
                     Icon(if (fullscreen) Icons.Default.MoreVert else Icons.Default.Settings,
-                        if (fullscreen) "会话菜单" else "会话工具")
+                        if (fullscreen) context.getString(R.string.session_menu) else context.getString(R.string.session_tools))
                 }
                 DropdownMenu(expanded = showTools, onDismissRequest = { showTools = false },
                     scrollState = menuScroll, properties = PopupProperties(focusable = false)) {
-                    if (fullscreen) DropdownMenuItem(text = { Text("显示或隐藏键盘") }, enabled = connected,
+                    if (fullscreen) DropdownMenuItem(text = { Text(context.getString(R.string.toggle_keyboard)) }, enabled = connected,
                         onClick = { showTools = false; onKeyboard() })
-                    if (fullscreen) DropdownMenuItem(text = { Text("断开") }, onClick = { showTools = false; onExit() })
-                    DropdownMenuItem(text = { Text(if (fullscreen) "显示工具栏" else "进入全屏") },
+                    if (fullscreen) DropdownMenuItem(text = { Text(context.getString(R.string.disconnect)) }, onClick = { showTools = false; onExit() })
+                    DropdownMenuItem(text = { Text(if (fullscreen) context.getString(R.string.show_toolbar) else context.getString(R.string.fullscreen)) },
                         onClick = { showTools = false; onChromeMode() })
-                    DropdownMenuItem(text = { Text(if (pointerMode) "切换到直接触摸" else "切换到触控板") }, enabled = connected,
+                    DropdownMenuItem(text = { Text(if (pointerMode) context.getString(R.string.direct_touch) else context.getString(R.string.trackpad)) }, enabled = connected,
                         onClick = { showTools = false; onPointerMode() })
-                    DropdownMenuItem(text = { Text("显示与网络设置") }, onClick = { showTools = false; onSettings() })
-                    DropdownMenuItem(text = { Text("发送文件") }, enabled = connected, onClick = { showTools = false; onSendFiles() })
-                    DropdownMenuItem(text = { Text("接收文件") }, enabled = connected, onClick = { showTools = false; onReceiveFiles() })
-                    DropdownMenuItem(text = { Text("发送文字") }, enabled = connected, onClick = { showTools = false; onPaste() })
-                    DropdownMenuItem(text = { Text("复位视图") }, enabled = connected, onClick = { showTools = false; onResetZoom() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.display_settings)) }, onClick = { showTools = false; onSettings() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.space_title)) }, onClick = { showTools = false; onSharedSpace() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.drive_status_title)) }, onClick = { showTools = false; onSharedDrive() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.send_files)) }, enabled = connected, onClick = { showTools = false; onSendFiles() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.receive_files)) }, enabled = connected, onClick = { showTools = false; onReceiveFiles() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.send_text)) }, enabled = connected, onClick = { showTools = false; onPaste() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.reset_view)) }, enabled = connected, onClick = { showTools = false; onResetZoom() })
                     DropdownMenuItem(text = { Text("Esc") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x01) })
                     DropdownMenuItem(text = { Text("Tab") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x0F) })
                     DropdownMenuItem(text = { Text("Ctrl+C") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2E) })
@@ -507,68 +603,75 @@ private fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Boole
                     DropdownMenuItem(text = { Text("Ctrl+Alt+Del") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x38, 0xE053) })
                 }
             }
-            if (!fullscreen) IconButton(onClick = onExit, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, "断开") }
+            if (!fullscreen) IconButton(onClick = onExit, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, context.getString(R.string.disconnect)) }
         }
     }
 }
 
 
 @Composable
-private fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Device, sessionInfo: String, adaptiveInfo: String, inputWarning: String,
+internal fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Device, sessionInfo: String, adaptiveInfo: String, inputWarning: String,
     reconnectRequired: Boolean, fileTransferConnected: Boolean, onSendFiles: () -> Unit, onReceiveFiles: () -> Unit,
-    onReconnect: () -> Unit, onChange: (SessionDisplaySettings) -> Unit, onDismiss: () -> Unit, onDiagnostics: () -> Unit) {
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("显示与网络") }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState())) {
-            Text("会话状态", style = MaterialTheme.typography.titleSmall)
+    onReconnect: () -> Unit, onChange: (SessionDisplaySettings) -> Unit, onDismiss: () -> Unit, onDiagnostics: () -> Unit,
+    onSharedSpace: () -> Unit = {}, onSharedDrive: () -> Unit = {}) {
+    val context = LocalContext.current
+    AlertDialog(onDismissRequest = onDismiss, title = { Text(context.getString(R.string.display_network)) }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(context.getString(R.string.session_status), style = MaterialTheme.typography.titleSmall)
             Text(sessionInfo, style = MaterialTheme.typography.bodySmall)
-            Text(if (settings.adaptive) "自适应状态：$adaptiveInfo" else "自适应已关闭", style = MaterialTheme.typography.bodySmall)
+            Text(if (settings.adaptive) context.getString(R.string.adaptive_status, adaptiveInfo) else context.getString(R.string.adaptive_off), style = MaterialTheme.typography.bodySmall)
             if (inputWarning.isNotBlank()) Text(inputWarning, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            if (reconnectRequired) TextButton(onClick = onReconnect) { Text("按当前设置重新连接") }
+            if (reconnectRequired) TextButton(onClick = onReconnect) { Text(context.getString(R.string.reconnect_settings)) }
             Spacer(Modifier.height(8.dp))
-            Text("文件传输", style = MaterialTheme.typography.titleSmall)
+            Text(context.getString(R.string.drive_status_title), style = MaterialTheme.typography.titleSmall)
+            TextButton(onClick = onSharedSpace, modifier = Modifier.heightIn(min = 48.dp)) { Text(context.getString(R.string.space_title)) }
+            TextButton(onClick = onSharedDrive, modifier = Modifier.heightIn(min = 48.dp)) { Text(context.getString(R.string.drive_status_title)) }
+            HorizontalDivider()
+            Text(context.getString(R.string.file_transfer), style = MaterialTheme.typography.titleSmall)
             Row {
-                TextButton(onClick = onSendFiles, enabled = fileTransferConnected) { Text("发送文件") }
-                TextButton(onClick = onReceiveFiles, enabled = fileTransferConnected) { Text("接收文件") }
+                TextButton(onClick = onSendFiles, enabled = fileTransferConnected) { Text(context.getString(R.string.send_files)) }
+                TextButton(onClick = onReceiveFiles, enabled = fileTransferConnected) { Text(context.getString(R.string.receive_files)) }
             }
-            Text("仅传输明确选择的普通文件；首次启用需确认重连，不会共享手机目录。", style = MaterialTheme.typography.bodySmall)
+            Text(context.getString(R.string.clipboard_transfer_help), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            Text("远程分辨率", style = MaterialTheme.typography.titleSmall)
+            Text(context.getString(R.string.remote_resolution), style = MaterialTheme.typography.titleSmall)
             ResolutionMode.entries.forEach { mode ->
-                val label = if (mode == ResolutionMode.PROFILE) "设备配置（${device.width} × ${device.height}）" else mode.title
-                Row(Modifier.fillMaxWidth().selectable(
+                val label = if (mode == ResolutionMode.PROFILE) context.getString(R.string.profile_resolution, device.width, device.height) else when (mode) { ResolutionMode.FIT_WINDOW -> context.getString(R.string.resolution_fit); ResolutionMode.PROFILE -> context.getString(R.string.resolution_saved); else -> mode.title }
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(
                     selected = settings.resolution == mode, role = Role.RadioButton,
                     onClick = { onChange(settings.copy(resolution = mode)) }
-                ).semantics { contentDescription = "远程分辨率：$label" }, verticalAlignment = Alignment.CenterVertically) {
+                ).semantics { contentDescription = context.getString(R.string.remote_resolution_a11y, label) }, verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(selected = settings.resolution == mode, onClick = null)
-                    Text(label)
+                    Text(label, modifier = Modifier.weight(1f))
                 }
             }
-            Text("画质上限", style = MaterialTheme.typography.titleSmall)
-            Text("固定分辨率且关闭自适应时，画质仅改变本地帧率上限，不会暗中降低远程分辨率。", style = MaterialTheme.typography.bodySmall)
+            Text(context.getString(R.string.quality_limit), style = MaterialTheme.typography.titleSmall)
+            Text(context.getString(R.string.quality_help), style = MaterialTheme.typography.bodySmall)
             DisplayQuality.entries.forEach { quality ->
-                Row(Modifier.fillMaxWidth().selectable(
+                val qualityLabel = context.getString(when (quality) { DisplayQuality.ECONOMY -> R.string.quality_economy; DisplayQuality.BALANCED -> R.string.quality_balanced; DisplayQuality.SHARP -> R.string.quality_sharp })
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).selectable(
                     selected = settings.quality == quality, role = Role.RadioButton,
                     onClick = { onChange(settings.copy(quality = quality)) }
-                ).semantics { contentDescription = "画质上限：${quality.title}" }, verticalAlignment = Alignment.CenterVertically) {
+                ).semantics { contentDescription = context.getString(R.string.quality_a11y, qualityLabel) }, verticalAlignment = Alignment.CenterVertically) {
                     RadioButton(settings.quality == quality, onClick = null)
-                    Text(quality.title)
+                    Text(qualityLabel, modifier = Modifier.weight(1f))
                 }
             }
-            Row(Modifier.fillMaxWidth().toggleable(
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
                 value = settings.adaptive, role = Role.Switch,
                 onValueChange = { onChange(settings.copy(adaptive = it)) }
-            ).semantics { contentDescription = "自适应网络与渲染负载" }, verticalAlignment = Alignment.CenterVertically) {
+            ).semantics { contentDescription = context.getString(R.string.adaptive_quality) }, verticalAlignment = Alignment.CenterVertically) {
                 Switch(settings.adaptive, onCheckedChange = null)
-                Text("自适应网络与渲染负载", modifier = Modifier.padding(start = 8.dp))
+                Text(context.getString(R.string.adaptive_quality), modifier = Modifier.padding(start = 8.dp))
             }
-            Text("自适应基于实测延迟、带宽和渲染耗时，持续变差才降级，恢复后缓慢提高。缺少测量时不会猜测网速。", style = MaterialTheme.typography.bodySmall)
+            Text(context.getString(R.string.adaptive_help), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            Text("操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移只改变本地视图。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。", style = MaterialTheme.typography.bodySmall)
+            Text(context.getString(R.string.gesture_help), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
-            Text("安全提示：首次连接或证书变化时，必须通过独立渠道核对指纹后授权。这是手动指纹固定（TOFU），不是 CA 身份验证。同步数据可能含凭据，请仅使用受信任的 HTTPS WebDAV。", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-            TextButton(onClick = onDiagnostics) { Text("查看诊断信息") }
+            Text(context.getString(R.string.security_help), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            TextButton(onClick = onDiagnostics) { Text(context.getString(R.string.view_diagnostics_full)) }
         }
-    }, confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } })
+    }, confirmButton = { TextButton(onClick = onDismiss) { Text(context.getString(R.string.done)) } })
 }
 
 
@@ -577,37 +680,38 @@ private fun CertificateChallenge.snapshot() = CertificateChallengeSnapshot(
 )
 
 @Composable
-private fun CertificateTrustDialog(pending: PendingCertificateTrust, saving: Boolean, error: String, onCancel: () -> Unit, onTrust: () -> Unit) {
+internal fun CertificateTrustDialog(pending: PendingCertificateTrust, saving: Boolean, error: String, onCancel: () -> Unit, onTrust: () -> Unit) {
+    val context = LocalContext.current
     var independentlyChecked by remember(pending) { mutableStateOf(false) }
     AlertDialog(
-        onDismissRequest = onCancel,
-        title = { Text(if (pending.changed) "服务器证书已改变" else "确认服务器证书") },
+        onDismissRequest = { if (!saving) onCancel() },
+        icon = { Icon(if (pending.changed) Icons.Default.WarningAmber else Icons.Default.VerifiedUser, null, tint = if (pending.changed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary) },
+        title = { Text(if (pending.changed) context.getString(R.string.certificate_changed) else context.getString(R.string.certificate_confirm)) },
         text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text(if (pending.changed) "证书与原信任指纹不一致。可能是合法更新，也可能是中间人攻击；未经独立核对，不要继续。" else "尚未信任此服务器。连接已在发送登录凭据前停止。请向服务器管理员或通过其他可信渠道核对完整 SHA-256 指纹。",
-                    color = if (pending.changed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface)
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                ProductNotice(if (pending.changed) context.getString(R.string.certificate_changed_warning) else context.getString(R.string.certificate_first_warning), error = pending.changed)
                 Spacer(Modifier.height(8.dp))
-                Text("地址：${pending.endpoint.host}:${pending.endpoint.port}")
-                Text("证书服务器名称：${pending.endpoint.effectiveServerName}")
-                Text("主体：${pending.challenge.subject.take(512)}", style = MaterialTheme.typography.bodySmall)
-                Text("签发者：${pending.challenge.issuer.take(512)}", style = MaterialTheme.typography.bodySmall)
+                Text(context.getString(R.string.certificate_address, pending.endpoint.host, pending.endpoint.port))
+                Text(context.getString(R.string.certificate_server, pending.endpoint.effectiveServerName))
+                Text(context.getString(R.string.certificate_subject, pending.challenge.subject.take(512)), style = MaterialTheme.typography.bodySmall)
+                Text(context.getString(R.string.certificate_issuer, pending.challenge.issuer.take(512)), style = MaterialTheme.typography.bodySmall)
                 pending.previousFingerprint?.let { old ->
                     Spacer(Modifier.height(8.dp))
-                    Text("原信任 SHA-256", style = MaterialTheme.typography.labelMedium)
+                    Text(context.getString(R.string.fingerprint_previous), style = MaterialTheme.typography.labelMedium)
                     Text(old, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                 }
                 Spacer(Modifier.height(8.dp))
-                Text("新证书 SHA-256", style = MaterialTheme.typography.labelMedium)
+                Text(context.getString(R.string.fingerprint_new), style = MaterialTheme.typography.labelMedium)
                 Text(pending.challenge.fingerprint, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                Row(Modifier.fillMaxWidth().clickable(enabled = !saving) { independentlyChecked = !independentlyChecked }, verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(independentlyChecked, onCheckedChange = { independentlyChecked = it }, enabled = !saving)
-                    Text("我已通过独立渠道核对 SHA-256 指纹", style = MaterialTheme.typography.bodySmall)
+                Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(value = independentlyChecked, enabled = !saving, role = Role.Checkbox, onValueChange = { independentlyChecked = it }), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(independentlyChecked, onCheckedChange = null, enabled = !saving)
+                    Text(context.getString(R.string.fingerprint_verified), style = MaterialTheme.typography.bodySmall)
                 }
-                Text("仅为此设备配置、地址、端口和服务器名称保存指纹；不会为其他主机自动授权。", style = MaterialTheme.typography.bodySmall)
+                Text(context.getString(R.string.fingerprint_scope), style = MaterialTheme.typography.bodySmall)
                 if (error.isNotEmpty()) Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
             }
         },
-        confirmButton = { TextButton(onClick = onTrust, enabled = independentlyChecked && !saving) { Text(if (saving) "正在保存…" else if (pending.changed) "替换指纹并重连" else "保存指纹并重连") } },
-        dismissButton = { TextButton(onClick = onCancel, enabled = !saving) { Text("取消连接") } }
+        confirmButton = { TextButton(onClick = onTrust, enabled = independentlyChecked && !saving) { Text(if (saving) context.getString(R.string.saving) else if (pending.changed) context.getString(R.string.fingerprint_replace) else context.getString(R.string.fingerprint_save)) } },
+        dismissButton = { TextButton(onClick = onCancel, enabled = !saving) { Text(context.getString(R.string.cancel_connection)) } }
     )
 }

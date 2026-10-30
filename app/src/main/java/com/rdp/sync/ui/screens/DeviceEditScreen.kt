@@ -1,154 +1,103 @@
 package com.rdp.sync.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Domain
-import androidx.compose.material.icons.filled.Keyboard
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.Shield
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.*
 import androidx.compose.ui.unit.dp
+import com.rdp.sync.R
 import com.rdp.sync.data.Device
+import com.rdp.sync.ui.components.*
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceEditScreen(
-    device: Device?,
-    onSave: (Device) -> Unit,
-    onCancel: () -> Unit,
-    errorMessage: String? = null,
-    isSaving: Boolean = false
-) {
-    var name by remember { mutableStateOf(device?.name ?: "") }
-    var host by remember { mutableStateOf(device?.host ?: "") }
-    var port by remember { mutableIntStateOf(device?.port ?: 3389) }
-    var username by remember { mutableStateOf(device?.username ?: "") }
-    var password by remember { mutableStateOf(device?.password ?: "") }
-    var domain by remember { mutableStateOf(device?.domain ?: "") }
-    var rdpServerName by remember { mutableStateOf(device?.rdpServerName ?: "") }
+fun DeviceEditScreen(device: Device?, onSave: (Device) -> Unit, onCancel: () -> Unit,
+    errorMessage: String? = null, isSaving: Boolean = false) {
+    val context = LocalContext.current
+    var name by rememberSaveable(device?.id) { mutableStateOf(device?.name.orEmpty()) }
+    var host by rememberSaveable(device?.id) { mutableStateOf(device?.host.orEmpty()) }
+    var portText by rememberSaveable(device?.id) { mutableStateOf((device?.port ?: 3389).toString()) }
+    var username by rememberSaveable(device?.id) { mutableStateOf(device?.username.orEmpty()) }
+    // Never put plaintext credentials in saved instance state.
+    var password by remember(device?.id) { mutableStateOf(device?.password.orEmpty()) }
+    var domain by rememberSaveable(device?.id) { mutableStateOf(device?.domain.orEmpty()) }
+    var rdpServerName by rememberSaveable(device?.id) { mutableStateOf(device?.rdpServerName.orEmpty()) }
     var showPassword by remember { mutableStateOf(false) }
-
-    BackHandler(enabled = isSaving) { /* Wait for the atomic credential write before leaving. */ }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (device != null) "编辑设备" else "添加设备") },
-                navigationIcon = {
-                    IconButton(enabled = !isSaving, onClick = onCancel) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回")
-                    }
-                },
-                actions = {
-                    IconButton(enabled = !isSaving && (device?.credentialUnavailable != true || password.isNotEmpty()), onClick = {
-                        val d = Device(
-                            id = device?.id ?: 0,
-                            name = name, host = host, port = port,
-                            username = username, password = password,
-                            domain = domain, rdpServerName = rdpServerName,
-                            width = device?.width ?: 1280, height = device?.height ?: 720
-                        )
-                        onSave(d)
-                    }) {
-                        Icon(Icons.Default.Check, contentDescription = "保存")
-                    }
+    var attemptedSave by remember { mutableStateOf(false) }
+    val port = portText.toIntOrNull()
+    val validPort = port != null && port in 1..65535
+    val validRequired = name.isNotBlank() && host.isNotBlank()
+    val canSave = !isSaving && (device?.credentialUnavailable != true || password.isNotEmpty())
+    fun save() {
+        attemptedSave = true
+        if (!canSave || !validPort || !validRequired) return
+        onSave(Device(id = device?.id ?: 0, name = name, host = host, port = requireNotNull(port),
+            username = username, password = password, domain = domain, rdpServerName = rdpServerName,
+            width = device?.width ?: 1280, height = device?.height ?: 720))
+    }
+    BackHandler(enabled = isSaving) { /* Keep the atomic credential write owned by this route. */ }
+    Scaffold(topBar = {
+        TopAppBar(title = { Text(stringResource(if (device == null) R.string.add_device else R.string.edit_device)) },
+            navigationIcon = { IconButton(onClick = onCancel, enabled = !isSaving) { Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.back)) } })
+    }) { insets ->
+        Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
+            Column(Modifier.widthIn(max = 560.dp).fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(24.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (!errorMessage.isNullOrBlank()) ProductNotice(UiMessages.text(context, errorMessage), error = true)
+                if (device?.credentialUnavailable == true) ProductNotice(stringResource(
+                    if (device.passwordFormat == 2) R.string.credential_missing_help else R.string.credential_locked_help), error = true)
+                SectionHeading(stringResource(R.string.connection_info), stringResource(R.string.connection_section_help))
+                OutlinedTextField(name, { name = it }, label = { Text(stringResource(R.string.connection_name)) },
+                    leadingIcon = { Icon(Icons.Default.Computer, null) }, singleLine = true, enabled = !isSaving,
+                    isError = attemptedSave && name.isBlank(), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(host, { host = it }, label = { Text(stringResource(R.string.host)) },
+                    singleLine = true, enabled = !isSaving, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                    isError = attemptedSave && host.isBlank(), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(portText, { portText = it }, label = { Text(stringResource(R.string.port)) },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true, enabled = !isSaving,
+                    isError = attemptedSave && !validPort, modifier = Modifier.fillMaxWidth())
+                if (attemptedSave && !validRequired) ProductNotice(stringResource(R.string.validation_required), error = true)
+                if (attemptedSave && !validPort) ProductNotice(stringResource(R.string.validation_port), error = true)
+                Spacer(Modifier.height(4.dp))
+                SectionHeading(stringResource(R.string.credentials_section))
+                OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.username)) },
+                    leadingIcon = { Icon(Icons.Default.Person, null) }, singleLine = true, enabled = !isSaving, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(password, { password = it }, label = { Text(stringResource(R.string.password)) },
+                    leadingIcon = { Icon(Icons.Default.Lock, null) }, singleLine = true, enabled = !isSaving,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = { IconButton(onClick = { showPassword = !showPassword }) {
+                        Icon(if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            stringResource(if (showPassword) R.string.hide_password else R.string.show_password))
+                    } }, modifier = Modifier.fillMaxWidth())
+                Text(stringResource(R.string.credentials_help), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                SectionHeading(stringResource(R.string.advanced_section), stringResource(R.string.advanced_help))
+                OutlinedTextField(domain, { domain = it }, label = { Text(stringResource(R.string.domain)) }, singleLine = true,
+                    enabled = !isSaving, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(rdpServerName, { rdpServerName = it }, label = { Text(stringResource(R.string.server_name)) },
+                    placeholder = { Text(stringResource(R.string.server_name_hint)) }, supportingText = { Text(stringResource(R.string.server_name_help)) },
+                    singleLine = true, enabled = !isSaving, modifier = Modifier.fillMaxWidth())
+                Button(onClick = ::save, enabled = canSave, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                    if (isSaving) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.Check, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(stringResource(if (isSaving) R.string.saving else R.string.save_connection))
                 }
-            )
-        }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .imePadding()
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            if (!errorMessage.isNullOrBlank()) Text(errorMessage, color = MaterialTheme.colorScheme.error)
-            if (device?.credentialUnavailable == true) Text(
-                if (device.passwordFormat == 2) "此配置未包含密码。请明确输入密码后保存，才能连接。"
-                else "此设备密码无法解密。原加密数据仍保留；输入新密码并保存将明确替换此设备的凭据。留空不能保存。",
-                color = MaterialTheme.colorScheme.error)
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("设备名称") },
-                leadingIcon = { Icon(Icons.Default.Keyboard, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = host,
-                onValueChange = { host = it },
-                label = { Text("IP地址") },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = port.toString(),
-                onValueChange = { port = it.toIntOrNull() ?: 3389 },
-                label = { Text("端口") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = username,
-                onValueChange = { username = it },
-                label = { Text("用户名") },
-                leadingIcon = { Icon(Icons.Default.Person, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = password,
-                onValueChange = { password = it },
-                label = { Text("密码") },
-                leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
-                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                trailingIcon = {
-                    IconButton(onClick = { showPassword = !showPassword }) {
-                        Icon(
-                            if (showPassword) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                            contentDescription = if (showPassword) "隐藏密码" else "显示密码"
-                        )
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = domain,
-                onValueChange = { domain = it },
-                label = { Text("域 (可选)") },
-                leadingIcon = { Icon(Icons.Default.Domain, contentDescription = null) },
-                modifier = Modifier.fillMaxWidth()
-            )
-
-            OutlinedTextField(
-                value = rdpServerName,
-                onValueChange = { rdpServerName = it },
-                label = { Text("CredSSP主机名") },
-                placeholder = { Text("Windows电脑名（可选）") },
-                supportingText = { Text("用IP连接NLA失败时填此字段") },
-                modifier = Modifier.fillMaxWidth()
-            )
+                Spacer(Modifier.height(8.dp))
+            }
         }
     }
 }

@@ -8,5 +8,17 @@
             android:permission="android.permission.MANAGE_DOCUMENTS">
             <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
         </provider>
+        <!-- Isolated Java/framework-only Binder fixture. Never included in the production APK. -->
+        <provider android:name="com.rdp.sync.sharedspace.SharedSpaceFixtureDocumentsProvider"
+            android:authorities="${applicationId}.sharedspacefixture.documents"
+            android:process=":sharedspacefixture"
+            android:exported="true" android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
+        </provider>
+        <!-- Fixed test control calls validate the instrumentation target UID; all CRUD is unsupported. -->
+        <provider android:name="com.rdp.sync.sharedspace.SharedSpaceFixtureControlProvider"
+            android:authorities="${applicationId}.sharedspacefixture.control"
+            android:process=":sharedspacefixture" android:exported="true" />
     </application>
 </manifest>

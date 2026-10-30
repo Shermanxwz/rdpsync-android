@@ -89,7 +89,7 @@ class ParserTests(unittest.TestCase):
             with self.assertRaises(ValueError): observe(processes(), windows(), bad, activities(), HOME)
 
     def test_app_already_running_forbids_recovery(self):
-        extra = '  *APP* UID 10209 ProcessRecord{ccc 1000:com.rdp.sync.preview2/u0a209}\n'
+        extra = '  *APP* UID 10209 ProcessRecord{ccc 1000:com.rdp.sync.preview3/u0a209}\n'
         with self.assertRaises(ValueError): observe(processes(extra=extra), windows(), displays(), activities(), HOME)
 
     def test_all_live_dumps_require_successful_complete_remote_marker(self):

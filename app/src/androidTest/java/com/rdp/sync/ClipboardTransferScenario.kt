@@ -45,7 +45,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 /** Shared strict SAF/CLIPRDR scenario; each concrete class uses a real, fixed peer. */
 abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer) {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("gnomeFixture", "xrdpFileFixture")
+    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private val automation get() = instrumentation.uiAutomation
@@ -59,6 +60,9 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     private val downloads get() = "/sdcard/Download/$folder"
 
     @Test fun explicitSafAndNativeClipboardFileRoundTrip() {
+        measurements.put("fixture_app_locale", appLocale.receipt)
+        assertEquals("Explicit legacy fixture app language", "zh", compose.activity.resources.configuration.locales[0].language)
+        measurements.put("fixture_activity_locales", compose.activity.resources.configuration.locales.toLanguageTags())
         val args = InstrumentationRegistry.getArguments()
         assertEquals("true", args.getString(peer.enabledArgument))
         val fingerprint = requireNotNull(args.getString(peer.fingerprintArgument))

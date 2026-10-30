@@ -52,3 +52,35 @@ File transfer is off by default, separately negotiated after deliberate consent,
 The initial outbound file-data admission budget is 32 MiB **per connection lifetime**, with a separate finite 1 MiB metadata/control-response budget. Rereads consume allowance; cancellation and re-offering do not restore it. Limits are checked before admitting CLIPRDR output, rather than inferring socket drain from queued-byte counters. Abuse/exhaustion can terminate transfer or the connection instead of generating unbounded error replies. This is not a claim that total native, TLS, codec and Android memory is 8 MiB or that admitted bytes have reached durable remote storage.
 
 Private staging has file/count/disk-space limits and is not the credential-encrypted store. User cancellation is cooperative and cannot undo remote copies; native leases are closed before local snapshot cleanup. Export errors may leave only a newly created partial copy, with the complete staged source retained until session end. Process death, hostile document providers and filesystem remnants remain relevant boundaries; see [privacy notes](PRIVACY.md). Folder trees and large-file parity are deliberately outside this initial implementation.
+
+
+## Preview 3 Shared-space drive (development)
+
+The new filesystem device is confined to a persistent app-private workspace, not
+a server-selected path or direct SAF tree. A custom RDPDR implementation uses a
+single root-relative no-follow broker for remote operations and local file
+management. Read-only is the default explicit grant; read/write also permits
+remote rename/deletion inside that space. Grants are endpoint-bound and
+connection-scoped, not stored in profiles or restored with navigation state.
+A stopped grant cannot be reused by an automatic compatibility reconnect.
+
+Picker and confirmation selections use broker-owned handles, including pinned
+import parents and export/mutation objects. Concurrent path replacement must not
+change the selected object. Local export snapshots deny conflicting writers;
+imports publish exclusively without replacing an existing name. This is not a
+generic live read/write Android folder provider. Unsupported filesystem operations
+return errors rather than pretending success; see the
+[native protocol contract](docs/SHARED_DRIVE_NATIVE.md).
+
+Drive transport output uses an exact-source-pinned read-only pending-buffer
+accessor under FreeRDP's existing write lock. It does not weaken TLS verification,
+authentication or redirect policy. All incremental queue/memory limits and the
+actual stalled-peer test boundary are documented in the contract; no total-RSS
+or unlimited-storage claim is made. Malformed/flooded traffic can fail closed;
+ordinary storage exhaustion does not intentionally disconnect the desktop.
+
+Workspace files are not protected by the password encryption layer and are not
+automatically backed up. Explicit export is the recovery mechanism. Cancellation
+and unlinking are not forensic erasure, and bytes already delivered to a remote
+computer cannot be revoked. Final runtime acceptance for this new device remains
+pending until its exact-commit CI evidence is recorded.

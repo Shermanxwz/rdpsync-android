@@ -3,6 +3,8 @@ package com.rdp.sync.ui.transfer
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
+import androidx.compose.ui.platform.LocalContext
+import com.rdp.sync.R
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.transfer.TransferController
@@ -26,6 +28,7 @@ internal fun SessionFileTransferUi(controller: TransferController, visible: Bool
 @Composable
 private fun TransferPickerContent(controller: TransferController, visible: Boolean,
     requestedDirection: FileTransferDirection, onReconnect: () -> Unit, onDismiss: () -> Unit) {
+    val context = LocalContext.current
     val state by controller.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     var pickerEpoch by remember { mutableIntStateOf(0) }
@@ -42,7 +45,7 @@ private fun TransferPickerContent(controller: TransferController, visible: Boole
         pending = null
         if (operation == null || operation.ticket.kind != kind ||
             !operation.guard.consume(operation.ticket, controller.sessionId, RdpConnector.sessionGeneration()) || !currentlyVisible) {
-            message = "文件选择已失效或连接已变化；未读取或导出所选内容，请重新选择。"
+            message = context.getString(R.string.picker_stale)
             return null
         }
         return operation.ticket
@@ -50,21 +53,21 @@ private fun TransferPickerContent(controller: TransferController, visible: Boole
 
     val importFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         if (consume(TransferPickerGuard.Kind.IMPORT_FILES) != null) {
-            if (uris.isEmpty()) message = "已取消选择文件；没有发送文件。"
+            if (uris.isEmpty()) message = context.getString(R.string.picker_cancelled_import)
             else scope.launch { controller.stageOutbound(uris) }
         }
     }
     val exportDirectory = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         val ticket = consume(TransferPickerGuard.Kind.EXPORT_DIRECTORY)
         if (ticket != null) {
-            if (uri == null) message = "已取消选择导出目录；暂存文件仍保留。"
+            if (uri == null) message = context.getString(R.string.picker_cancelled_export)
             else scope.launch { controller.exportCompleted(requireNotNull(ticket.entryId), uri) }
         }
     }
 
     fun begin(kind: TransferPickerGuard.Kind, entryId: String? = null): Boolean {
         if (!visible || pending != null || RdpConnector.sessionGeneration() != controller.generation) {
-            message = "文件选择器尚未返回，或连接已变化；请稍后重新操作。"
+            message = context.getString(R.string.picker_busy)
             return false
         }
         val ticket = guard.begin(controller.generation, kind, entryId) ?: return false
@@ -75,7 +78,7 @@ private fun TransferPickerContent(controller: TransferController, visible: Boole
     fun pickerLaunchFailed() {
         pending?.let { it.guard.consume(it.ticket, controller.sessionId, controller.generation) }
         pending = null
-        message = "无法打开系统文件选择器；未读取或导出任何文件。"
+        message = context.getString(R.string.picker_launch_failed)
     }
     fun dismiss() {
         // Revokes only unconsumed picker consent. Already-confirmed protocol work is

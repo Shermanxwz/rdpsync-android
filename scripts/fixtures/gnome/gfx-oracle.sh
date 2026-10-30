@@ -5,7 +5,10 @@ ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
 # Only this disposable reference binary is reconfigured; the existing classic
 # comparison script and its separately hashed negative evidence are unchanged.
-cmake -S build/freerdp-android/freerdp-src -B build/reference-freerdp \
+SOURCE="$ROOT/build/reference-freerdp-src"
+[[ "$(git -C "$SOURCE" rev-parse HEAD)" == 97eff6ddfbbfaa8e42a126d362686bd001ff8bdc ]]
+[[ -z "$(git -C "$SOURCE" status --porcelain --untracked-files=no)" ]]
+cmake -S "$SOURCE" -B build/reference-freerdp \
   -DCHANNEL_RDPGFX=ON -DCHANNEL_RDPGFX_CLIENT=ON -DWITH_FFMPEG=OFF -DWITH_OPENH264=OFF
 cmake --build build/reference-freerdp --target xfreerdp -j4
 mkdir -p build/gnome-evidence/gfx-reference

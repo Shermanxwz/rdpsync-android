@@ -7,6 +7,8 @@ import android.graphics.Rect
 import android.util.Log
 import android.os.SystemClock
 import com.rdp.sync.display.*
+import com.rdp.sync.sharedspace.SharedSpaceListingResult
+import com.rdp.sync.sharedspace.SharedSpaceReadResult
 import kotlinx.coroutines.delay
 
 object RdpConnector {
@@ -20,6 +22,29 @@ object RdpConnector {
     external fun nativeConnect4(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean): Int
     external fun nativeConnect5(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String): Int
     external fun nativeConnect6(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String, fileTransferEnabled: Boolean): Int
+    external fun nativeConnect7(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String, fileTransferEnabled: Boolean, sharedSpaceMode: Int): Int
+    external fun nativeSharedDriveState(): LongArray
+    external fun nativeSharedDriveRevoke(expectedGeneration: Long): Int
+    /** Fixed Shared-space staging ceiling; the clipboard accessor remains separately limited. */
+    external fun nativeSharedSpaceOpenStaged(directoryId: String, fileId: String, expectedSize: Long): Int
+    external fun nativeSharedSpaceList(path: String): SharedSpaceListingResult
+    external fun nativeSharedSpaceOpenExport(path: String): LongArray
+    external fun nativeSharedSpaceReadExport(handle: Long, offset: Long, length: Int): SharedSpaceReadResult
+    external fun nativeSharedSpaceCloseExport(handle: Long): Int
+    external fun nativeSharedSpaceImport(fd: Int, size: Long, parent: String, name: String, token: Long): Int
+    external fun nativeSharedSpaceBeginImport(token: Long): Int
+    external fun nativeSharedSpaceEndImport(token: Long): Int
+    external fun nativeSharedSpaceCancelImport(token: Long)
+    external fun nativeSharedSpaceSpace(): LongArray
+    external fun nativeSharedSpaceMkdir(path: String): Int
+    external fun nativeSharedSpaceRename(oldPath: String, newPath: String): Int
+    external fun nativeSharedSpaceDelete(path: String): Int
+    external fun nativeSharedSpaceOpenImportDirectory(path: String): LongArray
+    external fun nativeSharedSpaceOpenMutation(path: String): LongArray
+    external fun nativeSharedSpaceImportToDirectory(fd: Int, size: Long, parentHandle: Long, name: String, token: Long): Int
+    external fun nativeSharedSpaceMkdirSelection(parentHandle: Long, name: String): Int
+    external fun nativeSharedSpaceRenameSelection(handle: Long, newPath: String): Int
+    external fun nativeSharedSpaceDeleteSelection(handle: Long): Int
     external fun nativeFileTransferState(): LongArray
     /** Owned readonly CLOEXEC fd; only app-private UUID staging IDs are accepted. */
     external fun nativeFileTransferOpenStaged(directoryId: String, fileId: String, expectedSize: Long): Int
@@ -167,7 +192,7 @@ object RdpConnector {
 
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
-    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = "", fileTransferEnabled: Boolean = false): Boolean {
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = "", fileTransferEnabled: Boolean = false, sharedDriveMode: SharedDriveMode = SharedDriveMode.OFF): Boolean {
         if (!nativeInitialized) {
             lastKotlinError = "远程桌面运行目录未初始化，请重新打开应用并检查本机存储空间。"
             return false
@@ -186,9 +211,9 @@ object RdpConnector {
             rdpeiConnected = false
             rdpeiDisabled = !enableTouchInput
             touchFailedCode = 0
-            val result = nativeConnect6(
+            val result = nativeConnect7(
                 host.trim(), port, username.trim(), password, domain.trim(), rdpServerName.trim(),
-                width, height, enableTouchInput, compatibilityMode, expectedFingerprint, fileTransferEnabled
+                width, height, enableTouchInput, compatibilityMode, expectedFingerprint, fileTransferEnabled, sharedDriveMode.nativeValue
             )
             Log.d(TAG, "Connect result: $result")
             result == 1
@@ -198,6 +223,12 @@ object RdpConnector {
             false
         }
     }
+
+    fun sharedDriveState(): SharedDriveState =
+        SharedDriveState.fromNative(safeNative("sharedDriveState", longArrayOf()) { nativeSharedDriveState() })
+
+    fun revokeSharedDrive(expectedGeneration: Long): Boolean = expectedGeneration > 0 &&
+        safeNative("revokeSharedDrive", -1) { nativeSharedDriveRevoke(expectedGeneration) } == 0
 
     fun certificateChallenge(): CertificateChallenge? =
         CertificateChallenge.fromNative(safeNative("certificateChallenge", null) { nativeGetCertificateChallenge() })

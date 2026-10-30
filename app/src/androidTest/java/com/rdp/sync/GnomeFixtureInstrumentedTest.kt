@@ -47,13 +47,17 @@ class GnomeFixtureInstrumentedTest {
     // Compose1.7.2 defaults to UnconfinedTestDispatcher: external IO completion
     // may recompose Dialog/layout on that worker through its test interceptor.
     // Queue effects until the existing UI-thread test-clock pump instead.
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
+    @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("gnomeFixture")
+    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "gnome-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
     private lateinit var decodedColors: JSONObject
 
     @Test fun nativeGnomeRdpPixelsInputAndDisplayControl() {
+        measurements.put("fixture_app_locale", appLocale.receipt)
+        assertEquals("Explicit legacy fixture app language", "zh", compose.activity.resources.configuration.locales[0].language)
+        measurements.put("fixture_activity_locales", compose.activity.resources.configuration.locales.toLanguageTags())
         val args = InstrumentationRegistry.getArguments()
         assertEquals("Explicit isolated fixture argument required", "true", args.getString("gnomeFixture"))
         val mode = requireNotNull(args.getString("gnomeFixtureMode"))

@@ -288,8 +288,8 @@ Runtime success remains pending until these new tests actually execute.
 
 ### Independent xrdp file-clipboard peer
 
-`xrdp-file-emulator.yml` adds a **separate six-test job**: real native runtime,
-three storage/provider/FD checks, one transport-only diagnostic, and `XrdpTransferInstrumentedTest`. It does not
+`xrdp-file-emulator.yml` preserves a **six-test clipboard subset**: real native runtime,
+three storage/provider/FD checks, one transport-only diagnostic, and `XrdpTransferInstrumentedTest`. The same job now also requires eight Shared Space storage/Binder tests and one actual RDPDR scenario, for exactly **15 tests**. It does not
 replace or reduce the existing fourteen-test classic desktop/security/IME job,
 the two seven-test GNOME jobs, or the official-client resize comparison.
 
@@ -321,7 +321,7 @@ must be inspected independently.
 
 ### API29 fullscreen / IME boundary
 
-`api29-layout-emulator.yml` runs one explicitly selected test on a fresh standard
+`api29-layout-emulator.yml` runs one explicitly selected layout test and the same eight Shared Space storage/Binder tests on a fresh standard
 hosted KVM `android-29/default/x86_64` emulator. It uses the real MainActivity,
 SessionSystemBars and SessionViewportLayout with a local EditText, not a copied
 layout, RDP server, remote input substitute, or file-transfer claim. Portrait and
@@ -334,10 +334,10 @@ automatically claim transient-bar visibility from flags.
 
 The runner refuses non-hosted execution, a wrong API/device or multiple devices;
 all device commands address the action-owned emulator explicitly. Fresh XML must
-contain exactly this one passing non-skipped test, and fresh JSON must match the
+contain exactly these nine passing non-skipped tests (one layout and eight storage), and fresh layout JSON must match the
 checked-out commit/tree, actual device timestamps and all IME callback outcomes.
 Screenshots and source/APK/native hashes are retained, never AVD HOME/private
-keys. Nine synthetic host mutation tests protect that evidence validator; they
+keys. Fourteen synthetic host mutation tests protect that evidence validator; they
 are not Android execution. Prior local TCG startup ANRs and the genuine stale
 pre-30-insets failure remain preserved separately. A new gate's existence or
 compilation is not a runtime pass.
@@ -364,3 +364,56 @@ that new connection must receive a fresh SAF selection and explicit publish
 before the same live-offer route-Back revocation assertion. GNOME's supported
 same-connection re-offer assertion is unchanged. This is an explicit capability
 boundary, not an automatic retry or a claim that rejected replacement succeeded.
+
+
+### Genuine RDPDR Shared Space (new acceptance, not a runtime claim)
+
+`XrdpSharedDriveInstrumentedTest` uses the actual product's Shared Space browser,
+RO-default/RW-acknowledged reconnect dialogs and system DocumentsUI. No native
+mount opt-in bypass is used. The fixed xrdp peer must operate on the actual owned
+`thinclient_drives/RdpSync` FUSE device, separately from `.clipboard`; native
+acceptance reply, successful filesystem use, byte counters and independent hashes
+are retained. File clipboard stays disabled in this scenario.
+
+The finite scenario imports empty, Unicode/binary and a 40 MiB + 19 byte file
+through real multi-selection, proves canceled import/export pickers do no work,
+checks RO write denial, and explicitly reconnects RW. The peer enumerates and
+random-reads, creates nested directories, writes/reopens/truncates, renames within
+and across directories, deletes files/empty directories, and rejects nonempty
+removal and a sparse size above 512 MiB. The app browser sees the same remote
+file; actual SAF export preserves a same-name destination sentinel and verifies
+an independently computed final hash. Provider/broker adversarial and whole-quota
+controls remain separately labelled tests, not additional claimed peer operations.
+
+Exactly two receiver pauses are allowed by the owned loopback relay. Both use a
+file descriptor opened before pausing, then 16 concurrent valid 256 KiB ranges.
+The first requires actual buffered native responses, bounded pending work and a
+no-progress plateau before resuming all exact hashes and real left-input/pixel
+feedback. The second uses the real Stop-sharing confirmation while paused,
+requires prompt local authority revocation with bounded reservations and the desktop still connected, then
+resumes to observe denied pending reads, a stale-handle denial and zero remaining
+IRP/input/response reservations. Accounting remains until the canceled completions can drain. Already emitted
+ciphertext is not claimed recalled. A final explicit reconnect proves persistence.
+Kernel/FUSE request splitting is retained as a runtime constraint: a pause flag
+alone never passes the plateau gate. This is **paused-receiver backpressure**,
+not a claimed packet capture or literal zero-window advertisement observation.
+
+All fixed peer actions are loopback-only, synthetic and bounded; no path or shell
+command can be supplied by the HTTP caller. Ledgers precede mandatory screenshots,
+are fresh/source-bound and fail the job if missing. A strict 15-test XML count
+cannot substitute for the drive/clipboard outcome ledgers. This proves only the
+implemented RDPDR operations against xrdp, not Windows Explorer or Office testing.
+The existing GNOME diagnostic separately requests RO and records actual explicit
+no-drive/rejection versus unconfirmed status while real CLIPRDR fallback succeeds;
+no timeout is relabelled as device acceptance or supported mounting.
+
+### Finite product UI matrix
+
+`product-ui-emulator.yml` uses two standard hosted API35 emulators, no server:
+actual 320dp phone (five methods) and >=600dp expanded window (one method).
+The exact capture plan contains 78 after-only PNGs across English/Chinese,
+light/dark and large-text variants. It includes Shared Space, consent and status
+states; all semantic checks remain even when repetitive screenshots are omitted.
+The collector requires exact method counts, source/package/actual dimensions,
+unique planned PNG names and SHA-256 hashes. These synthetic UI renders do not
+claim network, provider consent, physical foldable hardware or drive negotiation.

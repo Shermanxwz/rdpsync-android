@@ -1,293 +1,199 @@
 package com.rdp.sync.ui.screens
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
-import androidx.compose.material.icons.filled.CloudDownload
-import androidx.compose.material.icons.filled.CloudSync
-import androidx.compose.material.icons.filled.CloudUpload
-import androidx.compose.material.icons.filled.Hub
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
-import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import com.rdp.sync.R
 import com.rdp.sync.data.Device
 import com.rdp.sync.manager.SyncDirection
+import com.rdp.sync.ui.components.*
 import com.rdp.sync.viewmodel.UiState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceListScreen(
-    uiState: UiState,
-    onAddDevice: () -> Unit,
-    onDeviceClick: (Long) -> Unit,
-    onSync: (SyncDirection) -> Unit,
-    onSaveWebDavSettings: (String, String, String) -> Unit,
-    onTestWebDavSettings: (String, String, String) -> Unit,
-    onMessageShown: () -> Unit
-) {
+fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (Long) -> Unit,
+    onSync: (SyncDirection) -> Unit, onSaveWebDavSettings: (String, String, String) -> Unit,
+    onTestWebDavSettings: (String, String, String) -> Unit, onMessageShown: () -> Unit, onSharedSpace: () -> Unit = {}) {
+    val context = LocalContext.current
+    val syncDescription = stringResource(R.string.sync)
+    val syncingDescription = stringResource(R.string.sync_in_progress)
     var showSettings by remember { mutableStateOf(false) }
     var showSyncMenu by remember { mutableStateOf(false) }
-    val snackbarHostState = remember { SnackbarHostState() }
     var pendingSync by remember { mutableStateOf<SyncDirection?>(null) }
-
-    LaunchedEffect(uiState.error, uiState.message) {
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(uiState.error, uiState.message, showSettings) {
         val text = uiState.error ?: uiState.message
-        if (!text.isNullOrBlank()) {
-            snackbarHostState.showSnackbar(text)
-            onMessageShown()
-        }
+        if (!text.isNullOrBlank() && !showSettings) { snackbar.showSnackbar(UiMessages.text(context, text)); onMessageShown() }
     }
-
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-            TopAppBar(
-                title = { Text("RdpSync - 设备列表") },
-                actions = {
-                    if (uiState.isSyncing) {
-                        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
-                    } else {
-                        IconButton(enabled = uiState.webDavSettingsLoaded, onClick = { showSyncMenu = true }) {
-                            Icon(Icons.Default.CloudSync, contentDescription = "同步")
-                        }
-                        DropdownMenu(expanded = showSyncMenu, onDismissRequest = { showSyncMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text("智能合并（推荐）") },
-                                leadingIcon = { Icon(Icons.Default.CloudSync, null) },
-                                onClick = { showSyncMenu = false; pendingSync = SyncDirection.MERGE }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("上传本机列表") },
-                                leadingIcon = { Icon(Icons.Default.CloudUpload, null) },
-                                onClick = { showSyncMenu = false; pendingSync = SyncDirection.UPLOAD }
-                            )
-                            DropdownMenuItem(
-                                text = { Text("下载云端列表") },
-                                leadingIcon = { Icon(Icons.Default.CloudDownload, null) },
-                                onClick = { showSyncMenu = false; pendingSync = SyncDirection.DOWNLOAD }
-                            )
-                        }
-                    }
-                    IconButton(enabled = uiState.webDavSettingsLoaded, onClick = { showSettings = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "设置")
+    Scaffold(snackbarHost = { SnackbarHost(snackbar) }, topBar = {
+        TopAppBar(title = { Text("RdpSync") }, actions = {
+            IconButton(onClick = onSharedSpace) { Icon(Icons.Default.FolderShared, stringResource(R.string.space_title)) }
+            Box {
+                IconButton(enabled = uiState.webDavSettingsLoaded && !uiState.isSyncing, onClick = { showSyncMenu = true },
+                    modifier = Modifier.semantics { contentDescription = syncDescription; if (uiState.isSyncing) stateDescription = syncingDescription }) {
+                    if (uiState.isSyncing) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    else Icon(Icons.Default.CloudSync, null)
+                }
+                DropdownMenu(showSyncMenu, onDismissRequest = { showSyncMenu = false }) {
+                    listOf(Triple(SyncDirection.MERGE, R.string.sync_merge, Icons.Default.CloudSync),
+                        Triple(SyncDirection.UPLOAD, R.string.sync_upload, Icons.Default.CloudUpload),
+                        Triple(SyncDirection.DOWNLOAD, R.string.sync_download, Icons.Default.CloudDownload)).forEach { (mode, label, icon) ->
+                        DropdownMenuItem(text = { Text(stringResource(label)) }, leadingIcon = { Icon(icon, null) },
+                            onClick = { showSyncMenu = false; pendingSync = mode })
                     }
                 }
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = onAddDevice) {
-                Icon(Icons.Default.Add, contentDescription = "添加设备")
             }
-        }
-    ) { paddingValues ->
-        if (uiState.devices.isEmpty()) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(Icons.Default.Hub, contentDescription = null, modifier = Modifier.size(64.dp))
-                Spacer(modifier = Modifier.height(16.dp))
-                Text("暂无设备，点击 + 添加", style = MaterialTheme.typography.bodyLarge)
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("设置 WebDAV 后可在多台手机之间同步 RDP 列表", style = MaterialTheme.typography.bodyMedium)
+            IconButton(enabled = uiState.webDavSettingsLoaded, onClick = { showSettings = true }) {
+                Icon(Icons.Default.Settings, stringResource(R.string.settings))
             }
-        } else {
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(uiState.devices, key = { it.id }) { device ->
-                    DeviceCard(device, onClick = { onDeviceClick(device.id) })
-                }
-            }
-        }
-    }
-
-    pendingSync?.let { direction ->
-        SyncModeDialog(direction, onDismiss = { pendingSync = null }, onConfirm = { selected ->
-            pendingSync = null
-            onSync(selected)
         })
-    }
-
-    if (showSettings) {
-        WebDavSettingsDialog(
-            initialUrl = uiState.webDavUrl,
-            initialUsername = uiState.webDavUsername,
-            initialPassword = uiState.webDavPassword,
-            passwordUnavailable = uiState.webDavCredentialUnavailable,
-            onDismiss = { showSettings = false },
-            onSave = { url, username, password ->
-                onSaveWebDavSettings(url, username, password)
-                showSettings = false
-            },
-            onTest = { url, username, password ->
-                onTestWebDavSettings(url, username, password)
+    }, floatingActionButton = {
+        if (uiState.devices.isNotEmpty()) ExtendedFloatingActionButton(onClick = onAddDevice,
+            icon = { Icon(Icons.Default.Add, null) }, text = { Text(stringResource(R.string.add_device)) })
+    }) { insets ->
+        Box(Modifier.fillMaxSize().padding(insets), contentAlignment = Alignment.TopCenter) {
+            LazyColumn(Modifier.widthIn(max = 840.dp).fillMaxSize(), contentPadding = PaddingValues(24.dp, 16.dp, 24.dp, 104.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(stringResource(R.string.profiles_title), style = MaterialTheme.typography.headlineMedium)
+                        Text(stringResource(R.string.profiles_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+                if (uiState.isLoading) item {
+                    Row(Modifier.fillMaxWidth().padding(vertical = 32.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                        Text(stringResource(R.string.loading_profiles))
+                    }
+                } else if (uiState.devices.isEmpty()) item {
+                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest), shape = MaterialTheme.shapes.large) {
+                        Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                            ProductIcon(Icons.Default.Computer)
+                            Text(stringResource(R.string.empty_title), style = MaterialTheme.typography.titleLarge)
+                            Text(stringResource(R.string.empty_body), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Button(onClick = onAddDevice, modifier = Modifier.heightIn(min = 56.dp).fillMaxWidth()) {
+                                Icon(Icons.Default.Add, null); Spacer(Modifier.width(8.dp)); Text(stringResource(R.string.add_device))
+                            }
+                        }
+                    }
+                } else {
+                    item { SectionHeading(stringResource(R.string.profiles_section), stringResource(R.string.profiles_count, uiState.devices.size)) }
+                    items(uiState.devices, key = { it.id }) { device -> DeviceCard(device) { onDeviceClick(device.id) } }
+                }
+                item { ProductNotice(stringResource(R.string.sync_hint)) }
             }
-        )
+        }
     }
+    pendingSync?.let { direction -> SyncModeDialog(direction, { pendingSync = null }) { pendingSync = null; onSync(it) } }
+    if (showSettings) WebDavSettingsDialog(uiState.webDavUrl, uiState.webDavUsername, uiState.webDavPassword,
+        uiState.webDavCredentialUnavailable, uiState.error ?: uiState.message, uiState.error != null,
+        onDismiss = { showSettings = false }, onSave = { url, user, password -> onSaveWebDavSettings(url, user, password); showSettings = false }, onTest = onTestWebDavSettings, isTesting = uiState.isSyncing, completionId = uiState.webDavTestCompletion)
 }
 
 @Composable
-private fun WebDavSettingsDialog(
-    initialUrl: String,
-    initialUsername: String,
-    initialPassword: String,
-    passwordUnavailable: Boolean,
-    onDismiss: () -> Unit,
-    onSave: (String, String, String) -> Unit,
-    onTest: (String, String, String) -> Unit
-) {
+internal fun WebDavSettingsDialog(initialUrl: String, initialUsername: String, initialPassword: String, passwordUnavailable: Boolean,
+    resultMessage: String? = null, resultError: Boolean = false, onDismiss: () -> Unit,
+    onSave: (String, String, String) -> Unit, onTest: (String, String, String) -> Unit, isTesting: Boolean = false, completionId: Long = 0) {
+    val context = LocalContext.current
     var url by remember { mutableStateOf(initialUrl) }
     var username by remember { mutableStateOf(initialUsername) }
     var password by remember { mutableStateOf(initialPassword) }
     var showPassword by remember { mutableStateOf(false) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("WebDAV 同步设置") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
-                    value = url,
-                    onValueChange = { url = it },
-                    label = { Text("WebDAV 地址") },
-                    placeholder = { Text("https://example.com/dav/rdpsync") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = username,
-                    onValueChange = { username = it },
-                    label = { Text("用户名") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
-                OutlinedTextField(
-                    value = password,
-                    onValueChange = { password = it },
-                    label = { Text("密码") },
+    var submitted by remember { mutableStateOf(false) }
+    var submittedAtCompletion by remember { mutableLongStateOf(completionId) }
+    val busy = isTesting || submitted
+    LaunchedEffect(isTesting, completionId) {
+        // A completion identity also changes for repeated identical fast results.
+        // An old nonblank message is never evidence that this submission ended.
+        if (isTesting || completionId != submittedAtCompletion) submitted = false
+    }
+    AlertDialog(onDismissRequest = onDismiss, icon = { Icon(Icons.Default.CloudSync, null) },
+        title = { Text(stringResource(R.string.webdav_title)) }, text = {
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text(stringResource(R.string.webdav_subtitle))
+                OutlinedTextField(url, { url = it }, label = { Text(stringResource(R.string.webdav_url)) },
+                    placeholder = { Text("https://example.com/dav/") }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(username, { username = it }, label = { Text(stringResource(R.string.username)) }, singleLine = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(password, { password = it }, label = { Text(stringResource(R.string.password)) }, singleLine = true, enabled = !busy,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
-                    trailingIcon = {
-                        TextButton(onClick = { showPassword = !showPassword }) {
-                            Text(if (showPassword) "隐藏" else "显示")
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                if (passwordUnavailable) Text("已保存的密码无法解密。请明确重新输入；留空不会覆盖旧数据。", color = MaterialTheme.colorScheme.error)
-                Text("默认仅同步设备配置（rdpsync_profiles.json），不发送 RDP 密码。旧客户端只识别旧版含密码文件。WebDAV 备份并非端到端加密；请使用 HTTPS。", style = MaterialTheme.typography.bodySmall)
+                    trailingIcon = { IconButton(onClick = { showPassword = !showPassword }, enabled = !busy) {
+                        Icon(if (showPassword) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            stringResource(if (showPassword) R.string.hide_password else R.string.show_password))
+                    } }, modifier = Modifier.fillMaxWidth())
+                if (passwordUnavailable) ProductNotice(stringResource(R.string.webdav_locked), error = true)
+                if (!resultMessage.isNullOrBlank()) ProductNotice(UiMessages.text(context, resultMessage), error = resultError)
+                OutlinedButton(onClick = { if (!isTesting && !submitted) { submittedAtCompletion = completionId; submitted = true; onTest(url, username, password) } }, enabled = !busy && url.isNotBlank() && username.isNotBlank(),
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    if (busy) { CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)) }
+                    Text(stringResource(if (busy) R.string.testing_connection else R.string.test_connection))
+                }
+                if (busy) Text(stringResource(R.string.testing_connection_close), style = MaterialTheme.typography.bodySmall)
+                Text(stringResource(R.string.webdav_security), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        },
-        confirmButton = {
-            TextButton(
-                enabled = url.isNotBlank() && username.isNotBlank() && (!passwordUnavailable || password.isNotEmpty()),
-                onClick = { onSave(url, username, password) }
-            ) { Text("保存") }
-        },
-        dismissButton = {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(
-                    enabled = url.isNotBlank() && username.isNotBlank(),
-                    onClick = { onTest(url, username, password) }
-                ) { Text("测试连接") }
-                TextButton(onClick = onDismiss) { Text("取消") }
-            }
-        }
-    )
+        }, confirmButton = {
+            TextButton(enabled = !busy && url.isNotBlank() && username.isNotBlank() && (!passwordUnavailable || password.isNotEmpty()),
+                onClick = { if (!isTesting && !submitted) { submittedAtCompletion = completionId; submitted = true; onSave(url, username, password) } }, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.save)) }
+        }, dismissButton = { TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(if (busy) R.string.close else R.string.cancel)) } })
 }
 
 @Composable
 fun DeviceCard(device: Device, onClick: () -> Unit) {
-    Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
+    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest)) {
+        Row(Modifier.padding(20.dp), horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            ProductIcon(Icons.Default.Computer)
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(device.name, style = MaterialTheme.typography.titleMedium)
-                Text("${device.host}:${device.port}", style = MaterialTheme.typography.bodyMedium)
-                Text("用户: ${device.username}", style = MaterialTheme.typography.bodySmall)
-                if (device.credentialUnavailable) Text(if (device.passwordFormat == 2) "未保存密码 · 编辑后输入" else "密码无法解密 · 编辑后重新输入，原数据保留", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                Text("${device.host}:${device.port}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (device.username.isNotEmpty()) Text(device.username, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (device.credentialUnavailable) Text(stringResource(if (device.passwordFormat == 2) R.string.password_missing else R.string.password_locked),
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
-            Icon(Icons.AutoMirrored.Filled.ArrowForwardIos, contentDescription = "连接", modifier = Modifier.size(20.dp))
+            Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
         }
     }
 }
 
 @Composable
-private fun SyncModeDialog(direction: SyncDirection, onDismiss: () -> Unit, onConfirm: (SyncDirection) -> Unit) {
+internal fun SyncModeDialog(direction: SyncDirection, onDismiss: () -> Unit, onConfirm: (SyncDirection) -> Unit) {
     var includePasswords by remember(direction) { mutableStateOf(false) }
     val download = direction == SyncDirection.DOWNLOAD
-    AlertDialog(onDismissRequest = onDismiss, title = { Text("选择同步文件") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("默认：仅设备配置 · rdpsync_profiles.json\n不发送 RDP 密码，不改动旧版云端文件；导入时保留已有本机密码和设备。")
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(checked = includePasswords, onCheckedChange = { includePasswords = it })
-                Text("使用旧版含密码文件 rdpsync_devices.json")
+    AlertDialog(onDismissRequest = onDismiss, icon = { Icon(Icons.Default.CloudSync, null) }, title = { Text(stringResource(R.string.sync_file_title)) }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(stringResource(R.string.sync_profile_info))
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(includePasswords, role = Role.Checkbox, onValueChange = { includePasswords = it }),
+                verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(includePasswords, onCheckedChange = null)
+                Text(stringResource(R.string.sync_legacy), modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
             }
-            if (includePasswords) Text(if (download)
-                "读取旧客户端的备份。文件中的密码将导入本机加密存储；明确的空密码会更新本机密码。"
-                else "警告：继续会将 RDP 密码以可读明文上传到旧版文件！仅 HTTPS 传输加密，不是端到端加密。服务器和有文件权限的人可读取密码。",
-                color = MaterialTheme.colorScheme.error)
-            Text("合并时同一设备以本机为准；要获取旧客户端更新，请选下载并勾选旧版文件。", style = MaterialTheme.typography.bodySmall)
+            if (includePasswords) ProductNotice(stringResource(if (download) R.string.sync_legacy_download else R.string.sync_legacy_warning), error = true)
+            Text(stringResource(R.string.sync_merge_info), style = MaterialTheme.typography.bodySmall)
         }
-    }, confirmButton = { TextButton(onClick = { onConfirm(if (includePasswords) direction.withPasswords() else direction) }) {
-        Text(if (includePasswords && !download) "确认上传明文密码" else "继续")
-    } }, dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } })
+    }, confirmButton = {
+        TextButton(onClick = { onConfirm(if (includePasswords) direction.withPasswords() else direction) }, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text(stringResource(if (includePasswords && !download) R.string.sync_plaintext_confirm else R.string.continue_action))
+        }
+    }, dismissButton = { TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(R.string.cancel)) } })
 }

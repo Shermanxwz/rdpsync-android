@@ -1,4 +1,4 @@
-name: xrdp file clipboard Android integration
+name: xrdp clipboard and RDPDR drive Android integration
 
 on:
   pull_request:
@@ -40,7 +40,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
           restore-keys: |
             rdp-native-x86_64-${{ runner.os }}-
       - name: Build genuine Android native runtime and instrumentation
@@ -57,7 +57,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
       - name: Build pinned xrdp with actual FUSE and isolated file peer
         run: bash scripts/fixtures/start-xrdp-file-fixture.sh >xrdp-file-start.log 2>&1
       - name: Enable KVM on disposable standard hosted runner
@@ -65,7 +65,7 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Actual system SAF and bidirectional native xrdp CLIPRDR bytes
+      - name: Actual SAF, CLIPRDR, RDPDR mapped drive and eight storage cases
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
@@ -90,5 +90,6 @@ jobs:
             app/build/reports/androidTests/
             app/build/outputs/androidTest-results/
             native-build.log
+            build/freerdp-android/rdpsync-native-provenance-x86_64.json
             xrdp-file-start.log
             xrdp-file-cleanup.log

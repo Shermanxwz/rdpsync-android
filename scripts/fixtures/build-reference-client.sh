@@ -3,7 +3,8 @@
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || { echo 'Only for a disposable GitHub-hosted Actions VM.' >&2; exit 1; }
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-SOURCE="$ROOT/build/freerdp-android/freerdp-src"
+# Keep the official reference pristine: the Android source has an audited transport accessor patch.
+SOURCE="$ROOT/build/reference-freerdp-src"
 OUT="$ROOT/build/reference-freerdp"
 REV=97eff6ddfbbfaa8e42a126d362686bd001ff8bdc
 sudo apt-get update -qq

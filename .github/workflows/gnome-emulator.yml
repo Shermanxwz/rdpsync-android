@@ -44,7 +44,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
           restore-keys: |
             rdp-native-x86_64-${{ runner.os }}-
       - name: Build genuine Android native runtime and instrumentation
@@ -61,7 +61,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
       - name: Start native GNOME in private network and D-Bus session
         run: bash scripts/fixtures/gnome/start.sh '${{ matrix.mode }}' >gnome-start.log 2>&1
       - name: Build pinned unchanged classic reference client
@@ -100,6 +100,7 @@ jobs:
             app/build/reports/androidTests/
             app/build/outputs/androidTest-results/
             native-build.log
+            build/freerdp-android/rdpsync-native-provenance-x86_64.json
             gnome-start.log
             gnome-reference-build.log
             gnome-gfx-reference-build.log

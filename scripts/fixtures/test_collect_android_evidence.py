@@ -21,6 +21,17 @@ def diagnostic():
                 private_snapshot_removed_after_close=True, disconnected=True)
 
 
+def drive():
+    value={key: True for key in ('success','saf_ui_covered','actual_import_picker_cancel_no_import',
+        'actual_export_picker_cancel_no_copy','consent_cancel_kept_off','actual_ro_denied_write',
+        'actual_read_over_32mib','collision_original_unchanged','paused_revoke_and_stale_handle_denied',
+        'source_originals_unchanged','persistence_after_explicit_reconnect','disconnected')}
+    value.update(clipboard_used=False,windows_os_covered=False,actual_rw_operations={'fixture':True},
+        peer_to_saf_export={'fixture':'hash'},stalls=[{'phase':p,'actual_buffered_plateau':True} for p in ('resume','cancel')],
+        touch_attempts=[{'passed':True}]*2,synthetic_seed_cleanup=[{'removed':True}]*5)
+    return value
+
+
 class Reader:
     def __init__(self, files, failures=()):
         self.files=files; self.calls=[]; self.failures=list(failures); self.mtime=101; self.truncate=False
@@ -85,9 +96,10 @@ class Tests(unittest.TestCase):
 
     def test_ledgers_before_images_and_missing_image_fails(self):
         self.files['/sdcard/Download/rdpsync-xrdp-transport-diagnostic/measurements.json']=json.dumps(diagnostic()).encode()
+        self.files['/sdcard/Download/rdpsync-shared-drive-evidence/measurements.json']=json.dumps(drive()).encode()
         reader=Reader(self.files)
         with self.assertRaises(RuntimeError):self.collector(reader).collect('xrdp')
-        pulls=[c[2] for c in reader.calls if c[1]=='pull'];self.assertEqual(len(pulls),2)
+        pulls=[c[2] for c in reader.calls if c[1]=='pull'];self.assertEqual(len(pulls),3)
         self.assertTrue(all(p.endswith('/measurements.json') for p in pulls))
         report=json.loads((Path(self.tmp.name)/'evidence-collection.json').read_text());self.assertFalse(report['complete'])
 
@@ -96,6 +108,25 @@ class Tests(unittest.TestCase):
         self.collector(Reader(self.files),True).collect('xrdp')
         report=json.loads((Path(self.tmp.name)/'evidence-collection-best-effort.json').read_text())
         self.assertFalse(report['complete']);self.assertTrue(report['best_effort'])
+
+    def test_actual_drive_ledger(self):
+        m.validate_ledger('rdpsync-shared-drive-evidence', drive())
+
+    def test_drive_cannot_be_clipboard_or_synthetic_plateau(self):
+        for key in ('clipboard_used','windows_os_covered'):
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                m.validate_ledger('rdpsync-shared-drive-evidence',dict(drive(),**{key:True}))
+        value=drive();value['stalls'][0]['actual_buffered_plateau']=False
+        with self.assertRaises(AssertionError):m.validate_ledger('rdpsync-shared-drive-evidence',value)
+
+    def test_drive_missing_declared_phase_fails(self):
+        value=drive();value['stalls']=value['stalls'][:1]
+        with self.assertRaises(AssertionError):m.validate_ledger('rdpsync-shared-drive-evidence',value)
+
+    def test_drive_failed_tap_or_missing_seed_cleanup_fails(self):
+        for key in ('touch_attempts','synthetic_seed_cleanup'):
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                m.validate_ledger('rdpsync-shared-drive-evidence',dict(drive(),**{key:[]}))
 
     def test_frame_selection_error_receipt_is_not_complete(self):
         value={key:True for key in ('no_auth_before_first_trust','ime_tools_touch_and_software_typing_passed',

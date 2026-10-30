@@ -7,6 +7,7 @@ JAVA_HOME="${JAVA_HOME:-$(dirname "$(dirname "$(readlink -f "$(command -v javac)
 HOST_CC="${HOST_CC:-cc}"
 OUT="$ROOT/build/native-tests"
 mkdir -p "$OUT"
+BRIDGE_DRIVE_STUB="$ROOT/app/src/test/cpp/drive_disabled_stub.c"
 FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fsanitize="${SANITIZERS:-address,undefined}" -fno-omit-frame-pointer)
 "$HOST_CC" "${FLAGS[@]}" -Wall -Wextra -Werror "$ROOT/app/src/test/cpp/geometry_test.c" -o "$OUT/geometry_test"
 "$OUT/geometry_test"
@@ -42,7 +43,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/bridge_frame_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/bridge_frame_test"
+    "$ROOT/app/src/test/cpp/bridge_frame_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" "$BRIDGE_DRIVE_STUB" -o "$OUT/bridge_frame_test"
 "$OUT/bridge_frame_test"
 
 # Exercise production GFX guards/rollback with deterministic failure delegates.
@@ -50,7 +51,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/gfx_bridge_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/gfx_bridge_test"
+    "$ROOT/app/src/test/cpp/gfx_bridge_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" "$BRIDGE_DRIVE_STUB" -o "$OUT/gfx_bridge_test"
 
 "$OUT/gfx_bridge_test"
 
@@ -58,7 +59,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/transfer_ingress_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/transfer_ingress_test"
+    "$ROOT/app/src/test/cpp/transfer_ingress_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" "$BRIDGE_DRIVE_STUB" -o "$OUT/transfer_ingress_test"
 "$OUT/transfer_ingress_test"
 
 # The certificate fixture generates ephemeral self-signed test certificates in
@@ -67,7 +68,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/certificate_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/certificate_test" -lcrypto
+    "$ROOT/app/src/test/cpp/certificate_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" "$BRIDGE_DRIVE_STUB" -o "$OUT/certificate_test" -lcrypto
 "$OUT/certificate_test"
 
 # Execute the actual JNI private HOME/XDG bootstrap without creating a network
@@ -76,7 +77,7 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     -I"$ROOT/app/src/test/cpp/stubs" -I"$JAVA_HOME/include" -I"$JAVA_HOME/include/linux" \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
-    "$ROOT/app/src/test/cpp/runtime_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" -o "$OUT/runtime_test"
+    "$ROOT/app/src/test/cpp/runtime_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" "$BRIDGE_DRIVE_STUB" -o "$OUT/runtime_test"
 "$OUT/runtime_test"
 
 # Clang -O2 once removed the session-tail store when the factory returned only
@@ -96,3 +97,8 @@ BINDING_FLAGS=(-std=c11 -D_GNU_SOURCE -O2 -g -Wno-deprecated-declarations
 "$HOST_CLANG" "${BINDING_FLAGS[@]}" -c "$ROOT/app/src/test/cpp/context_binding_test.c" -o "$OUT/context_binding_test.o"
 "$HOST_CLANG" "$OUT/context_binding_test.o" "$OUT/context_binding_allocator.o" -o "$OUT/context_binding_test"
 "$OUT/context_binding_test"
+
+# Additive Shared Space gates. The original eleven regression fixtures above
+# retain their existing mock boundaries and remain independently executable.
+bash "$ROOT/scripts/test-workspace.sh"
+bash "$ROOT/scripts/test-drive.sh"
