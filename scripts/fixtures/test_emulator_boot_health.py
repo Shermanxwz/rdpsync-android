@@ -240,4 +240,60 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(0, report['recovery_count']); self.assertFalse(any('force-stop' in c for c in fake.calls))
 
 
+class HomeReadinessTests(unittest.TestCase):
+    exercise = PolicyTests.exercise
+    # Only these four focused methods run below; reuse the policy exercise helper.
+    @staticmethod
+    def resolver_fake(sequence, error=None):
+        class ResolvingHome(FakeAdb):
+            def __init__(self):
+                super().__init__(error); self.resolutions = 0
+
+            def run(self, args, **kwargs):
+                result = super().run(args, **kwargs)
+                if 'resolve-activity' in args:
+                    value = sequence[min(self.resolutions, len(sequence) - 1)]
+                    self.resolutions += 1
+                    result.stdout = (value + '\n').encode()
+                return result
+        return ResolvingHome()
+
+    def test_initial_setup_then_real_home_is_read_only_and_records_history(self):
+        setup = 'com.google.android.googlesdksetup/.DefaultActivity'
+        fallback = 'com.android.settings/.FallbackHome'
+        fake = self.resolver_fake([setup, fallback, HOME]); report = self.exercise(fake)
+        history = report['home_resolution_observations']
+        self.assertEqual(['waiting_for_real_launcher', 'waiting_for_real_launcher', 'allowlisted_launcher'], [r['state'] for r in history])
+        self.assertEqual(['home.stdout.txt', 'home-01.stdout.txt', 'home-02.stdout.txt'], [r['raw_stdout'] for r in history])
+        self.assertEqual(sorted(r['observed_monotonic'] for r in history), [r['observed_monotonic'] for r in history])
+        self.assertTrue(report['success']); self.assertEqual(0, report['recovery_count'])
+        self.assertGreaterEqual(report['stable_seconds'], 5)
+        self.assertFalse(any('force-stop' in c or 'start' in c for c in fake.calls))
+
+    def test_persistent_setup_uses_only_original_deadline_without_mutation(self):
+        for home in ('com.google.android.googlesdksetup/.DefaultActivity', 'com.android.settings/.FallbackHome'):
+            fake = self.resolver_fake([home]); report = self.exercise(fake, True)
+            self.assertFalse(report['success']); self.assertEqual(0, report['recovery_count'])
+            self.assertEqual([], report['observations']); self.assertGreater(fake.resolutions, 1)
+            self.assertLessEqual(fake.clock, 120.1)
+            self.assertFalse(any('force-stop' in c or 'start' in c for c in fake.calls))
+
+    def test_other_unknown_malformed_or_similar_setup_home_fails_immediately(self):
+        for home in ('com.other.launcher/.Home', 'com.google.android.googlesdksetup/.DifferentActivity',
+                     'com.android.settings/.FallbackHomeOther', 'No activity found', HOME + '\n' + HOME):
+            fake = self.resolver_fake([home]); report = self.exercise(fake, True)
+            self.assertFalse(report['success']); self.assertEqual(1, fake.resolutions)
+            self.assertEqual('invalid_or_untrusted_home', report['home_resolution_observations'][0]['state'])
+            self.assertFalse(any('force-stop' in c or 'start' in c for c in fake.calls))
+
+    def test_setup_then_active_real_launcher_recovers_only_allowlisted_launcher(self):
+        fake = self.resolver_fake(['com.google.android.googlesdksetup/.DefaultActivity', HOME], error='launcher')
+        report = self.exercise(fake)
+        self.assertEqual('recovered_boot', report['classification']); self.assertEqual(1, report['recovery_count'])
+        actions = [c for c in fake.calls if 'force-stop' in c or 'start' in c]
+        self.assertEqual(2, len(actions))
+        self.assertEqual(PKG, actions[0][-1]); self.assertEqual(HOME, actions[1][-1])
+        self.assertFalse(any('googlesdksetup' in ' '.join(c) for c in actions))
+
+
 if __name__ == '__main__': unittest.main()

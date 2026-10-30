@@ -22,6 +22,14 @@ import time
 
 SERIAL = 'emulator-5554'
 HOME_PACKAGES = {'com.google.android.apps.nexuslauncher', 'com.android.launcher3', 'com.android.launcher'}
+# Readiness-only identities, never healthy launchers or recovery targets. The
+# first was observed on our fresh API35 Google image; AOSP15 Settings
+# FallbackHome waits for user unlock and a real HOME before finishing:
+# https://android.googlesource.com/platform/packages/apps/Settings/+/android-15.0.0_r1/src/com/android/settings/FallbackHome.java
+PENDING_HOME_COMPONENTS = {
+    'com.google.android.googlesdksetup/com.google.android.googlesdksetup.DefaultActivity',
+    'com.android.settings/com.android.settings.FallbackHome',
+}
 PROCESS_HEADER = re.compile(r'^  \*(?:APP|PERS)\* UID \d+ ProcessRecord\{[^ }]+ (\d+):([\w.:]+)/[^}]+\}$', re.M)
 ACTIVE_ERROR = re.compile(r'\b(?:mCrashing|mNotResponding|bad)=true\b|\b(?:AppNotRespondingDialog|AppErrorDialog)[{@]')
 DUMP_ERROR = re.compile(r'(?i)permission denial|dump.*?time(?:d[ -]out|out)|exception occurred')
@@ -37,11 +45,19 @@ def component(value):
     return package + '/' + (package + activity if activity.startswith('.') else activity)
 
 
+class HomePending(ValueError):
+    def __init__(self, home):
+        self.home = home
+        super().__init__('Known setup HOME is not yet a ready launcher: ' + home)
+
+
 def resolve_home(output):
     values = [line.strip() for line in output.splitlines() if '/' in line]
     if len(values) != 1:
         raise ValueError('HOME resolution must have exactly one component')
     value = component(values[0])
+    if value in PENDING_HOME_COMPONENTS:
+        raise HomePending(value)
     if value.split('/')[0] not in HOME_PACKAGES:
         raise ValueError('Resolved HOME is not an owned CI image launcher')
     return value
@@ -192,6 +208,30 @@ class Gate:
             except Exception as error:
                 self.report.setdefault('diagnostic_errors', []).append(str(error))
 
+    def await_home(self):
+        history = self.report.setdefault('home_resolution_observations', [])
+        while self.now() < self.deadline:
+            index = len(history)
+            name = 'home' if index == 0 else f'home-{index:02d}'
+            output = self.shell(['cmd', 'package', 'resolve-activity', '--brief', '--user', '0',
+                                 '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.HOME'], name)
+            row = {'observed_monotonic': self.now(), 'raw_stdout': name + '.stdout.txt'}
+            history.append(row)
+            try:
+                home = resolve_home(output)
+            except HomePending as pending:
+                row.update(component=pending.home, state='waiting_for_real_launcher')
+                # Read-only observation: never start, stop, dismiss or provision
+                # this setup/fallback activity. The original total deadline stays.
+                self.sleep(min(1, max(0, self.deadline - self.now())))
+                continue
+            except ValueError as error:
+                row.update(state='invalid_or_untrusted_home', error=str(error))
+                raise
+            row.update(component=home, state='allowlisted_launcher')
+            return home
+        raise TimeoutError('Known setup HOME did not resolve to a real launcher within the startup deadline')
+
     def check(self):
         if self.env.get('GITHUB_ACTIONS') != 'true' or self.env.get('RUNNER_ENVIRONMENT') != 'github-hosted':
             raise ValueError('Only disposable GitHub-hosted CI is authorized')
@@ -209,8 +249,7 @@ class Gate:
         self.evidence('initial')
         if self.shell(['getprop', 'sys.boot_completed'], 'boot-completed').strip() != '1':
             raise ValueError('Emulator action returned before boot completion')
-        home = resolve_home(self.shell(['cmd', 'package', 'resolve-activity', '--brief', '--user', '0',
-                           '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.HOME'], 'home'))
+        home = self.await_home()
         package = home.split('/')[0]
         self.report['home_component'] = home
         stable_since, stable_count, stable_pids = None, 0, None
