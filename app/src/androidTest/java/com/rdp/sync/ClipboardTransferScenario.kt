@@ -58,6 +58,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     private val routeBackCallbackElapsed = AtomicLong()
     private val folder = "rdpsync-transfer-${SystemClock.uptimeMillis()}"
     private val downloads get() = "/sdcard/Download/$folder"
+    private var coachmarkAcknowledged = false
 
     @Test fun explicitSafAndNativeClipboardFileRoundTrip() {
         measurements.put("fixture_app_locale", appLocale.receipt)
@@ -90,9 +91,45 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 if (showing.value) RdpConnectionScreen(device) { showing.value = false }
             }
         } }
+        var primaryFailure: Throwable? = null
+        var cleanupFailure: Throwable? = null
+        val cleanupFailures = JSONArray()
+        fun failureEvidence(error: Throwable) = JSONObject()
+            .put("class", error.javaClass.name).put("message", error.message ?: JSONObject.NULL)
+            .put("stack", error.stackTraceToString()).put("elapsed_ms", SystemClock.elapsedRealtime())
+        fun cleanupStep(name: String, block: () -> Unit) {
+            try { block() } catch (error: Throwable) {
+                cleanupFailures.put(failureEvidence(error).put("step", name))
+                android.util.Log.e("ClipboardTransferScenario", "Cleanup failed: $name", error)
+                val first = primaryFailure ?: cleanupFailure
+                if (first == null) cleanupFailure = error else if (first !== error) first.addSuppressed(error)
+            }
+        }
+        fun persistFailureEvidence() {
+            measurements.put("cleanup_failures", cleanupFailures)
+            File(evidence, "measurements.json").writeText(measurements.toString(2))
+            shell("mkdir -p /sdcard/Download/rdpsync-${peer.evidenceName}")
+            shell("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-${peer.evidenceName}/")
+        }
         try {
-            waitFor("explicit certificate prompt") { compose.onAllNodesWithText("确认服务器证书").fetchSemanticsNodes().isNotEmpty() }
+            val trustTitle = "确认服务器证书"
+            // The first-use SYSTEM overlay can precede the app's certificate Dialog.
+            // One original deadline covers both the observed acknowledgement and
+            // exact app-dialog readiness; no trust/input is retried after failure.
+            val trustReadyDeadline = SystemClock.elapsedRealtime() + 30_000
+            val beforeTrust = acknowledgeSystemImmersiveCoachmark(compose.activity,
+                { compose.mainClock.advanceTimeBy(32); instrumentation.waitForIdleSync() },
+                { screenshot("00-system-immersive-coachmark") },
+                { retainCoachmark("before_certificate", it) }, deadlineElapsedMs = trustReadyDeadline,
+                readyWhenSystemOverlayAbsent = {
+                    RdpConnector.certificateChallenge()?.fingerprint == fingerprint &&
+                        compose.onAllNodesWithText(trustTitle).fetchSemanticsNodes().size == 1 &&
+                        focusedCertificateTitle(trustTitle)
+                }, allowAcknowledgement = !coachmarkAcknowledged)
+            coachmarkAcknowledged = coachmarkAcknowledged || beforeTrust.getBoolean("acknowledged")
+            assertEquals("No remote frame before explicit certificate trust", 0L, RdpConnector.nativeGetFrameId())
             compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("保存指纹并重连").assertIsNotEnabled()
             compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹").performScrollTo().performClick()
             compose.onNodeWithText("保存指纹并重连").performClick()
             waitFor("actual ${peer.name} frame before transfer") { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 }
@@ -107,9 +144,10 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 }
             }
             assertFalse("Peer must not silently downgrade to compatibility", RdpConnector.getDiag().contains("connection=compatibility-retry"))
-            measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
+            val afterFrame = acknowledgeSystemImmersiveCoachmark(compose.activity,
                 { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
-                { measurements.put("system_immersive_coachmark", it) }))
+                { retainCoachmark("after_first_frame", it) }, allowAcknowledgement = !coachmarkAcknowledged)
+            coachmarkAcknowledged = coachmarkAcknowledged || afterFrame.getBoolean("acknowledged")
             focusRealPeerSurface()
             val firstGeneration = RdpConnector.sessionGeneration()
             assertEquals("File channel must be opt-in", -2L, RdpConnector.nativeFileTransferState()[1])
@@ -318,22 +356,39 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             assertEquals("One actual route Back callback", 1, routeBackCallbacks.get())
             waitFor("route teardown disconnects owned session") { !RdpConnector.isConnected() }
             measurements.put("route_back_revoked_offer", true).put("success", true)
+        } catch (error: Throwable) {
+            // Preserve the original body failure before Compose rule teardown can mask it.
+            primaryFailure = error
+            measurements.put("primary_failure", failureEvidence(error))
+            android.util.Log.e("ClipboardTransferScenario", "Primary scenario failure", error)
+            throw error
         } finally {
-            measurements.put("picker_events", pickerEvents).put("diagnostics", RdpConnector.getDiag())
-                .put("native_transfer_state", RdpConnector.nativeFileTransferState().joinToString(","))
-            screenshot("99-transfer-final")
-            val seedCleanup = cleanOwnedMediaSeeds()
-            measurements.put("synthetic_seed_cleanup", seedCleanup)
-            File(evidence, "measurements.json").writeText(measurements.toString(2))
-            File(evidence, "accessibility-final.txt").writeText(documentNodes { true }.joinToString("\n") { node ->
-                try { "${node.packageName} ${node.viewIdResourceName} ${node.text} ${node.contentDescription}" } finally { node.recycle() }
-            })
-            shell("mkdir -p /sdcard/Download/rdpsync-${peer.evidenceName}")
-            shell("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-${peer.evidenceName}/")
-            compose.runOnUiThread { showing.value = false }
-            RdpConnector.disconnect()
-            automation.serviceInfo = originalService
-            assertTrue("Only owned synthetic MediaStore seed rows must be removed", (0 until seedCleanup.length()).all { seedCleanup.getJSONObject(it).getBoolean("removed") })
+            measurements.put("picker_events", pickerEvents)
+            cleanupStep("precleanup-native-state") {
+                measurements.put("diagnostics", RdpConnector.getDiag())
+                    .put("native_transfer_state", RdpConnector.nativeFileTransferState().joinToString(","))
+                    .put("precleanup_elapsed_ms", SystemClock.elapsedRealtime())
+            }
+            // Write before screenshot/semantics/disposal: each may itself fail after a test error.
+            cleanupStep("persist-before-cleanup") { persistFailureEvidence() }
+            cleanupStep("final-screenshot") { screenshot("99-transfer-final") }
+            cleanupStep("owned-seed-cleanup") {
+                val seedCleanup = cleanOwnedMediaSeeds()
+                measurements.put("synthetic_seed_cleanup", seedCleanup)
+                assertTrue("Only owned synthetic MediaStore seed rows must be removed", (0 until seedCleanup.length()).all { seedCleanup.getJSONObject(it).getBoolean("removed") })
+            }
+            cleanupStep("final-accessibility") {
+                File(evidence, "accessibility-final.txt").writeText(documentNodes { true }.joinToString("\n") { node ->
+                    try { "${node.packageName} ${node.viewIdResourceName} ${node.text} ${node.contentDescription}" } finally { node.recycle() }
+                })
+            }
+            cleanupStep("persist-before-disposal") { persistFailureEvidence() }
+            cleanupStep("hide-route") { compose.runOnUiThread { showing.value = false } }
+            cleanupStep("disconnect") { RdpConnector.disconnect() }
+            cleanupStep("restore-accessibility-service") { automation.serviceInfo = originalService }
+            cleanupStep("persist-after-disposal") { persistFailureEvidence() }
+            // Cleanup-only failure remains red; body failure retains all cleanup errors as suppressed.
+            if (primaryFailure == null) cleanupFailure?.let { throw it }
         }
     }
 
@@ -464,6 +519,41 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             val match = requireNotNull(Regex("^([0-9a-f]{64})  (.+)$").matchEntire(line)) { raw }
             File(match.groupValues[2]).name to match.groupValues[1]
         }
+    }
+    private fun retainCoachmark(phase: String, value: JSONObject) {
+        value.put("phase", phase)
+        val phases = measurements.optJSONArray("coachmark_phases") ?: JSONArray().also { measurements.put("coachmark_phases", it) }
+        assertTrue("Bounded two-phase immersive readiness evidence", phases.length() < 2)
+        phases.put(value)
+        // Keep the actual acknowledgement receipt for the strict image collector;
+        // a later no-overlay observation must not overwrite it.
+        if (!coachmarkAcknowledged) {
+            measurements.put("system_immersive_coachmark", value)
+        }
+    }
+    private fun focusedCertificateTitle(title: String): Boolean {
+        var count = 0
+        val windows = automation.windows
+        try {
+            for (window in windows) {
+                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION || !window.isFocused) continue
+                val root = window.root ?: continue
+                val nodes = mutableListOf<AccessibilityNodeInfo>()
+                fun visit(node: AccessibilityNodeInfo) {
+                    nodes += node
+                    for (i in 0 until node.childCount) {
+                        if (nodes.size >= 512) break
+                        node.getChild(i)?.let(::visit)
+                    }
+                }
+                visit(root)
+                try {
+                    if (root.packageName?.toString() == context.packageName &&
+                        nodes.count { it.isVisibleToUser && it.text?.toString() == title } == 1) count++
+                } finally { nodes.forEach { it.recycle() } }
+            }
+        } finally { windows.forEach { it.recycle() } }
+        return count == 1
     }
     private fun openFiles(label: String) {
         val started = SystemClock.elapsedRealtime()

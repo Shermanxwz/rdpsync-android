@@ -379,4 +379,106 @@ static void legacy_delete_tests(void) {
     cleanup(&f);
 }
 
-int main(void){protocol_owner=pthread_self();legacy_delete_tests();xrdp_broad_create_tests();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
+/* xrdp CID_CREATE_REQ drops its mkdir bookkeeping WITHOUT closing FileId.
+ * Replay the real independent metadata-open / legacy-disposition / close. */
+static uint32_t xrdp_mkdir_retained(Fixture* f, const char* path) {
+    BYTE body[512]={0};put32(body,0x0016019f);put32(body+12,FILE_ATTRIBUTE_DIRECTORY);
+    put32(body+16,7);put32(body+20,FILE_CREATE);put32(body+24,0x21);
+    size_t n=path_bytes(path,body+32)+2;put32(body+28,(uint32_t)n);
+    assert(!request(f,IRP_MJ_CREATE,0,0,body,32+n));return get32(sent+16);
+}
+static void retained_mkdir_delete_tests(void) {
+    Fixture f;setup(&f,2);
+    RdpWorkspaceSpace space;
+    uint32_t retained=xrdp_mkdir_retained(&f,"/第一层");
+    assert(!rdp_ws_space(f.ws,&space)&&space.entries==1);
+    uint32_t deleting=legacy_metadata(&f,"/第一层");
+    assert(!set(&f,deleting,FileDispositionInformation,NULL,0));
+    assert(!request(&f,IRP_MJ_CLOSE,0,deleting,NULL,0));
+    uint32_t h=0,info=0;
+    assert(rdp_ws_open(f.ws,0,"第一层",FILE_READ_ATTRIBUTES,7,FILE_OPEN,0,false,0,&h,&info)==RDP_WS_OBJECT_NAME_NOT_FOUND);
+    assert(!rdp_ws_space(f.ws,&space)&&space.entries==0&&space.used_bytes==0);
+    /* Detached IDs remain closeable, but never usable as directory capabilities. */
+    RdpWorkspaceEntry entry;assert(rdp_ws_stat(f.ws,41,retained,&entry)==RDP_WS_INVALID_HANDLE);
+    assert(directory(&f,retained,"*",true)==(uint32_t)STATUS_INVALID_HANDLE);
+    assert(rdp_ws_set_basic(f.ws,41,retained,0,-1,-1)==RDP_WS_INVALID_HANDLE);
+    assert(rdp_ws_flush(f.ws,41,retained)==RDP_WS_INVALID_HANDLE);
+    assert(rdp_ws_mkdir_at(f.ws,41,retained,"new")==RDP_WS_INVALID_HANDLE);
+    char source[256];snprintf(source,sizeof(source),"%s/source",f.home);
+    int source_fd=open(source,O_CREAT|O_EXCL|O_WRONLY,0600);assert(source_fd>=0);close(source_fd);
+    source_fd=open(source,O_RDONLY);assert(source_fd>=0);
+    assert(rdp_ws_import_at(f.ws,41,retained,"new",source_fd,0,NULL,NULL)==RDP_WS_INVALID_HANDLE);close(source_fd);
+    uint32_t replacement=xrdp_mkdir_retained(&f,"/第一层");
+    seed_file(&f,"第一层/child");
+    assert(!request(&f,IRP_MJ_CLOSE,0,retained,NULL,0));
+    assert(!rdp_ws_stat(f.ws,41,replacement,&entry));
+    assert(!rdp_ws_space(f.ws,&space)&&space.entries==2&&space.used_bytes==0);
+    assert(!rdp_ws_open(f.ws,0,"第一层/child",GENERIC_READ,7,FILE_OPEN,0,false,0,&h,&info));
+    assert(!rdp_ws_close(f.ws,0,h));
+    cleanup(&f);
+}
+
+static void legacy_directory_close_guards(void) {
+    Fixture f; uint32_t retained,deleting,h,info; BYTE yes=1,no=0;
+    char path[512],old[512],child[600];struct stat st;
+    /* Recheck actual emptiness, readonly bits and name identity at CLOSE. */
+    for (int variant=0;variant<3;variant++) {
+        setup(&f,2);retained=xrdp_mkdir_retained(&f,"/guard");
+        uint32_t cancel=create(&f,"/guard",DELETE,FILE_OPEN,FILE_DIRECTORY_FILE);
+        deleting=legacy_metadata(&f,"/guard");assert(!set(&f,deleting,FileDispositionInformation,NULL,0));
+        snprintf(path,sizeof(path),"%s/shared-drive/guard",f.home);
+        snprintf(old,sizeof(old),"%s/shared-drive/moved",f.home);
+        snprintf(child,sizeof(child),"%s/child",path);
+        if(variant==0){int fd=open(child,O_CREAT|O_EXCL|O_WRONLY,0600);assert(fd>=0);close(fd);}
+        if(variant==1)assert(!chmod(path,0500));
+        if(variant==2){assert(!rename(path,old));assert(!mkdir(path,0700));}
+        assert(request(&f,IRP_MJ_CLOSE,0,deleting,NULL,0)==(uint32_t)(variant==0?STATUS_DIRECTORY_NOT_EMPTY:STATUS_ACCESS_DENIED));
+        assert(!stat(path,&st)&&S_ISDIR(st.st_mode));
+        RdpWorkspaceSpace space;assert(!rdp_ws_space(f.ws,&space)&&space.entries==1&&space.used_bytes==0);
+        /* Release accepted intent explicitly, so synthetic external mutations
+         * do not accidentally turn teardown into a second deletion attempt. */
+        assert(!set(&f,cancel,FileDispositionInformation,&no,1));
+        assert(!request(&f,IRP_MJ_CLOSE,0,cancel,NULL,0));
+        assert(!request(&f,IRP_MJ_CLOSE,0,retained,NULL,0));
+        if(variant==1)assert(!chmod(path,0700));
+        cleanup(&f);
+    }
+    /* An incompatible live lease rejects the legacy disposition, not merely close. */
+    setup(&f,2);retained=xrdp_mkdir_retained(&f,"/leased-dir");
+    assert(!rdp_ws_open(f.ws,0,"leased-dir",FILE_READ_ATTRIBUTES,3,FILE_OPEN,0,false,0,&h,&info));
+    deleting=legacy_metadata(&f,"/leased-dir");
+    assert(set(&f,deleting,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_SHARING_VIOLATION);
+    assert(!request(&f,IRP_MJ_CLOSE,0,deleting,NULL,0));assert(!rdp_ws_close(f.ws,0,h));cleanup(&f);
+    /* Cancellation clears the exception: subsequent ordinary intent must wait. */
+    setup(&f,2);retained=create(&f,"/ordinary",DELETE|FILE_LIST_DIRECTORY,FILE_CREATE,FILE_DIRECTORY_FILE);deleting=legacy_metadata(&f,"/ordinary");
+    assert(!set(&f,deleting,FileDispositionInformation,NULL,0));
+    assert(!set(&f,retained,FileDispositionInformation,&no,1));
+    assert(!set(&f,retained,FileDispositionInformation,&yes,1));
+    assert(!request(&f,IRP_MJ_CLOSE,0,deleting,NULL,0));
+    assert(rdp_ws_open(f.ws,0,"ordinary",FILE_READ_ATTRIBUTES,7,FILE_OPEN,0,false,0,&h,&info)==RDP_WS_DELETE_PENDING);
+    assert(!request(&f,IRP_MJ_CLOSE,0,retained,NULL,0));
+    assert(rdp_ws_open(f.ws,0,"ordinary",FILE_READ_ATTRIBUTES,7,FILE_OPEN,0,false,0,&h,&info)==RDP_WS_OBJECT_NAME_NOT_FOUND);cleanup(&f);
+    /* Regular-file legacy semantics remain last-close, never detached writes. */
+    setup(&f,2);retained=create(&f,"/file",GENERIC_READ|GENERIC_WRITE,FILE_CREATE,FILE_NON_DIRECTORY_FILE);
+    deleting=legacy_metadata(&f,"/file");assert(!set(&f,deleting,FileDispositionInformation,NULL,0));
+    assert(!request(&f,IRP_MJ_CLOSE,0,deleting,NULL,0));
+    assert(rdp_ws_open(f.ws,0,"file",FILE_READ_ATTRIBUTES,7,FILE_OPEN,0,false,0,&h,&info)==RDP_WS_DELETE_PENDING);
+    write_file(&f,retained,0,"x",1);assert(!request(&f,IRP_MJ_CLOSE,0,retained,NULL,0));cleanup(&f);
+    /* Revocation honors ONLY already-accepted close cleanup, matching existing
+     * delete-on-close contract. Unaccepted work is denied/cancelled. */
+    setup(&f,2);retained=xrdp_mkdir_retained(&f,"/revoke");deleting=legacy_metadata(&f,"/revoke");
+    assert(!set(&f,deleting,FileDispositionInformation,NULL,0));rdpsync_drive_revoke(f.drive);
+    assert(rdp_ws_open(f.ws,0,"revoke",FILE_READ_ATTRIBUTES,7,FILE_OPEN,0,false,0,&h,&info)==RDP_WS_OBJECT_NAME_NOT_FOUND);
+    assert(set(&f,deleting,FileDispositionInformation,NULL,0)==(uint32_t)STATUS_DEVICE_NOT_READY);cleanup(&f);
+    /* Parent rename/replacement does not redirect the captured directory
+     * capability onto a same-named replacement child. */
+    setup(&f,2);h=xrdp_mkdir_retained(&f,"/parent");retained=xrdp_mkdir_retained(&f,"/parent/child");
+    deleting=legacy_metadata(&f,"/parent/child");assert(!set(&f,deleting,FileDispositionInformation,NULL,0));
+    snprintf(path,sizeof(path),"%s/shared-drive/parent",f.home);snprintf(old,sizeof(old),"%s/shared-drive/old-parent",f.home);
+    assert(!rename(path,old));assert(!mkdir(path,0700));snprintf(child,sizeof(child),"%s/child",path);assert(!mkdir(child,0700));
+    assert(!request(&f,IRP_MJ_CLOSE,0,deleting,NULL,0));assert(!stat(child,&st));
+    assert(rdp_ws_mkdir_at(f.ws,41,retained,"new")==RDP_WS_INVALID_HANDLE);
+    assert(!request(&f,IRP_MJ_CLOSE,0,retained,NULL,0));assert(!stat(child,&st));cleanup(&f);
+}
+
+int main(void){protocol_owner=pthread_self();retained_mkdir_delete_tests();legacy_directory_close_guards();legacy_delete_tests();xrdp_broad_create_tests();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}

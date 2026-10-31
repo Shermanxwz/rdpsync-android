@@ -51,6 +51,23 @@ rules and conflicting delete-sharing leases. No stored handle access is upgraded
 normal one-byte disposition and all local/JNI operations retain DELETE checks.
 This is a documented legacy command shape, not detection or trust of a peer name.
 
+Pinned xrdp 0.10.6.1 drops its mkdir request bookkeeping without closing the
+returned directory FileId. For an exact metadata-open legacy **directory**
+disposition only, the requesting CLOSE revalidates inode/owner/writable mode,
+empty-directory status and share-delete leases, then removes that directory's
+namespace entry even if the original mkdir handle remains. All retained IDs for
+that removed inode become CLOSE-only tombstones: they cannot list, import,
+create, mutate, or delete a same-named replacement. Accounting changes once.
+Cancellation/ordinary dispositions clear this exception; ordinary broker/JNI
+delete-on-last-close and regular-file behavior are unchanged. Revocation still
+performs previously accepted delete-on-close cleanup, not new delete requests.
+
+Unclosed server mkdir IDs (including removed-directory tombstones) still count
+against the fixed **128-handle budget** until CLOSE or disconnect. The client
+does not automatically close active, undeleted directories to conceal this
+server limitation. This compatibility path applies only to explicitly deleted,
+revalidated empty directories; it is not general Windows filesystem parity.
+
 The pinned xrdp remove callback reports `STATUS_DIRECTORY_NOT_EMPTY` as Linux
 `EBADF`. The synthetic nonempty-rmdir negative control accepts that errno only
 for this operation and requires unchanged directory/child inode identities and

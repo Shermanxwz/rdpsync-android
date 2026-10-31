@@ -34,6 +34,7 @@ typedef struct {
     uint32_t access, share, granted_access, create_options, create_disposition;
     bool append_only, write_through;
     bool directory, read_only, pending, forced_delete;
+    bool legacy_directory_unlink, namespace_removed;
     char name[RDP_WS_MAX_NAME + 1];
     char path[RDP_WS_MAX_PATH + 1];
     DIR* cursor;
@@ -321,10 +322,15 @@ static uint32_t space_for(RdpWorkspace* ws, uint64_t growth) {
     if (available < RDP_WS_RESERVE_BYTES || growth > available - RDP_WS_RESERVE_BYTES) return RDP_WS_DISK_FULL;
     return RDP_WS_OK;
 }
-static WorkspaceHandle* get_handle(RdpWorkspace* ws, uint64_t owner, uint32_t id) {
+static WorkspaceHandle* find_handle(RdpWorkspace* ws, uint64_t owner, uint32_t id) {
     for (size_t i = 0; i < RDP_WS_MAX_HANDLES; i++)
         if (ws->handles[i].id == id && id && ws->handles[i].owner == owner) return &ws->handles[i];
     return NULL;
+}
+/* Retained xrdp mkdir IDs survive namespace removal only for CLOSE. */
+static WorkspaceHandle* get_handle(RdpWorkspace* ws, uint64_t owner, uint32_t id) {
+    WorkspaceHandle* h = find_handle(ws, owner, id);
+    return h && !h->namespace_removed ? h : NULL;
 }
 static WorkspaceHandle* empty_handle(RdpWorkspace* ws) {
     if (!ws->next_handle) return NULL; /* never recycle IDs after wrap */
@@ -648,8 +654,14 @@ static uint32_t set_delete(RdpWorkspace* ws, uint64_t owner, uint32_t handle, bo
             }
             if (rc == RDP_WS_OK) for (size_t i = 0; i < RDP_WS_MAX_HANDLES; i++) {
                 WorkspaceHandle* other = &ws->handles[i];
-                if (other->id && other->dev == h->dev && other->ino == h->ino) other->pending = deleting || other->forced_delete;
+                if (other->id && other->dev == h->dev && other->ino == h->ino) {
+                    other->pending = deleting || other->forced_delete;
+                    /* Ordinary dispositions/cancellation cannot inherit this exception. */
+                    other->legacy_directory_unlink = false;
+                }
             }
+            if (rc == RDP_WS_OK && legacy_eligible && deleting && h->directory)
+                h->legacy_directory_unlink = true;
         }
     }
     pthread_mutex_unlock(&ws->mutex); return rc;
@@ -813,14 +825,35 @@ static uint32_t close_locked(RdpWorkspace* ws, WorkspaceHandle* h) {
         WorkspaceHandle* other = &ws->handles[i];
         if (other != h && other->id && other->dev == h->dev && other->ino == h->ino) last = false;
     }
-    if (h->pending && last && h->name[0]) {
+    /* Pinned xrdp never closes the original mkdir FileId. Only an accepted
+     * exact legacy directory command may unlink on its requesting CLOSE.
+     * Retained IDs are detached, not granted access or silently recycled. */
+    bool legacy_directory = h->legacy_directory_unlink && h->directory;
+    if (h->pending && !h->namespace_removed && (last || legacy_directory) && h->name[0]) {
         struct stat st;
         if (fstatat(h->parent_fd, h->name, &st, AT_SYMLINK_NOFOLLOW) || !same_inode(h, &st)) rc = RDP_WS_ACCESS_DENIED;
+        else if (legacy_directory && (h->read_only || !(st.st_mode & S_IWUSR))) rc = RDP_WS_ACCESS_DENIED;
         else if (h->directory && !directory_empty(h->fd)) rc = RDP_WS_DIRECTORY_NOT_EMPTY;
-        else if (unlinkat(h->parent_fd, h->name, h->directory ? AT_REMOVEDIR : 0)) rc = from_errno(errno);
-        else {
+        if (rc == RDP_WS_OK && legacy_directory) {
+            struct stat current;
+            if (fstat(h->fd, &current) || !same_inode(h, &current) || regular_or_directory(&current) != RDP_WS_OK ||
+                !S_ISDIR(current.st_mode) || !(current.st_mode & S_IWUSR)) rc = RDP_WS_ACCESS_DENIED;
+            for (size_t i = 0; i < RDP_WS_MAX_HANDLES && rc == RDP_WS_OK; i++) {
+                WorkspaceHandle* other = &ws->handles[i];
+                if (same_inode(other, &st) && !(other->share & RDP_WS_DELETE)) rc = RDP_WS_SHARING_VIOLATION;
+            }
+        }
+        if (rc == RDP_WS_OK && unlinkat(h->parent_fd, h->name, h->directory ? AT_REMOVEDIR : 0)) rc = from_errno(errno);
+        else if (rc == RDP_WS_OK) {
             ws->entries--; if (!h->directory) ws->used_bytes -= (uint64_t)st.st_size;
             ws->namespace_epoch++; (void)fsync(h->parent_fd);
+            if (legacy_directory) for (size_t i = 0; i < RDP_WS_MAX_HANDLES; i++) {
+                WorkspaceHandle* other = &ws->handles[i];
+                if (same_inode(other, &st)) {
+                    other->namespace_removed = true;
+                    other->legacy_directory_unlink = false;
+                }
+            }
         }
     }
     if (h->cursor) closedir(h->cursor);
@@ -831,7 +864,7 @@ static uint32_t close_locked(RdpWorkspace* ws, WorkspaceHandle* h) {
 uint32_t rdp_ws_close(RdpWorkspace* ws, uint64_t owner, uint32_t handle) {
     if (!ws) return RDP_WS_INVALID_PARAMETER;
     pthread_mutex_lock(&ws->mutex);
-    WorkspaceHandle* h = get_handle(ws, owner, handle);
+    WorkspaceHandle* h = find_handle(ws, owner, handle);
     uint32_t rc = h ? close_locked(ws, h) : RDP_WS_INVALID_HANDLE;
     pthread_mutex_unlock(&ws->mutex); return rc;
 }

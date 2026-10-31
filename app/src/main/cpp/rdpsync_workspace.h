@@ -83,7 +83,8 @@ typedef struct {
 /* trusted_home_fd is the already validated private runtime HOME directory.
  * Duplicates the descriptor. Creates only shared-drive/shared-drive-pending.
  * Never purges committed files on init/destroy/revoke/restart. Previously
- * accepted delete-on-close intent is applied when its last handle closes. */
+ * accepted delete-on-close intent is applied when its last handle closes,
+ * except exact legacy wire directory intent at its requesting close (below). */
 uint32_t rdp_ws_create(int trusted_home_fd, RdpWorkspaceNameKey name_key, void* name_context,
                        RdpWorkspace** result);
 void rdp_ws_destroy(RdpWorkspace* workspace);
@@ -102,7 +103,10 @@ uint32_t rdp_ws_rename(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,
     const char* new_path, bool replace);
 uint32_t rdp_ws_set_delete(RdpWorkspace* workspace, uint64_t owner, uint32_t handle, bool deleting);
 /* Wire-only length-zero disposition; never exposed by JNI/local API.
- * Requires remote owner, RW handle, exact legacy shape or existing DELETE. */
+ * Requires remote owner, RW handle, exact legacy shape or existing DELETE.
+ * An exact legacy directory request unlinks at its requesting close after
+ * revalidation; retained mkdir IDs then permit CLOSE only. This accommodates
+ * pinned xrdp retaining mkdir handles, without changing ordinary dispositions. */
 uint32_t rdp_ws_wire_legacy_delete(RdpWorkspace* workspace, uint64_t owner, uint32_t handle);
 /* -1 leaves a timestamp unchanged; 0 is the Unix epoch, not a sentinel. */
 uint32_t rdp_ws_set_basic(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,

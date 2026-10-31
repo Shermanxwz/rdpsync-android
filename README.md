@@ -12,10 +12,11 @@ RdpSync is an open Android RDP client that combines remote desktop connections, 
 ## Preview 3: Shared space and refreshed UI (development preview)
 
 The current development work adds a **real RDPDR filesystem drive**, not a renamed
-clipboard transfer. The app’s persistent **Shared space** is the only directory
-exposed: remote and local file operations use the same confined broker. Sharing
-starts **off**; explicit consent defaults to **read-only**, with a separate warning
-and acknowledgment for remote create/write/rename/delete access. Android SAF
+clipboard transfer. The persistent, app-private **Shared space** is the only
+directory exposed: remote and local file operations use the same confined broker.
+Sharing starts **off**; consent applies to the explicitly confirmed target session
+and defaults to **read-only**, with a separate warning and acknowledgment for
+remote create/write/rename/delete access. Android SAF
 imports and exports are deliberate copies, not automatic synchronization with
 phone folders. Opening the Shared space browser alone grants no remote access.
 
@@ -29,9 +30,11 @@ phone folders. Opening the Shared space browser alone grants no remote access.
 - Enforced limits are 1 GiB workspace, 512 MiB per file, 4096 entries and a 128 MiB
   free-space reserve. The drive’s transport backpressure is separate from the
   existing clipboard transfer’s 32 MiB connection allowance.
-- GNOME Remote Desktop 46 does not provide this filesystem-drive service.
-  Unconfirmed, unsupported, rejected and actually accepted states stay distinct;
-  explicit clipboard file transfer remains available where negotiated.
+- The current GNOME Remote Desktop 46 fixture leaves drive access at
+  **REQUESTED / unconfirmed**: no mounted drive or explicit server rejection was
+  confirmed. Unconfirmed, unsupported, rejected and actually accepted states stay
+  distinct. Explicit **CLIPRDR clipboard file transfer** remains a separate
+  fallback where negotiated; it does not establish filesystem-drive support.
 - Main screens, forms, status/consent dialogs and navigation use shared accessible
   design tokens, English/Chinese resources, and light/dark layouts. The established
   fullscreen desktop, touch/IME mapping and certificate enforcement are retained.
@@ -204,7 +207,8 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 Get the latest APK from the project's GitHub Releases page.
 
-- Existing published preview: `v1.1.0-preview`; the follow-up source identifies as `1.1.1-preview` and is not included in that older APK.
+- The existing [Preview 2 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.1.0-preview.2) remains unchanged; its APK does not include Preview 3 changes.
+- Preview 3 (`1.2.0-preview.3-debug`, `com.rdp.sync.preview3`) is a candidate, not yet a published release. Publication awaits all exact-commit acceptance gates; no candidate download is promised here.
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 
