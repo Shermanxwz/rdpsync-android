@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color as ComposeColor
@@ -73,6 +74,8 @@ class SessionFullscreenApi29ProbeTest {
     @Volatile private var available = IntSize.Zero
     @Volatile private var phase = "initial"
     private var editor: EditText? = null
+    private var rotatePhoneScreen: () -> Unit = {}
+    private val orientationSessionKey = mutableStateOf(1)
     private val fullscreen = mutableStateOf(true)
     @Volatile private var baseControlClicks = 0
     @Volatile private var imeControlClicks = 0
@@ -86,7 +89,7 @@ class SessionFullscreenApi29ProbeTest {
         require(commit.matches(Regex("[a-f0-9]{40}")) && tree.matches(Regex("[a-f0-9]{40}")))
         report.put("production_commit", commit).put("production_tree", tree)
             .put("sdk", Build.VERSION.SDK_INT).put("fingerprint", Build.FINGERPRINT)
-            .put("scope", "Production MainActivity, SessionSystemBars and SessionViewportLayout; local EditText only; no RDP connection/network/credentials; no claim about actual app transfer or session-menu UI")
+            .put("scope", "Production MainActivity, session orientation owner, SessionSystemBars and SessionViewportLayout; local EditText only; no RDP connection/network/credentials; no claim about actual app transfer or session-menu UI")
             .put("logical_callbacks", logicalCallbacks).put("samples", samples)
         val previousSetting = shell("settings get secure show_ime_with_hard_keyboard").trim()
         require(previousSetting in setOf("0", "1", "null"))
@@ -94,10 +97,14 @@ class SessionFullscreenApi29ProbeTest {
         val activity = compose.activity
         val originalBars = bars()
         report.put("original_bars", originalBars)
+            .put("original_orientation_request", ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
         try {
             shell("settings put secure show_ime_with_hard_keyboard 1")
-            compose.runOnUiThread { activity.setContent { MaterialTheme { ProbeContent() } } }
             compose.runOnUiThread { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+            waitFor("known portrait policy before orientation owner mounts") {
+                activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+            }
+            compose.runOnUiThread { activity.setContent { MaterialTheme { ProbeContent() } } }
             acknowledgeFirstUseImmersiveCoachmark()
             awaitFullGeometry("portrait", landscape = false)
             val portrait = logical
@@ -108,7 +115,7 @@ class SessionFullscreenApi29ProbeTest {
             exerciseChromeRoundtrip("portrait", landscape = false, editorIdentity = editorIdentity)
             observeOneLegacyEdgeGesture()
             phase = "rotation"
-            compose.runOnUiThread { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+            compose.runOnUiThread { rotatePhoneScreen() }
             awaitFullGeometry("landscape", landscape = true)
             assertSame("Manifest configChanges should retain the actual MainActivity", activity, compose.activity)
             assertEquals("Fullscreen rotation must retain actual editor/InputConnection owner", editorIdentity, System.identityHashCode(editor))
@@ -119,6 +126,29 @@ class SessionFullscreenApi29ProbeTest {
                 landscape.getInt("view_height").toDouble() / landscape.getInt("root_height") >= 0.95)
             exerciseKeyboard("landscape")
             exerciseChromeRoundtrip("landscape", landscape = true, editorIdentity = editorIdentity)
+            repeat(2) { index ->
+                compose.runOnUiThread { rotatePhoneScreen() }
+                awaitFullGeometry("portrait-repeat-$index", landscape = false)
+                assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, activity.requestedOrientation)
+                compose.runOnUiThread { rotatePhoneScreen() }
+                awaitFullGeometry("landscape-repeat-$index", landscape = true)
+                assertEquals(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, activity.requestedOrientation)
+                assertSame(activity, compose.activity)
+                assertEquals(editorIdentity, System.identityHashCode(editor))
+            }
+            report.put("production_orientation_roundtrips", 2)
+            val staleRotate = rotatePhoneScreen
+            compose.runOnUiThread { orientationSessionKey.value = 2 }
+            awaitFullGeometry("new-session-restores-portrait", landscape = false)
+            assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, activity.requestedOrientation)
+            // A retained old callback must not mutate the successor's orientation.
+            compose.runOnUiThread { staleRotate() }
+            assertEquals(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT, activity.requestedOrientation)
+            compose.runOnUiThread { rotatePhoneScreen() }
+            awaitFullGeometry("new-session-rotates-landscape", landscape = true)
+            assertEquals(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE, activity.requestedOrientation)
+            report.put("session_key_replacement_restored_predecessor", true)
+                .put("disposed_callback_ignored", true)
             phase = "dispose-fullscreen"
             compose.runOnUiThread { activity.setContent { MaterialTheme { Box(Modifier.fillMaxSize()) } } }
             waitFor("disposing fullscreen restores original bars") {
@@ -126,6 +156,10 @@ class SessionFullscreenApi29ProbeTest {
                 current.getBoolean("status") == originalBars.getBoolean("status") &&
                     current.getBoolean("navigation") == originalBars.getBoolean("navigation")
             }
+            waitFor("disposing session restores original orientation request") {
+                activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+            }
+            report.put("restored_orientation_request", activity.requestedOrientation)
             report.put("restored_bars", bars())
             screenshot("08-exit-restored-bars")
             report.put("success", true)
@@ -154,6 +188,8 @@ class SessionFullscreenApi29ProbeTest {
 
     @Composable private fun ProbeContent() {
         val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+        val rotate = rememberSessionOrientation(orientationSessionKey.value)
+        SideEffect { rotatePhoneScreen = rotate }
         SessionSystemBars(fullscreen.value)
         Box(Modifier.fillMaxSize().onSizeChanged { available = it }) {
             SessionViewportLayout(

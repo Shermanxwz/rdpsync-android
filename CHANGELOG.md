@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.0-preview.4
+
+- Add a session-menu “Rotate screen” action to switch phone portrait/landscape without restarting the session; restore the prior orientation policy when leaving.
+- Use `RDPsync` consistently for the launcher and app title.
+- Publish as a separate development-signed `.preview4` package; earlier preview installs and data are not overwritten or automatically migrated.
+
 ## 1.2.0 Preview 3 — implementation and release scope
 
 - Added an opt-in RDPDR filesystem for the persistent app-private Shared space, with read-only default and separate read/write consent. The app and remote peer access the same confined workspace; explicit Android file-picker import/export copies do not synchronize phone folders.

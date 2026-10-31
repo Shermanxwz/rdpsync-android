@@ -49,6 +49,62 @@ def composition_frames(value):
     return []
 
 
+
+def rotation_frames(value):
+    """Require all live phone rotations and both actual software-keyboard runs."""
+    rotations = value.get('phone_screen_rotations', [])
+    targets = [True, False, True, False, True, False, True]
+    assert len(rotations) == len(targets), 'Missing actual phone rotation'
+    frames = []
+    for index, (row, target) in enumerate(zip(rotations, targets), 1):
+        assert row.get('target_landscape') is target and row.get('fullscreen') is True
+        assert row.get('ime_open') is (index >= 6)
+        assert row.get('actual_pixels_and_touch_passed') is True
+        assert type(row.get('before_frame')) is int and row['after_frame'] > row['before_frame']
+        assert row['width'] > 0 and row['height'] > 0 and row['width'] != row['height']
+        assert (row['width'] > row['height']) is target
+        assert row['native_generation'] > 0 and row['desktop_view_identity'] != 0
+        view = row['verified_viewport']
+        assert (view['remote_width'], view['remote_height']) == (row['width'], row['height'])
+        assert view['view_width'] > 0 and view['view_height'] > 0
+        assert view['red_probe']['inside_actual_view'] is True
+        assert view['touch_probe']['inside_actual_view'] is True
+        frames.append(f"rotation-{index}-{'landscape' if target else 'portrait'}{'-ime' if index >= 6 else ''}.png")
+    assert len({row['native_generation'] for row in rotations}) == 1
+    assert len({row['desktop_view_identity'] for row in rotations}) == 1
+    original = value.get('original_requested_orientation')
+    assert type(original) is int and value.get('disconnect_restored_requested_orientation') == original
+    runs = value.get('software_keyboard_runs', [])
+    assert len(runs) == 2, 'Missing real keyboard run before/after rotation'
+    for run in runs:
+        plan = run['declared_plan']
+        pinyin = plan['mode'] == 'pinyin-compose-commit-newline'
+        assert plan['mode'] in ('pinyin-compose-commit-newline', 'latin-direct-newline')
+        assert plan['gestures'] == (['a', 'commit-Enter', 'newline-Enter'] if pinyin else ['a', 'newline-Enter'])
+        assert [key['stage'] for key in run['keys']] == (['type-a', 'commit-composition', 'newline'] if pinyin else ['type-a', 'newline'])
+        if pinyin:
+            assert run.get('composition_kept_local') is True
+        assert run['exact_remote_text_and_pixels_passed'] is True
+        assert run['actual_text'] == run['expected_text'] == run['before_text'] + 'a\n'
+        assert run['connection_receipts'], 'Missing observed editor connection operations'
+    assert runs[1]['before_text'] == runs[0]['actual_text']
+    frames += ['post-rotation-' + name for name in ('04d0-ime-declared-layout.png',
+               '04d2-ime-before-newline-enter.png', '04d3-ime-after-enter.png')]
+    if runs[1]['declared_plan']['mode'] == 'pinyin-compose-commit-newline':
+        frames += ['post-rotation-' + name for name in ('04d2a-ime-composing-a.png',
+                   '04d2-ime-before-commit-composition-enter.png', '04d2c-ime-after-commit-composition-enter.png',
+                   '04d2b-ime-composition-committed.png')]
+    return frames
+
+
+def validate_navigation_rotation(value):
+    assert value.get('passed') is True and 'failure' not in value
+    assert value.get('original_orientation') == value.get('restored_orientation') == 1
+    assert value.get('scope'), 'Missing actual navigation scope'
+    assert value.get('fixture_password_format') == 1
+    assert type(value.get('fixture_id')) is int and value['fixture_id'] > 0
+
+
 def directories(kind):
     if kind == 'classic':
         return ['rdpsync-evidence']
@@ -63,6 +119,7 @@ def validate_ledger(directory, value):
                     'transient_system_bar_reveal_verified', 'same_pin_reconnect_without_prompt',
                     'changed_certificate_blocked_until_explicit_reapproval', 'unsupported_resize_preserved_session'):
             assert value.get(key) is True, f'Missing classic completion: {key}'
+        rotation_frames(value)
         assert value.get('touch_attempts') and all(t.get('passed') is True for t in value['touch_attempts'])
     else:
         assert value.get('success') is True, f'Incomplete ledger: {directory}'
@@ -98,7 +155,9 @@ def validate_ime_setting(value):
     assert set(streams) == expected
     for key, stream in streams.items():
         scope = 'settings' if key == 'provider' else 'ime'
-        assert stream['scope'] == scope and stream['command_source'] == ('dumpsys -t 2 settings' if scope == 'settings' else 'dumpsys -t 2 input_method')
+        assert type(stream['command_timeout_ms']) is int and 0 < stream['command_timeout_ms'] <= 6000
+        if scope == 'settings': assert stream['command_timeout_ms'] == 5000
+        assert stream['scope'] == scope and stream['command_source'] == ('dumpsys -t 2 settings' if scope == 'settings' else 'dumpsys -t 5 input_method')
         assert stream['producer_eof'] is True and stream['complete'] is True and stream['failure'] == ''
         assert stream['exit_status'] == 0 and stream['exit_trailers'] == 1
         assert stream['source_limit'] == 16*1024*1024 and stream['line_prefix_limit'] == 8192 and stream['selected_limit'] == 65536
@@ -256,7 +315,9 @@ class Collector:
             if filename.endswith('.json'):
                 value = json.loads(data)
                 if not self.best_effort:
-                    if filename == 'ime-setting-receipt.json':
+                    if filename == 'navigation-back-rotation.json':
+                        validate_navigation_rotation(value)
+                    elif filename == 'ime-setting-receipt.json':
                         validate_ime_setting(value)
                     else:
                         validate_ledger(directory, value)
@@ -281,8 +342,10 @@ class Collector:
                     errors.append(str(error))
                     if not self.best_effort:
                         raise
+            navigation = {}
             if kind == 'classic':
                 try:
+                    navigation = json.loads(self.pull('rdpsync-evidence', 'navigation-back-rotation.json'))
                     prerequisite = json.loads(self.pull('rdpsync-evidence', 'ime-setting-receipt.json'))
                     dumps = {}
                     for name in IME_DUMPS:
@@ -300,7 +363,29 @@ class Collector:
                 if directory == 'rdpsync-shared-drive-evidence':
                     frames = list(DRIVE_FRAMES)
                 if kind == 'classic':
-                    frames.append('diagnostics.txt')
+                    frames += ['diagnostics.txt', 'navigation-rotation-before-back.png', 'navigation-rotation-back-restored.png']
+                    if navigation.get('system_immersive_coachmark', {}).get('acknowledged'):
+                        frames.append('navigation-system-immersive-coachmark.png')
+                    if self.best_effort:
+                        for index, row in enumerate(values.get(directory, {}).get('phone_screen_rotations', []), 1):
+                            filename = f'rotation-{index}-failure.png'
+                            if row.get('failure') and row.get('failure_screenshot') == filename:
+                                frames.append(filename)
+                    try:
+                        frames += rotation_frames(values.get(directory, {}))
+                    except (AssertionError, KeyError) as error:
+                        errors.append(f'Phone rotation incomplete: {error}')
+                        if not self.best_effort:
+                            raise
+                        # Preserve partial new-feature evidence without accepting
+                        # an incomplete sequence; each missing frame stays an error.
+                        frames += [f"rotation-{index}-{'landscape' if index % 2 else 'portrait'}{'-ime' if index >= 6 else ''}.png"
+                                   for index in range(1, 8)]
+                        frames += ['post-rotation-' + name for name in (
+                            '04d0-ime-declared-layout.png', '04d2-ime-before-newline-enter.png',
+                            '04d3-ime-after-enter.png', '04d2a-ime-composing-a.png',
+                            '04d2-ime-before-commit-composition-enter.png', '04d2c-ime-after-commit-composition-enter.png',
+                            '04d2b-ime-composition-committed.png', '04d4-ime-key-failure-before-hide.png')]
                     try:
                         frames += composition_frames(values.get(directory, {}))
                     except AssertionError as error:

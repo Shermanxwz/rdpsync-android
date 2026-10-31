@@ -3,6 +3,7 @@ package com.rdp.sync
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Rect
@@ -28,6 +29,10 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
+import com.rdp.sync.database.DeviceDatabase
+import com.rdp.sync.repository.DeviceRepository
+import com.rdp.sync.ui.navigation.AppNavigation
+import kotlinx.coroutines.runBlocking
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.rdp.ViewportTransform
@@ -48,13 +53,118 @@ import kotlin.math.max
 @RunWith(AndroidJUnit4::class)
 class RdpFixtureInstrumentedTest {
     @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("rdpFixture")
-    @get:Rule(order = 1) val imeSetting = FixtureImeSettingRule()
+    private val imeSetting = FixtureImeSettingRule()
+    // Only the real keyboard test owns its prerequisite files. The no-network
+    // navigation test never opens the IME and must not overwrite those receipts.
+    @get:Rule(order = 1) val keyboardPrerequisite = org.junit.rules.TestRule { base, description ->
+        if (description.methodName == "realDesktopDisplayInputResizeAndWeakLink")
+            imeSetting.apply(base, description) else base
+    }
     @get:Rule(order = 2) val compose = createAndroidComposeRule<MainActivity>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "rdp-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
+    private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
     private val latencySamples = mutableListOf<Long>()
     private var systemCoachmarkAcknowledged = false
+    private var keyboardScreenshotPrefix = ""
+
+    @Test fun actualNavigationBackRestoresSessionOrientationWithoutConnecting() {
+        assertEquals("true", InstrumentationRegistry.getArguments().getString("rdpFixture"))
+        val activity = compose.activity
+        val original = activity.requestedOrientation
+        val database = DeviceDatabase.getDatabase(instrumentation.targetContext)
+        val dao = database.deviceDao()
+        val repository = DeviceRepository(database)
+        // Empty host is rejected by production CertificateEndpoint before network
+        // connect. Use the production encrypted write boundary: MainActivity may
+        // already have subscribed, so a later raw legacy row would bypass its
+        // one-time migration and correctly appear credential-unavailable.
+        val device = Device(name = "Rotation navigation fixture", host = "", username = "", password = "")
+        assertNull("Dedicated fixture name must not replace existing data", runBlocking { dao.getDeviceByName(device.name) })
+        var fixtureId: Long? = null
+        val receipt = JSONObject().put("original_orientation", ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
+            .put("scope", "Real AppNavigation list/detail/session route and system Back; invalid empty endpoint; no remote connection")
+        var primaryFailure: Throwable? = null
+        try {
+            compose.runOnUiThread { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
+            waitFor("portrait before real route entry") { activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT }
+            fixtureId = runBlocking { repository.insertDevice(device) }
+            val stored = requireNotNull(runBlocking { dao.getDeviceById(requireNotNull(fixtureId)) })
+            assertEquals("Fixture is stored encrypted before it is shown", 1, stored.passwordFormat)
+            val decoded = requireNotNull(runBlocking { repository.getDeviceById(requireNotNull(fixtureId)) })
+            assertFalse("Actual repository can decrypt the fixture", decoded.credentialUnavailable)
+            receipt.put("fixture_id", fixtureId).put("fixture_password_format", stored.passwordFormat)
+            compose.runOnUiThread { activity.setContent { MaterialTheme { boundedScroll.Bind(); AppNavigation() } } }
+            waitFor("fixture profile appears in actual device list") {
+                compose.onAllNodesWithText(device.name).fetchSemanticsNodes().size == 1
+            }
+            compose.onNodeWithText(device.name).performClick()
+            waitFor("actual detail exposes connect for available encrypted fixture") {
+                compose.onAllNodesWithText("连接远程桌面").fetchSemanticsNodes().size == 1
+            }
+            compose.onNodeWithText("连接远程桌面").performClick()
+            waitFor("invalid endpoint is rejected before network") {
+                compose.onAllNodesWithText("连接地址或服务器名称无效，无法安全验证证书。").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertFalse(RdpConnector.isConnected())
+            receipt.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(activity,
+                { compose.mainClock.advanceTimeBy(32) }, { screenshot("navigation-system-immersive-coachmark") },
+                { receipt.put("system_immersive_coachmark", it) }, allowAcknowledgement = true))
+            // Even a not-connected session exposes the phone rotation action.
+            tapAccessibleControl("会话菜单")
+            boundedScroll.to(compose.onNodeWithText("旋转屏幕")).performClick()
+            waitFor("actual invalid-endpoint route rotates phone") {
+                activity.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE &&
+                    activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+            }
+            screenshot("navigation-rotation-before-back")
+            assertTrue(instrumentation.uiAutomation.performGlobalAction(
+                android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK))
+            waitFor("real NavHost Back restores detail and previous requested orientation") {
+                activity.requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT &&
+                    activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT &&
+                    compose.onAllNodesWithText("连接远程桌面").fetchSemanticsNodes().size == 1 &&
+                    compose.onAllNodesWithContentDescription("会话菜单").fetchSemanticsNodes().isEmpty()
+            }
+            assertSame(activity, compose.activity)
+            assertFalse(RdpConnector.isConnected())
+            receipt.put("restored_orientation", activity.requestedOrientation).put("passed", true)
+            screenshot("navigation-rotation-back-restored")
+        } catch (failure: Throwable) {
+            primaryFailure = failure
+            receipt.put("passed", false).put("failure", failure.stackTraceToString())
+            runCatching { screenshot("navigation-rotation-failure") }
+            throw failure
+        } finally {
+            var cleanupFailure: Throwable? = null
+            fun cleanup(block: () -> Unit) {
+                try { block() } catch (failure: Throwable) {
+                    if (primaryFailure != null) primaryFailure!!.addSuppressed(failure)
+                    else if (cleanupFailure == null) cleanupFailure = failure else cleanupFailure!!.addSuppressed(failure)
+                }
+            }
+            cleanup { File(evidence, "navigation-back-rotation.json").writeText(receipt.toString(2)) }
+            cleanup { shellOutput("mkdir -p /sdcard/Download/rdpsync-evidence") }
+            cleanup { shellOutput("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-evidence/") }
+            // Dispose the route's owner before restoring the outer test policy,
+            // including failure midway through an overridden session.
+            cleanup {
+                compose.runOnUiThread { activity.setContent {} }
+                compose.waitForIdle()
+            }
+            cleanup {
+                fixtureId?.let { id ->
+                    runBlocking { dao.getDeviceById(id)?.let { row ->
+                        check(row.name == device.name && row.host == device.host) { "Fixture row identity changed; refusing cleanup" }
+                        dao.deleteDevice(row)
+                    } }
+                }
+            }
+            cleanup { compose.runOnUiThread { activity.requestedOrientation = original } }
+            if (primaryFailure == null) cleanupFailure?.let { throw it }
+        }
+    }
 
     @Test fun realDesktopDisplayInputResizeAndWeakLink() {
         measurements.put("fixture_app_locale", appLocale.receipt)
@@ -74,10 +184,12 @@ class RdpFixtureInstrumentedTest {
         val showing = mutableStateOf(true)
         val device = mutableStateOf(Device(id = 900001, name = "Isolated CI fixture", host = "10.0.2.2", port = 3389,
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768))
+        val originalOrientation = compose.activity.requestedOrientation
+        measurements.put("original_requested_orientation", originalOrientation)
         val originalBars = systemBarVisibility()
         measurements.put("original_system_bars", originalBars)
         val connectStarted = SystemClock.elapsedRealtime()
-        compose.runOnUiThread { compose.activity.setContent { MaterialTheme { if (showing.value) RdpConnectionScreen(device.value) { showing.value = false } } } }
+        compose.runOnUiThread { compose.activity.setContent { MaterialTheme { boundedScroll.Bind(); if (showing.value) RdpConnectionScreen(device.value) { showing.value = false } } } }
         try {
             approveCertificate(expectedFingerprint, changed = false, authRequestsBefore = authBeforeFirstTrust)
             waitFor("first real RDP frame", 60_000) { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && fixtureReady() }
@@ -154,10 +266,18 @@ class RdpFixtureInstrumentedTest {
             assertTrue("connected native generation must be present", beforeRotateGeneration > 0)
             val beforeRotateSessionId = fixtureState().getString("session_id")
             val beforeRotateDesktopPid = fixtureState().getInt("desktop_pid")
-            compose.runOnUiThread { compose.activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE }
+            tapAccessibleControl("进入全屏")
+            rotateThroughSessionMenu(landscape = true, fullscreen = true, requireIme = false)
+            val fullscreenRotationFrame = RdpConnector.nativeGetFrameId()
+            val fullscreenRotationHeight = RdpConnector.getHeight()
+            useBorderedToolbar()
             waitFor("live landscape resize without disconnect", 25_000) {
-                RdpConnector.isConnected() && RdpConnector.getWidth() > RdpConnector.getHeight() && RdpConnector.nativeGetFrameId() > beforeRotateFrame
+                RdpConnector.isConnected() && RdpConnector.getWidth() > RdpConnector.getHeight() &&
+                    RdpConnector.getHeight() < fullscreenRotationHeight &&
+                    RdpConnector.nativeGetFrameId() > fullscreenRotationFrame &&
+                    fixtureSize(RdpConnector.getWidth(), RdpConnector.getHeight())
             }
+            assertTrue("rotation produces new remote frame", RdpConnector.nativeGetFrameId() > beforeRotateFrame)
             assertEquals("rotation must keep the same native RDP connection", beforeRotateGeneration, RdpConnector.nativeGetTelemetry()[11])
             measurements.put("rotation_preserved_native_generation", beforeRotateGeneration)
             assertEquals("rotation must preserve the X desktop session", beforeRotateSessionId, fixtureState().getString("session_id"))
@@ -227,6 +347,10 @@ class RdpFixtureInstrumentedTest {
             measurements.put("fullscreen_new_region_exact_rgb", assertFullscreenBackgroundOutsideHandle(newRegionX, newRegionY)
                 .put("prior_remote_height", compactHeight))
             screenshot("04f-landscape-true-fullscreen")
+            repeat(2) {
+                rotateThroughSessionMenu(landscape = false, fullscreen = true, requireIme = false)
+                rotateThroughSessionMenu(landscape = true, fullscreen = true, requireIme = false)
+            }
             exerciseFullscreenMenuBack(beforeRotateGeneration, beforeRotateSessionId, beforeRotateDesktopPid)
             exerciseTransientSystemBars(fullscreenWidth, fullscreenHeight, beforeRotateGeneration,
                 beforeRotateSessionId, beforeRotateDesktopPid)
@@ -248,7 +372,11 @@ class RdpFixtureInstrumentedTest {
             // A changed session must return to touch-first even after trackpad use.
             compose.onNodeWithContentDescription("切换到触控板").performClick()
             compose.onNodeWithContentDescription("切换到直接触摸").assertExists()
-            compose.runOnUiThread { showing.value = false }
+            tapAccessibleControl("断开")
+            waitFor("disconnect restores previous orientation policy") {
+                !showing.value && compose.activity.requestedOrientation == originalOrientation
+            }
+            measurements.put("disconnect_restored_requested_orientation", originalOrientation)
             waitFor("clean teardown") { !RdpConnector.isConnected() }
             waitFor("disposable X session terminated", 90_000) { !fixtureReady() }
             preferences.edit().putString("resolution_mode", "PROFILE").commit()
@@ -618,7 +746,7 @@ class RdpFixtureInstrumentedTest {
             // Preserve the actual contemporaneous image, not a second delayed capture.
             if (screenshotIndex < 4 || (policy.showing.isNotEmpty() && screenshotIndex < 16) || saveAs != null) {
                 val name = saveAs ?: "04g-system-edge-observation-${screenshotIndex++}"
-                File(evidence, "$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+                File(evidence, "$keyboardScreenshotPrefix$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
             }
             shot.recycle()
             val server = fixtureState()
@@ -712,6 +840,95 @@ class RdpFixtureInstrumentedTest {
             compose.onAllNodesWithContentDescription("进入全屏").fetchSemanticsNodes().size == 1 &&
                 desktopBounds().getBoolean("status_bar_visible")
         }
+    }
+
+    /** Actual product menu tap, physical display geometry and live RDP evidence. */
+    private fun rotateThroughSessionMenu(landscape: Boolean, fullscreen: Boolean, requireIme: Boolean) {
+        val activity = compose.activity
+        var originalView: RdpDesktopView? = null
+        compose.runOnUiThread { originalView = desktop() }
+        val generation = RdpConnector.nativeGetTelemetry()[11]
+        val before = fixtureState()
+        val frame = RdpConnector.nativeGetFrameId()
+        val rotations = measurements.optJSONArray("phone_screen_rotations") ?: JSONArray().also {
+            measurements.put("phone_screen_rotations", it)
+        }
+        val receipt = JSONObject().put("target_landscape", landscape).put("fullscreen", fullscreen)
+            .put("ime_open", requireIme).put("before_frame", frame).put("native_generation", generation)
+            .put("before_viewport", rotationViewportEvidence()).put("before_desktop_bounds", desktopBounds())
+            .put("before_server_last_press", before.getJSONArray("last_press"))
+        rotations.put(receipt)
+        try {
+            tapAccessibleControl(if (fullscreen) "会话菜单" else "会话工具")
+            boundedScroll.to(compose.onNodeWithText("旋转屏幕")).assertIsDisplayed()
+            tapObservedAppPopupItem("旋转屏幕")
+            waitFor("menu rotates actual phone and live framebuffer", 25_000) {
+                val configuration = activity.resources.configuration
+                configuration.orientation == (if (landscape) Configuration.ORIENTATION_LANDSCAPE else Configuration.ORIENTATION_PORTRAIT) &&
+                    RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > frame &&
+                    (RdpConnector.getWidth() > RdpConnector.getHeight()) == landscape &&
+                    fixtureSize(RdpConnector.getWidth(), RdpConnector.getHeight()) && desktopHasWindowFocus() &&
+                    (!requireIme || imeVisible())
+            }
+            receipt.put("after_viewport", rotationViewportEvidence()).put("after_desktop_bounds", desktopBounds())
+            assertSame("Phone rotation retains MainActivity", activity, compose.activity)
+            compose.runOnUiThread { assertSame("Phone rotation retains desktop editor owner", originalView, desktop()) }
+            assertEquals("Phone rotation retains RDP generation", generation, RdpConnector.nativeGetTelemetry()[11])
+            val after = fixtureState()
+            assertEquals(before.getString("session_id"), after.getString("session_id"))
+            assertEquals(before.getInt("desktop_pid"), after.getInt("desktop_pid"))
+            assertEquals("Rotation menu must not leak remote clicks", before.getInt("clicks"), after.getInt("clicks"))
+            assertEquals(if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+                activity.requestedOrientation)
+            if (fullscreen && !requireIme) assertFullscreenDefault("rotation_${rotations.length()}_fullscreen")
+            if (fullscreen && requireIme) {
+                compose.onNodeWithContentDescription("会话菜单").assertIsDisplayed()
+                compose.onNodeWithContentDescription("进入全屏").assertDoesNotExist()
+                val bounds = desktopBounds()
+                val unobscuredHeight = bounds.getInt("window_height") - bounds.getInt("safe_top") -
+                    max(bounds.getInt("safe_bottom"), bounds.getInt("ime_bottom"))
+                assertTrue("Rotated IME leaves usable desktop", unobscuredHeight > 0)
+                assertTrue("No bordered toolbar consumes rotated IME viewport", bounds.getInt("height").toDouble() / unobscuredHeight >= 0.90)
+            }
+            assertColor(40, 40, Color.RED)
+            tapAndObserve(remoteX = 400f, remoteY = 40f)
+            if (requireIme) assertTrue("Touch after phone rotation retains visible IME", imeVisible())
+            receipt.put("after_frame", RdpConnector.nativeGetFrameId()).put("width", RdpConnector.getWidth())
+                .put("height", RdpConnector.getHeight()).put("desktop_view_identity", System.identityHashCode(originalView))
+                .put("actual_pixels_and_touch_passed", true)
+                .put("verified_viewport", rotationViewportEvidence()).put("verified_desktop_bounds", desktopBounds())
+            screenshot("rotation-${rotations.length()}-${if (landscape) "landscape" else "portrait"}${if (requireIme) "-ime" else ""}")
+        } catch (failure: Throwable) {
+            receipt.put("failure", failure.stackTraceToString())
+            // Capture the still-open IME and actual crop before the caller hides
+            // it in finally. Diagnostic failures must not replace the assertion.
+            runCatching { receipt.put("failure_viewport", rotationViewportEvidence()) }
+            runCatching { receipt.put("failure_desktop_bounds", desktopBounds()) }
+            runCatching { receipt.put("failure_server_state", fixtureState()) }
+            runCatching {
+                val name = "rotation-${rotations.length()}-failure"
+                screenshot(name)
+                receipt.put("failure_screenshot", "$name.png")
+            }
+            throw failure
+        }
+    }
+
+    private fun rotationViewportEvidence(): JSONObject {
+        val snapshot = viewportSnapshot()
+        fun point(x: Float, y: Float): JSONObject {
+            val local = snapshot.toScreen(x, y)
+            return JSONObject().put("remote_x", x).put("remote_y", y)
+                .put("local_x", local.x).put("local_y", local.y)
+                .put("inside_actual_view", local.x >= 0 && local.x < snapshot.viewWidth &&
+                    local.y >= 0 && local.y < snapshot.viewHeight)
+        }
+        return JSONObject().put("view_width", snapshot.viewWidth).put("view_height", snapshot.viewHeight)
+            .put("remote_width", snapshot.remoteWidth).put("remote_height", snapshot.remoteHeight)
+            .put("fit_width", snapshot.fitWidth).put("fit_height", snapshot.fitHeight)
+            .put("scale", snapshot.scale).put("left", snapshot.left).put("top", snapshot.top)
+            .put("zoom", snapshot.zoom).put("pan_x", snapshot.panX).put("pan_y", snapshot.panY)
+            .put("red_probe", point(40f, 40f)).put("touch_probe", point(400f, 40f))
     }
 
     private fun tapSessionKeyboard() {
@@ -900,6 +1117,14 @@ class RdpFixtureInstrumentedTest {
             assertEquals(generation, RdpConnector.nativeGetTelemetry()[11])
             assertEquals(sessionId, fixtureState().getString("session_id"))
             assertEquals(desktopPid, fixtureState().getInt("desktop_pid"))
+            rotateThroughSessionMenu(landscape = false, fullscreen = true, requireIme = true)
+            rotateThroughSessionMenu(landscape = true, fullscreen = true, requireIme = true)
+            // The real software keyboard still routes input after the roundtrip;
+            // this repeats the original composition/commit/newline assertions.
+            exerciseActualSoftwareKeyboard()
+            waitFor("IME rotation roundtrip restores original logical frame", 25_000) {
+                actualSize(width, height) && fixtureSize(width, height)
+            }
             measurements.put("ime_tools_touch_and_software_typing_passed", true)
             screenshot("04d-landscape-ime-visible")
             val clicksBeforeHide = fixtureState().getInt("clicks")
@@ -1182,6 +1407,12 @@ class RdpFixtureInstrumentedTest {
         }
         val before = fixtureState().getString("text")
         val keyEvidence = JSONArray()
+        val keyboardRuns = measurements.optJSONArray("software_keyboard_runs") ?: JSONArray().also {
+            measurements.put("software_keyboard_runs", it)
+        }
+        val keyboardRun = JSONObject().put("keys", keyEvidence).put("before_text", before)
+        keyboardRuns.put(keyboardRun)
+        keyboardScreenshotPrefix = if (keyboardRuns.length() == 1) "" else "post-rotation-"
         measurements.put("actual_software_keyboard_keys", keyEvidence)
         val receipts = JSONArray()
         var receiptOverflow = 0
@@ -1189,6 +1420,7 @@ class RdpFixtureInstrumentedTest {
             .put("key_receipt_limitation", "Nonconsuming OnKeyListener observes dispatched KeyEvents only; commitText/editor actions bypass it")
         var observedView: RdpDesktopView? = null
         val connectionReceipts = JSONArray()
+        keyboardRun.put("view_key_receipts", receipts).put("connection_receipts", connectionReceipts)
         measurements.put("software_keyboard_connection_receipts", connectionReceipts)
             .put("software_keyboard_connection_trace_limit", 128)
         var previousObserver: ((RdpDesktopView.ImeDiagnostic) -> Unit)? = null
@@ -1236,6 +1468,7 @@ class RdpFixtureInstrumentedTest {
                 .put("mode", if (pinyin) "pinyin-compose-commit-newline" else "latin-direct-newline")
                 .put("subtype_locale_diagnostic", subtypeLocale)
                 .put("gestures", JSONArray(if (pinyin) listOf("a", "commit-Enter", "newline-Enter") else listOf("a", "newline-Enter"))))
+            keyboardRun.put("declared_plan", measurements.getJSONObject("software_keyboard_declared_plan"))
             screenshot("04d0-ime-declared-layout")
             tapObservedImeKey("a", keyEvidence, "type-a")
             if (pinyin) {
@@ -1243,6 +1476,7 @@ class RdpFixtureInstrumentedTest {
                     val labels = observedImeLabels("composing-a")
                     labels.containsAll(setOf("啊", "阿", "其他候选键")) && fixtureState().getString("text") == before
                 }
+                keyboardRun.put("composition_kept_local", true)
                 measurements.put("software_keyboard_composition_kept_local", true)
                 screenshot("04d2a-ime-composing-a")
                 tapObservedImeKey("Enter", keyEvidence, "commit-composition")
@@ -1270,6 +1504,8 @@ class RdpFixtureInstrumentedTest {
                     colorAt(328, 40)?.let { sameColor(it, colors[length % 3]) } == true
             }
             synchronized(receipts) { assertEquals("Key receipt diagnostic must not truncate", 0, receiptOverflow) }
+            keyboardRun.put("expected_text", expected).put("actual_text", fixtureState().getString("text"))
+                .put("exact_remote_text_and_pixels_passed", true)
             measurements.put("software_keyboard_committed_text", expected)
                 .put("software_keyboard_text_patch_exact_rgb", true)
         } catch (failure: Throwable) {
@@ -1288,6 +1524,7 @@ class RdpFixtureInstrumentedTest {
                 }
             }
             synchronized(receipts) { measurements.put("software_keyboard_key_receipt_overflow", receiptOverflow) }
+            keyboardScreenshotPrefix = ""
             automation.serviceInfo = automation.serviceInfo.apply { flags = originalFlags }
         }
     }
@@ -1480,7 +1717,7 @@ class RdpFixtureInstrumentedTest {
     private fun assertColor(x: Int, y: Int, expected: Int) = waitFor("exact RGB pixel $x,$y") { colorAt(x, y)?.let { sameColor(it, expected) } == true }
     private fun screenshot(name: String) {
         val shot = instrumentation.uiAutomation.takeScreenshot()
-        File(evidence, "$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        File(evidence, "$keyboardScreenshotPrefix$name.png").outputStream().use { shot.compress(Bitmap.CompressFormat.PNG, 100, it) }
         shot.recycle()
     }
     private fun waitFor(description: String, timeout: Long = 15_000, predicate: () -> Boolean) {

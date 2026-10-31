@@ -17,7 +17,8 @@ def stream_receipt(scope='ime', size=100):
     result = dict(scope=scope, source_bytes=size+30, selected_bytes=size, source_sha256='a'*64,
                   producer_eof=True, complete=True, failure='', exit_status=0, exit_trailers=1,
                   source_limit=16*1024*1024, line_prefix_limit=8192, selected_limit=65536, lines=10,
-                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
+                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 5 input_method',
+                  command_timeout_ms=5000 if scope=='settings' else 6000)
     for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
         result[key]=1
     result.update(manager_headers=1, client_headers=0, client_method_rows=0, manager_observer_rows=0)
@@ -55,6 +56,109 @@ class CompositionPlanTests(unittest.TestCase):
         self.assertEqual(m.composition_frames(value), [])
         value['software_keyboard_declared_plan']['mode'] = 'unknown'
         with self.assertRaises(AssertionError): m.composition_frames(value)
+
+
+
+def rotation_ledger():
+    rows = []
+    for index, landscape in enumerate([True, False, True, False, True, False, True], 1):
+        rows.append(dict(target_landscape=landscape, fullscreen=True, ime_open=index >= 6,
+                         actual_pixels_and_touch_passed=True, before_frame=index*10, after_frame=index*10+1,
+                         width=1600 if landscape else 800, height=800 if landscape else 1600,
+                         native_generation=5, desktop_view_identity=1234,
+                         verified_viewport=dict(remote_width=1600 if landscape else 800,
+                            remote_height=800 if landscape else 1600, view_width=800, view_height=400,
+                            red_probe=dict(inside_actual_view=True), touch_probe=dict(inside_actual_view=True))))
+    runs = []
+    before = 'ab\n'
+    for _ in range(2):
+        runs.append(dict(declared_plan=dict(mode='pinyin-compose-commit-newline',
+                         gestures=['a', 'commit-Enter', 'newline-Enter']),
+                         keys=[dict(stage=x) for x in ['type-a', 'commit-composition', 'newline']],
+                         composition_kept_local=True, exact_remote_text_and_pixels_passed=True, before_text=before,
+                         actual_text=before+'a\n', expected_text=before+'a\n', connection_receipts=[{'synthetic': True}]))
+        before += 'a\n'
+    return dict(phone_screen_rotations=rows, original_requested_orientation=-1,
+                disconnect_restored_requested_orientation=-1, software_keyboard_runs=runs)
+
+
+class PhoneRotationTests(unittest.TestCase):
+    def test_all_seven_rotations_and_both_keyboard_runs_required(self):
+        frames = m.rotation_frames(rotation_ledger())
+        self.assertEqual(14, len(frames))
+        self.assertEqual(len(frames), len(set(frames)))
+        self.assertIn('rotation-6-portrait-ime.png', frames)
+        self.assertIn('post-rotation-04d2b-ime-composition-committed.png', frames)
+
+    def test_missing_rotation_fails(self):
+        value = rotation_ledger(); value['phone_screen_rotations'].pop()
+        with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_wrong_orientation_or_ime_fails(self):
+        for key in ('target_landscape', 'ime_open', 'actual_pixels_and_touch_passed'):
+            value = rotation_ledger(); value['phone_screen_rotations'][5][key] = not value['phone_screen_rotations'][5][key]
+            with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_recreated_view_or_session_fails(self):
+        for key in ('native_generation', 'desktop_view_identity'):
+            value = rotation_ledger(); value['phone_screen_rotations'][3][key] += 1
+            with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_hidden_input_region_or_old_frame_geometry_fails(self):
+        for key in ('red_probe', 'touch_probe', 'remote_width'):
+            value = rotation_ledger(); view = value['phone_screen_rotations'][5]['verified_viewport']
+            if key == 'remote_width': view[key] += 1
+            else: view[key]['inside_actual_view'] = False
+            with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_no_new_frame_fails(self):
+        value = rotation_ledger(); value['phone_screen_rotations'][0]['after_frame'] = 10
+        with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_wrong_restoration_fails(self):
+        value = rotation_ledger(); value['disconnect_restored_requested_orientation'] = 0
+        with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_missing_second_real_keyboard_run_fails(self):
+        value = rotation_ledger(); value['software_keyboard_runs'].pop()
+        with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_wrong_text_extra_key_or_missing_pixels_fails(self):
+        for mutation in ('text', 'key', 'pixels'):
+            value = rotation_ledger(); run = value['software_keyboard_runs'][1]
+            if mutation == 'text': run['actual_text'] += 'a'
+            elif mutation == 'key': run['keys'].append(dict(stage='newline'))
+            else: run['exact_remote_text_and_pixels_passed'] = False
+            with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_navigation_requires_actual_back_restore(self):
+        value = dict(passed=True, original_orientation=1, restored_orientation=1, scope='synthetic validator', fixture_password_format=1, fixture_id=1)
+        m.validate_navigation_rotation(value)
+        value['restored_orientation'] = 0
+        with self.assertRaises(AssertionError): m.validate_navigation_rotation(value)
+
+
+
+class ClassicXmlRotationTests(unittest.TestCase):
+    def test_required_navigation_case_is_not_replaceable_by_same_count(self):
+        spec = importlib.util.spec_from_file_location('android_verify', Path(__file__).with_name('verify_android_results.py'))
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as folder:
+            directory = Path(folder)
+            marker = directory / 'marker'; marker.touch()
+            cases = []
+            for cls, count in module.EXPECTED.items():
+                names = ['realDesktopDisplayInputResizeAndWeakLink', 'actualNavigationBackRestoresSessionOrientationWithoutConnecting'] \
+                    if cls == 'com.rdp.sync.RdpFixtureInstrumentedTest' else [f'synthetic{i}' for i in range(count)]
+                cases.extend(f'<testcase classname="{cls}" name="{name}"/>' for name in names)
+            report = directory / 'TEST-synthetic.xml'
+            content = '<testsuite tests="15" failures="0" errors="0" skipped="0">' + ''.join(cases) + '</testsuite>'
+            report.write_text(content)
+            self.assertEqual(15, module.verify(directory, marker)['tests'])
+            report.write_text(content.replace('actualNavigationBackRestoresSessionOrientationWithoutConnecting', 'unexecutedSubstitute'))
+            with self.assertRaises(ValueError): module.verify(directory, marker)
+            report.write_text(content.replace(cases[0], ''))
+            with self.assertRaises(ValueError): module.verify(directory, marker)
 
 
 def transfer():

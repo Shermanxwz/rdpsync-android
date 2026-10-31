@@ -50,7 +50,7 @@ For Gradle-only checks after native libraries are present:
 ./gradlew --no-daemon :app:testDebugUnitTest
 ```
 
-`build-apk.sh` runs unit tests, lint, preview packaging and ELF/JNI/dependency/signature/16 KiB alignment checks. This follow-up's debug builds have package suffix `.preview2`, preserving both the original app and the older `.preview` release. Never claim a fresh debug signer can upgrade existing releases. Emulator workflows build x86_64 and use isolated synthetic xrdp/GNOME fixtures on standard GitHub-hosted runners; never point them at a user host.
+`build-apk.sh` runs unit tests, lint, preview packaging and ELF/JNI/dependency/signature/16 KiB alignment checks. This follow-up's debug builds have package suffix `.preview4`, preserving earlier preview installs and their app-private data. Never claim a fresh debug signer can upgrade existing releases. Emulator workflows build x86_64 and use isolated synthetic xrdp/GNOME fixtures on standard GitHub-hosted runners; never point them at a user host.
 
 ## RDP Debugging Notes
 

@@ -158,13 +158,19 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                 pendingFrame = true
                 val previous = bitmap
                 if (previous == null) { cursorX = frame.bitmap.width / 2f; cursorY = frame.bitmap.height / 2f }
-                if (previous != null && (previous.width != frame.bitmap.width || previous.height != frame.bitmap.height)) {
+                val resized = previous != null && (previous.width != frame.bitmap.width || previous.height != frame.bitmap.height)
+                if (resized) {
                     cancelGesture()
                     viewport.reset()
-                    lastInputTarget = null
+                    // Keep the last real RDP pixel coordinate, not a guessed caret
+                    // or a proportional remap. A new desktop frame can arrive after
+                    // local rotation/IME layout; discarding this anchor centers the
+                    // cropped viewport and hides the actual input region.
                 }
                 bitmap = frame.bitmap
-                updateViewport()
+                // ensureVisible clamps that known point against the NEW frame's
+                // bounds, and pans only when the local viewport is cropped.
+                updateViewport(keepInputTargetVisible = resized)
                 invalidate()
             }
         }

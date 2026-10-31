@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from bounded_trace import launch as launch_trace, finish_collectors, cleanup_preserving_primary
+from cleanup_receipt import finish_with_receipt
 
 ROOT = Path(sys.argv[1]).resolve()
 PRIVATE = Path(sys.argv[2]).resolve()
@@ -72,9 +73,12 @@ signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 try:
     if '--inside-dbus' not in sys.argv:
+        if any((OUT / name).exists() for name in ('inner-cleanup.json', 'inner-cleanup.json.tmp')):
+            raise RuntimeError('Refuse stale inner cleanup evidence before starting a session')
         (PRIVATE / 'supervisor.pid').write_text(str(os.getpid()))
         spawn(['dbus-run-session', '--', sys.executable, __file__, str(ROOT), str(PRIVATE), str(OUT), MODE, '--inside-dbus'], 'session')
     else:
+        (PRIVATE / 'inner-supervisor.pid').write_text(str(os.getpid()))
         # Upstream's own tests use keyfile settings and synthetic credential env;
         # credentials still traverse the actual GNOME NLA/NTLM authentication path.
         os.environ.update(GSETTINGS_BACKEND='keyfile', GDK_BACKEND='wayland', GDK_SCALE='1', GDK_DPI_SCALE='1',
@@ -130,4 +134,8 @@ try:
                 raise RuntimeError(f'Owned fixture component exited ({p.returncode})')
         time.sleep(0.25)
 finally:
-    cleanup_preserving_primary(stop, sys.exception())
+    # The outer dbus-run-session leader can exit before this inner finally.
+    # Publish completion only after children were reaped and collectors closed.
+    cleanup = (lambda: finish_with_receipt(stop, OUT / 'inner-cleanup.json', os.getpid())) \
+        if '--inside-dbus' in sys.argv else stop
+    cleanup_preserving_primary(cleanup, sys.exception())

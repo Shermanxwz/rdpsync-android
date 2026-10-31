@@ -10,8 +10,10 @@ import sys
 import tempfile
 import time
 import unittest
+import threading
 from unittest.mock import patch
 from bounded_trace import BoundedTrace, LIMIT, launch, verify, finish_collectors, cleanup_preserving_primary
+from cleanup_receipt import publish, finish_with_receipt, wait_for_cleanup
 
 
 class TraceTests(unittest.TestCase):
@@ -136,6 +138,88 @@ class TraceTests(unittest.TestCase):
         with self.assertRaises(AssertionError):verify(path)
         path.with_suffix('.receipt.json').unlink()
         with self.assertRaises(FileNotFoundError):verify(path)
+
+
+class CleanupReceiptTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.path = Path(self.temporary.name) / 'inner-cleanup.json'
+        self.pid_path = self.path.with_name('inner-supervisor.pid')
+        self.pid_path.write_text('123')
+
+    def test_outer_exit_before_delayed_inner_publication_is_not_completion(self):
+        def later():
+            time.sleep(.05)
+            finish_with_receipt(lambda: None, self.path, 123)
+        writer = threading.Thread(target=later)
+        writer.start()
+        try:
+            start = time.monotonic()
+            value = wait_for_cleanup(lambda: False, self.path, self.pid_path, start + 2)
+            self.assertTrue(value['cleanup_success'])
+            self.assertGreaterEqual(time.monotonic() - start, .04)
+        finally:
+            writer.join(2)
+        self.assertFalse(self.path.with_suffix('.json.tmp').exists())
+
+    def test_never_published_receipt_uses_only_callers_existing_deadline(self):
+        start = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            wait_for_cleanup(lambda: False, self.path, self.pid_path, start + .04)
+        self.assertLess(time.monotonic() - start, .5)
+
+    def test_published_receipt_does_not_replace_supervisor_exit(self):
+        publish(self.path, 123, True)
+        with self.assertRaises(TimeoutError):
+            wait_for_cleanup(lambda: True, self.path, self.pid_path, time.monotonic() + .04)
+
+    def test_invalid_schema_pid_incomplete_and_error_fail_without_retry(self):
+        publish(self.path, 123, True)
+        original = json.loads(self.path.read_text())
+        for change in ({'schema': 2}, {'schema': True}, {'schema': 1.0}, {'kind': 'other'}, {'pid': 124}, {'pid': True},
+                       {'cleanup_completed': False}, {'cleanup_success': False}, {'error': 'OSError'}):
+            with self.subTest(change=change):
+                self.path.write_text(json.dumps(dict(original, **change)))
+                with self.assertRaises(AssertionError):
+                    wait_for_cleanup(lambda: False, self.path, self.pid_path, time.monotonic() + 2)
+        self.path.write_text('{')
+        with self.assertRaises(json.JSONDecodeError):
+            wait_for_cleanup(lambda: False, self.path, self.pid_path, time.monotonic() + 2)
+
+    def test_cleanup_failure_is_published_and_original_error_preserved(self):
+        primary = OSError('collector failed')
+        def fail():
+            raise primary
+        with self.assertRaises(OSError) as caught:
+            finish_with_receipt(fail, self.path, 123)
+        self.assertIs(primary, caught.exception)
+        value = json.loads(self.path.read_text())
+        self.assertEqual('OSError', value['error'])
+        self.assertFalse(value['cleanup_success'])
+        with self.assertRaises(AssertionError):
+            wait_for_cleanup(lambda: False, self.path, self.pid_path, time.monotonic() + 2)
+
+    def test_existing_receipt_is_never_overwritten_and_publication_error_preserves_cleanup_error(self):
+        publish(self.path, 123, True)
+        before = self.path.read_bytes()
+        with self.assertRaises(FileExistsError): publish(self.path, 124, True)
+        self.assertEqual(before, self.path.read_bytes())
+        primary = RuntimeError('original cleanup')
+        with self.assertRaises(RuntimeError) as caught:
+            finish_with_receipt(lambda: (_ for _ in ()).throw(primary), self.path, 123)
+        self.assertIs(primary, caught.exception)
+        self.assertTrue(any('publication failed' in note for note in primary.__notes__))
+
+    def test_stop_keeps_same_deadline_and_strict_trace_verification(self):
+        root = Path(__file__).parent
+        stop = (root/'stop.sh').read_text()
+        session = (root/'session.py').read_text()
+        self.assertIn('deadline = time.monotonic() + 15', stop)
+        self.assertIn("private / 'inner-supervisor.pid', deadline)", stop)
+        self.assertIn('bounded_trace.py" --verify "$OUT/desktop.log"', stop)
+        self.assertIn('Refuse stale inner cleanup evidence before starting a session', session)
+        self.assertIn('cleanup_preserving_primary(cleanup, sys.exception())', session)
 
 
 if __name__ == '__main__':unittest.main()

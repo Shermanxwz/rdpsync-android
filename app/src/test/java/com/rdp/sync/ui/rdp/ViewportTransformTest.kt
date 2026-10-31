@@ -84,4 +84,40 @@ class ViewportTransformTest {
         assertEquals(0f, t.panY, 0f)
     }
 
+    @Test fun croppedRotationReappliesRealInputPointAfterLateRemoteFrameResize() {
+        val target = ViewportTransform.Point(400f, 40f)
+        val t = ViewportTransform().apply { update(1920, 400, 1920, 1080, 1920, 1080) }
+        t.ensureVisible(target, 48f)
+        // Android's portrait layout arrives before the server's portrait frame.
+        t.update(1080, 1200, 1920, 1080, 1080, 1920)
+        t.ensureVisible(target, 48f)
+        t.reset()
+        t.update(1080, 1200, 1080, 1920, 1080, 1920)
+        assertTrue("The old centered-crop policy hides the known point", t.toScreen(target.x, target.y).y < 0)
+        // Same operation used after RdpDesktopView adopts a resized native frame.
+        t.ensureVisible(target, 48f)
+        val portrait = t.toScreen(target.x, target.y)
+        assertTrue(portrait.y in 0f..1200f)
+        assertEquals(target, t.toRemote(portrait.x, portrait.y))
+        assertEquals(1f, t.scale, 0f)
+        t.update(1920, 400, 1080, 1920, 1920, 1080)
+        t.ensureVisible(target, 48f)
+        t.reset()
+        t.update(1920, 400, 1920, 1080, 1920, 1080)
+        t.ensureVisible(target, 48f)
+        val landscape = t.toScreen(target.x, target.y)
+        assertTrue(landscape.y in 0f..400f)
+        assertEquals(target, t.toRemote(landscape.x, landscape.y))
+        assertEquals(1f, t.scale, 0f)
+    }
+
+    @Test fun resizedFrameClampsKnownPointWithoutInventingScaledCaret() {
+        val t = ViewportTransform().apply { update(640, 300, 640, 480, 640, 480) }
+        t.ensureVisible(ViewportTransform.Point(1700f, 900f), 48f)
+        val edge = t.toScreen(639f, 479f)
+        assertTrue(edge.x in 0f..640f && edge.y in 0f..300f)
+        assertEquals(ViewportTransform.Point(639f, 479f), t.toRemote(edge.x, edge.y))
+        assertEquals(1f, t.zoom, 0f)
+    }
+
 }

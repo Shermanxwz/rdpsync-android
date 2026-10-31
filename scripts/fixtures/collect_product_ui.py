@@ -43,7 +43,7 @@ def validate(value, method, spec, commit, started):
     prefix = prefix_for(method, spec)
     expected = {f'{prefix}-{suffix}.png' for suffix in spec['suffixes']}
     assert value['success'] is True and value['method'] == method
-    assert value['source_commit'] == commit and value['package'] == 'com.rdp.sync.preview3'
+    assert value['source_commit'] == commit and value['package'] == 'com.rdp.sync.preview4'
     assert value['sdk'] == 35 and value['synthetic_ui_only'] is True
     assert value['credential_screenshots'] is False and value['physical_foldable_test'] is False
     assert value['locale'] == spec['locale'] and value['dark'] == spec['dark']
