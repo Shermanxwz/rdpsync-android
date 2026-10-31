@@ -138,7 +138,7 @@ def log_clock(log, position):
     return ((hour * 60 + minute) * 60 + second) * 1000 + millis
 
 
-def early_update_phase(log):
+def early_update_phase(log, earlier_log=""):
     guards = list(re.finditer(
         r'\[update_recv\][^\n]*State CONNECTION_STATE_ACTIVE \(or higher\) requested, but '
         r'(CONNECTION_STATE_[A-Z_]+) found\. Aborting\.', log))
@@ -175,10 +175,19 @@ def early_update_phase(log):
         else:
             require(re.search(flag_pattern, log) is None, 'guard state contradicts a later received flag')
     if phase_index == 0:
-        # Preserve the original exact missing-SYNCHRONIZE evidence requirement.
-        completed(r'\[rdp_handle_sc_flags\][^\n]*\[' + states[0] +
-                  r'\][^\n]*expected flag FINALIZE_SC_SYNCHRONIZE_PDU[^\n]*NO_FLAG_SET',
-                  'missing-SYNCHRONIZE warning', unique=False)
+        # Preserve the exact warning requirement. stderr can be flushed before
+        # buffered stdout's resize marker even when its timestamp is later.
+        # Only that warning may be recovered from the physical prefix, and only
+        # between this attempt's proven CLIENT_SYNC entry and UPDATE rejection.
+        warning = (r'\[rdp_handle_sc_flags\][^\n]*\[' + states[0] +
+                   r'\][^\n]*expected flag FINALIZE_SC_SYNCHRONIZE_PDU[^\n]*NO_FLAG_SET')
+        if re.search(warning, log):
+            completed(warning, 'missing-SYNCHRONIZE warning', unique=False)
+        else:
+            ages = [(guard_time - log_clock(earlier_log, record.start())) % 86_400_000
+                    for record in re.finditer(warning, earlier_log)]
+            require(any(age <= previous_age for age in ages),
+                    'missing/ambiguous missing-SYNCHRONIZE warning in this reactivation interval')
     suffix = log[guard.end():]
     require('DATA_PDU_TYPE_UPDATE - update_recv() failed' in suffix and
             state + ' status STATE_RUN_FAILED [-1]' in suffix,
@@ -238,7 +247,7 @@ def verify_case(directory, variant, raw_exit, flush, sync):
                 'client did not terminate naturally before cleanup')
         require(process['client_returncode'] > 0, 'child did not exit naturally with a nonzero failure code')
         observed = observed_resize_after_failure(data, initial)
-        guard_state, awaited_pdu = early_update_phase(log[resize:])
+        guard_state, awaited_pdu = early_update_phase(log[resize:], earlier_log=log[:resize])
         outcome = 'old interoperability failure reproduced (' + guard_state.removeprefix('CONNECTION_STATE_FINALIZATION_') + ')'
     else:
         require(raw_exit == 0 and data.get('passed') is True and data.get('stage') == 'complete' and

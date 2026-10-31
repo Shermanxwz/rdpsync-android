@@ -137,6 +137,38 @@ class ReferenceEvidenceTest(unittest.TestCase):
         result = self.check()
         self.assertEqual(result['awaited_server_pdu'], 'FINALIZE_SC_FONT_MAP_PDU')
 
+    def test_sync_warning_before_buffered_resize_marker_uses_bounded_chronology(self):
+        phase = phase_failure_log()
+        warning = next(line for line in phase.splitlines(True) if '[rdp_handle_sc_flags]' in line)
+        # Reproduce the original raw archive: stderr appears inside an earlier
+        # stdout record, ahead of the buffered resize marker. Its actual clock
+        # lies after CLIENT_SYNC entry and before UPDATE rejection.
+        prefix = INITIAL_LOG.replace('[rdp_client_connect_confirm_active]',
+                                     '[12:00:00:090] [DEBUG][partial' + warning +
+                                     '[rdp_client_connect_confirm_active]')
+        (self.root / 'client.log').write_text(prefix + phase.replace(warning, ''))
+        self.assertEqual(self.check()['outcome'], OLD_SYNC_OUTCOME)
+
+    def test_displaced_sync_warning_cannot_use_stale_future_or_wrong_evidence(self):
+        phase = phase_failure_log()
+        warning = next(line for line in phase.splitlines(True) if '[rdp_handle_sc_flags]' in line)
+        for invalid in (
+            '',
+            warning.replace('[12:00:00:120]', '[12:00:00:090]'),  # Before this reactivation.
+            warning.replace('[12:00:00:120]', '[11:59:00:120]'),  # Outside bounded attempt.
+            warning.replace('[12:00:00:120]', '[12:00:00:140]'),  # After UPDATE rejection.
+            warning.replace('[12:00:00:120]', ''),
+            warning.replace('NO_FLAG_SET', 'FINALIZE_SC_SYNCHRONIZE_PDU'),
+            warning.replace('[rdp_handle_sc_flags]', '[other_callback]'),
+            warning.replace('FINALIZATION_CLIENT_SYNC', 'FINALIZATION_CLIENT_FONT_MAP'),
+        ):
+            with self.subTest(warning=invalid):
+                prefix = INITIAL_LOG.replace('[rdp_client_connect_confirm_active]',
+                                             invalid + '[rdp_client_connect_confirm_active]')
+                (self.root / 'client.log').write_text(prefix + phase.replace(warning, ''))
+                with self.assertRaises(verify.InvalidEvidence):
+                    self.check()
+
     def test_later_phase_requires_every_prior_flag_and_transition(self):
         log = phase_failure_log('FONT_MAP')
         records = [line for line in log.splitlines() if 'received flag' in line or ' --> ' in line]

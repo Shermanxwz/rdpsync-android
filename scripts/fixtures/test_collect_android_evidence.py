@@ -17,7 +17,8 @@ def stream_receipt(scope='ime', size=100):
     result = dict(scope=scope, source_bytes=size+30, selected_bytes=size, source_sha256='a'*64,
                   producer_eof=True, complete=True, failure='', exit_status=0, exit_trailers=1,
                   source_limit=16*1024*1024, line_prefix_limit=8192, selected_limit=65536, lines=10,
-                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
+                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 5 input_method',
+                  command_timeout_ms=5000 if scope=='settings' else 6000)
     for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
         result[key]=1
     result.update(manager_headers=1, client_headers=0, client_method_rows=0, manager_observer_rows=0)
@@ -121,7 +122,7 @@ class PhoneRotationTests(unittest.TestCase):
             with self.assertRaises(AssertionError): m.rotation_frames(value)
 
     def test_navigation_requires_actual_back_restore(self):
-        value = dict(passed=True, original_orientation=1, restored_orientation=1, scope='synthetic validator')
+        value = dict(passed=True, original_orientation=1, restored_orientation=1, scope='synthetic validator', fixture_password_format=1, fixture_id=1)
         m.validate_navigation_rotation(value)
         value['restored_orientation'] = 0
         with self.assertRaises(AssertionError): m.validate_navigation_rotation(value)

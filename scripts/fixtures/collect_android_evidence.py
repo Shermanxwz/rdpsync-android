@@ -96,6 +96,8 @@ def validate_navigation_rotation(value):
     assert value.get('passed') is True and 'failure' not in value
     assert value.get('original_orientation') == value.get('restored_orientation') == 1
     assert value.get('scope'), 'Missing actual navigation scope'
+    assert value.get('fixture_password_format') == 1
+    assert type(value.get('fixture_id')) is int and value['fixture_id'] > 0
 
 
 def directories(kind):
@@ -148,7 +150,9 @@ def validate_ime_setting(value):
     assert set(streams) == expected
     for key, stream in streams.items():
         scope = 'settings' if key == 'provider' else 'ime'
-        assert stream['scope'] == scope and stream['command_source'] == ('dumpsys -t 2 settings' if scope == 'settings' else 'dumpsys -t 2 input_method')
+        assert type(stream['command_timeout_ms']) is int and 0 < stream['command_timeout_ms'] <= 6000
+        if scope == 'settings': assert stream['command_timeout_ms'] == 5000
+        assert stream['scope'] == scope and stream['command_source'] == ('dumpsys -t 2 settings' if scope == 'settings' else 'dumpsys -t 5 input_method')
         assert stream['producer_eof'] is True and stream['complete'] is True and stream['failure'] == ''
         assert stream['exit_status'] == 0 and stream['exit_trailers'] == 1
         assert stream['source_limit'] == 16*1024*1024 and stream['line_prefix_limit'] == 8192 and stream['selected_limit'] == 65536
@@ -333,9 +337,10 @@ class Collector:
                     errors.append(str(error))
                     if not self.best_effort:
                         raise
+            navigation = {}
             if kind == 'classic':
                 try:
-                    self.pull('rdpsync-evidence', 'navigation-back-rotation.json')
+                    navigation = json.loads(self.pull('rdpsync-evidence', 'navigation-back-rotation.json'))
                     prerequisite = json.loads(self.pull('rdpsync-evidence', 'ime-setting-receipt.json'))
                     dumps = {}
                     for name in IME_DUMPS:
@@ -354,6 +359,8 @@ class Collector:
                     frames = list(DRIVE_FRAMES)
                 if kind == 'classic':
                     frames += ['diagnostics.txt', 'navigation-rotation-before-back.png', 'navigation-rotation-back-restored.png']
+                    if navigation.get('system_immersive_coachmark', {}).get('acknowledged'):
+                        frames.append('navigation-system-immersive-coachmark.png')
                     try:
                         frames += rotation_frames(values.get(directory, {}))
                     except (AssertionError, KeyError) as error:

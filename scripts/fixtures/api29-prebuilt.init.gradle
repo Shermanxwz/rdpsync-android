@@ -1,0 +1,13 @@
+// This invocation is only the instrumentation phase, after full APK assembly,
+// cache saving and byte-hash capture. Keep these producers in the task graph:
+// excluding them with -x breaks AGP's mapped output providers. Marking them
+// disabled completes their graph nodes while UTP consumes the retained outputs.
+gradle.projectsEvaluated {
+    if (gradle.startParameter.taskNames != [':app:connectedDebugAndroidTest']) {
+        throw new GradleException('API29 prebuilt phase must run the complete connected test task only')
+    }
+    def app = gradle.rootProject.project(':app')
+    ['packageDebug', 'packageDebugAndroidTest', 'stripDebugDebugSymbols', 'stripDebugAndroidTestDebugSymbols'].each { name ->
+        app.tasks.named(name).configure { enabled = false }
+    }
+}

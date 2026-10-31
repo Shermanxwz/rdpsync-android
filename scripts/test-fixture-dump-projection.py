@@ -81,7 +81,8 @@ public class ProjectionHostTest {
       String body=scope.equals("ime")?IME:SETTINGS;
       java.nio.file.Files.writeString(dir.resolve("body"),body,StandardCharsets.UTF_8);
       String target=scope.equals("ime")?"input_method":"settings";
-      String stub="#!/bin/sh\n[ \"$1\" = '-t' ] && [ \"$2\" = '2' ] && [ \"$3\" = '"+target+"' ] && [ \"$#\" = '3' ] || exit 99\n/bin/cat body\n";
+      String producerSeconds=scope.equals("ime")?"5":"2";
+      String stub="#!/bin/sh\n[ \"$1\" = '-t' ] && [ \"$2\" = '"+producerSeconds+"' ] && [ \"$3\" = '"+target+"' ] && [ \"$#\" = '3' ] || exit 99\n/bin/cat body\n";
       if(!lateError.isEmpty()) stub+="printf '%s\\n' '"+lateError+"' >&2\n";
       stub+="exit "+status+"\n";
       java.nio.file.Path command=dir.resolve("dumpsys");java.nio.file.Files.writeString(command,stub,StandardCharsets.UTF_8);
@@ -90,7 +91,7 @@ public class ProjectionHostTest {
       byte[] output;
       try {
         try(java.io.OutputStream stdin=process.getOutputStream()) {
-          stdin.write(FixtureDumpProjection.shellScript("dumpsys -t 2 "+target).getBytes(StandardCharsets.UTF_8));
+          stdin.write(FixtureDumpProjection.shellScript("dumpsys -t "+(target.equals("input_method") ? "5" : "2")+" "+target).getBytes(StandardCharsets.UTF_8));
         }
         output=process.getInputStream().readAllBytes(); // real EOF only after the producer exits
         check(process.waitFor(5,java.util.concurrent.TimeUnit.SECONDS),"shell EOF/termination");

@@ -30,6 +30,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
 import com.rdp.sync.database.DeviceDatabase
+import com.rdp.sync.repository.DeviceRepository
 import com.rdp.sync.ui.navigation.AppNavigation
 import kotlinx.coroutines.runBlocking
 import com.rdp.sync.network.RdpConnector
@@ -72,28 +73,44 @@ class RdpFixtureInstrumentedTest {
         assertEquals("true", InstrumentationRegistry.getArguments().getString("rdpFixture"))
         val activity = compose.activity
         val original = activity.requestedOrientation
-        val dao = DeviceDatabase.getDatabase(instrumentation.targetContext).deviceDao()
+        val database = DeviceDatabase.getDatabase(instrumentation.targetContext)
+        val dao = database.deviceDao()
+        val repository = DeviceRepository(database)
         // Empty host is rejected by production CertificateEndpoint before network
-        // connect. The normal repository encrypts this fixture-only empty password.
-        val device = Device(id = 900003, name = "Rotation navigation fixture", host = "", username = "", password = "")
-        assertNull("Dedicated fixture row must not replace existing data", runBlocking { dao.getDeviceById(device.id) })
+        // connect. Use the production encrypted write boundary: MainActivity may
+        // already have subscribed, so a later raw legacy row would bypass its
+        // one-time migration and correctly appear credential-unavailable.
+        val device = Device(name = "Rotation navigation fixture", host = "", username = "", password = "")
+        assertNull("Dedicated fixture name must not replace existing data", runBlocking { dao.getDeviceByName(device.name) })
+        var fixtureId: Long? = null
         val receipt = JSONObject().put("original_orientation", ActivityInfo.SCREEN_ORIENTATION_PORTRAIT)
             .put("scope", "Real AppNavigation list/detail/session route and system Back; invalid empty endpoint; no remote connection")
         var primaryFailure: Throwable? = null
         try {
             compose.runOnUiThread { activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT }
             waitFor("portrait before real route entry") { activity.resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT }
-            runBlocking { dao.insertDevice(device) }
+            fixtureId = runBlocking { repository.insertDevice(device) }
+            val stored = requireNotNull(runBlocking { dao.getDeviceById(requireNotNull(fixtureId)) })
+            assertEquals("Fixture is stored encrypted before it is shown", 1, stored.passwordFormat)
+            val decoded = requireNotNull(runBlocking { repository.getDeviceById(requireNotNull(fixtureId)) })
+            assertFalse("Actual repository can decrypt the fixture", decoded.credentialUnavailable)
+            receipt.put("fixture_id", fixtureId).put("fixture_password_format", stored.passwordFormat)
             compose.runOnUiThread { activity.setContent { MaterialTheme { boundedScroll.Bind(); AppNavigation() } } }
             waitFor("fixture profile appears in actual device list") {
                 compose.onAllNodesWithText(device.name).fetchSemanticsNodes().size == 1
             }
             compose.onNodeWithText(device.name).performClick()
+            waitFor("actual detail exposes connect for available encrypted fixture") {
+                compose.onAllNodesWithText("连接远程桌面").fetchSemanticsNodes().size == 1
+            }
             compose.onNodeWithText("连接远程桌面").performClick()
             waitFor("invalid endpoint is rejected before network") {
                 compose.onAllNodesWithText("连接地址或服务器名称无效，无法安全验证证书。").fetchSemanticsNodes().isNotEmpty()
             }
             assertFalse(RdpConnector.isConnected())
+            receipt.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(activity,
+                { compose.mainClock.advanceTimeBy(32) }, { screenshot("navigation-system-immersive-coachmark") },
+                { receipt.put("system_immersive_coachmark", it) }, allowAcknowledgement = true))
             // Even a not-connected session exposes the phone rotation action.
             tapAccessibleControl("会话菜单")
             boundedScroll.to(compose.onNodeWithText("旋转屏幕")).performClick()
@@ -117,6 +134,7 @@ class RdpFixtureInstrumentedTest {
         } catch (failure: Throwable) {
             primaryFailure = failure
             receipt.put("passed", false).put("failure", failure.stackTraceToString())
+            runCatching { screenshot("navigation-rotation-failure") }
             throw failure
         } finally {
             var cleanupFailure: Throwable? = null
@@ -135,7 +153,14 @@ class RdpFixtureInstrumentedTest {
                 compose.runOnUiThread { activity.setContent {} }
                 compose.waitForIdle()
             }
-            cleanup { runBlocking { dao.deleteDevice(device) } }
+            cleanup {
+                fixtureId?.let { id ->
+                    runBlocking { dao.getDeviceById(id)?.let { row ->
+                        check(row.name == device.name && row.host == device.host) { "Fixture row identity changed; refusing cleanup" }
+                        dao.deleteDevice(row)
+                    } }
+                }
+            }
             cleanup { compose.runOnUiThread { activity.requestedOrientation = original } }
             if (primaryFailure == null) cleanupFailure?.let { throw it }
         }

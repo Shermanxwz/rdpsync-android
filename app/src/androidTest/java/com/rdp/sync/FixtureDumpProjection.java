@@ -37,7 +37,7 @@ public final class FixtureDumpProjection {
     }
 
     public static String shellScript(String command) {
-        if (!command.equals("dumpsys -t 2 input_method") && !command.equals("dumpsys -t 2 settings"))
+        if (!command.equals("dumpsys -t 5 input_method") && !command.equals("dumpsys -t 2 settings"))
             throw new IllegalArgumentException("Unreviewed projection command");
         return "{ " + command + " 2>&1; status=$?; printf '\\nRDP_FIXTURE_DUMP_EXIT=%d\\n' \"$status\"; }\n";
     }

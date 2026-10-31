@@ -48,7 +48,12 @@ class FixtureImeSettingRule : TestRule {
             var failure: Throwable? = null
             var writeAttempted = false
             try {
-                val initial = observeIme(3_000)
+                // One complete read-only diagnostic snapshot, not an input retry.
+                // Keep its capture budget separate from the unchanged 15s callback
+                // and real software-keyboard performance deadlines.
+                receipt.put("ime_dump_producer_timeout_seconds", 5).put("ime_dump_outer_timeout_ms", 6_000)
+                    .put("diagnostic_sampling", "single-attempt-per-observation")
+                val initial = observeIme(6_000)
                 initialDump = latestDump
                 receipt.put("initial_service", initial.json())
                 check(initial.readyBinding) { "No unique live Gboard service before prerequisite" }
@@ -67,7 +72,7 @@ class FixtureImeSettingRule : TestRule {
                 if (original == "1") {
                     // Existing TRUE is an observation, not proof of callback consumption or of
                     // no pending notification. Do not introduce a redundant setting write.
-                    val current = observeIme(3_000)
+                    val current = observeIme(6_000)
                     check(current.readyBinding && current.instance == initial.instance && current.method == initial.method &&
                         current.cache == "2") { "Enabled setting requires the same currently bound TRUE-cache IME" }
                     receipt.put("observed_service", current.json())
@@ -79,7 +84,7 @@ class FixtureImeSettingRule : TestRule {
                     var consumed = false
                     while (!consumed && SystemClock.elapsedRealtime() < deadline) {
                         val remaining = deadline - SystemClock.elapsedRealtime()
-                        val current = observeIme(minOf(3_000, remaining))
+                        val current = observeIme(minOf(6_000, remaining))
                         check(current.readyBinding && current.instance == initial.instance && current.method == initial.method) {
                             "Actual IME service changed or dump incomplete during prerequisite; consumption is unproven"
                         }
@@ -183,7 +188,7 @@ class FixtureImeSettingRule : TestRule {
     }
 
     private fun observeIme(timeoutMs: Long): ImeState {
-        val dump = shell("dumpsys -t 2 input_method", timeoutMs, projectionScope = "ime",
+        val dump = shell("dumpsys -t 5 input_method", timeoutMs, projectionScope = "ime",
             projectionKey = if (receipt.has("initial_service")) "latest" else "initial")
         latestDump = dump
         fun matches(pattern: String) = Regex(pattern).findAll(dump).map { it.groupValues[1] }.toList()
@@ -332,7 +337,7 @@ class FixtureImeSettingRule : TestRule {
                 val streams = receipt.optJSONObject("stream_projections") ?: JSONObject().also {
                     receipt.put("stream_projections", it)
                 }
-                streams.put(projectionKey, JSONObject(projection.receipt()).put("command_source", command))
+                streams.put(projectionKey, JSONObject(projection.receipt()).put("command_source", command).put("command_timeout_ms", timeoutMs))
                 val partial = projection.projection()
                 when (projectionKey) {
                     "initial" -> { initialDump = partial; latestDump = partial }

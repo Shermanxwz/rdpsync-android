@@ -7,6 +7,11 @@ cd "$ROOT"
 OUT=build/api29-layout-evidence
 [[ ! -e "$OUT" ]] || { echo 'Fresh evidence directory required' >&2; exit 2; }
 mkdir -p "$OUT"
+# The workflow assembled both APKs and removed only unused SDK compiler/factory-image packages. Never
+# silently rebuild/restrip a different APK between the recorded inputs and UTP.
+[[ ! -e "$ANDROID_HOME/ndk/28.0.13004108" ]]
+[[ "$(cat build/api29-prebuilt-evidence/tested-sha.txt)" == "$(git rev-parse HEAD)" ]]
+sha256sum -c build/api29-prebuilt-evidence/input-sha256.txt >"$OUT/prebuilt-before.txt"
 export ANDROID_SERIAL=emulator-5554
 ADB=(adb -s "$ANDROID_SERIAL")
 mapfile -t DEVICES < <(adb devices | awk 'NR>1 && $2=="device" {print $1}')
@@ -52,6 +57,7 @@ cleanup() {
   "${ADB[@]}" exec-out screencap -p >"$OUT/final-emulator.png" 2>/dev/null || true
   "${ADB[@]}" shell am force-stop "$PACKAGE" >/dev/null 2>&1 || true
   "${ADB[@]}" shell am force-stop "$TEST_PACKAGE" >/dev/null 2>&1 || true
+  sha256sum -c build/api29-prebuilt-evidence/input-sha256.txt >"$OUT/prebuilt-after.txt" || true
   # android-emulator-runner owns and tears down this emulator, never another device.
 }
 trap cleanup EXIT
@@ -62,11 +68,14 @@ trap cleanup EXIT
 "${ADB[@]}" shell cat /proc/uptime >"$OUT/instrumentation-device-uptime.txt"
 touch "$OUT/instrumentation-start.marker"
 STARTED=true
-./gradlew --no-daemon -PnativeAbis=x86_64 -Pandroid.injected.device.serial="$ANDROID_SERIAL" \
+./gradlew --no-daemon -I scripts/fixtures/api29-prebuilt.init.gradle -PnativeAbis=x86_64 -Pandroid.injected.device.serial="$ANDROID_SERIAL" \
   -Pandroid.testInstrumentationRunnerArguments.api29FullscreenProbe=true \
   -Pandroid.testInstrumentationRunnerArguments.productionCommit="$SHA" \
   -Pandroid.testInstrumentationRunnerArguments.productionTree="$TREE" \
   -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.ui.rdp.SessionFullscreenApi29ProbeTest,com.rdp.sync.sharedspace.SharedSpaceStorageInstrumentedTest \
   :app:connectedDebugAndroidTest
+# This is mandatory on a successful run; the EXIT trap also preserves diagnostics
+# after failures without replacing their primary status.
+sha256sum -c build/api29-prebuilt-evidence/input-sha256.txt >"$OUT/prebuilt-after.txt"
 collect
 python3 scripts/fixtures/verify_api29_layout_report.py "$OUT" app/build/outputs/androidTest-results/connected/debug
