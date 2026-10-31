@@ -173,16 +173,17 @@ class Tests(unittest.TestCase):
         initial = dict(selected_ime=[ime], bound_ime=[ime], observer_cache=['1'],
                        service_instance=['Gboard@aaa'], method_identity=['Invoker@bbb'], dump_complete=True)
         prerequisite = dict(verified_before_activity=True, restored=True, original='0', requested='1',
-            wrote_setting=True, ime=ime, initial_service=initial,
+            wrote_setting=True, readiness_mode="same-service-observer-transition", ime=ime, initial_service=initial,
             consumption_samples=[dict(initial, observer_cache=['2'], consumed=True)],
             setup_elapsed_ms=1, ready_elapsed_ms=12, consumption_deadline_elapsed_ms=15, restore_elapsed_ms=20)
-        names = ('ime-setting-initial-dump.txt', 'ime-setting-latest-dump.txt')
+        names = m.IME_DUMPS
         data = b'synthetic dump fixture'
-        prerequisite['dump_files'] = {name: dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest()) for name in names}
+        contents = {name: data if i < 2 else b'' for i, name in enumerate(names)}
+        prerequisite['dump_files'] = {name: dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()) for name, raw in contents.items()}
         prefix = '/sdcard/Download/rdpsync-evidence/'
         files = {prefix+'measurements.json': json.dumps(value).encode(),
                  prefix+'ime-setting-receipt.json': json.dumps(prerequisite).encode()}
-        files.update({prefix+name: data for name in names})
+        files.update({prefix+name: raw for name, raw in contents.items()})
         reader=Reader(files)
         with self.assertRaises(AssertionError):self.collector(reader).collect('classic')
         report=json.loads((Path(self.tmp.name)/'evidence-collection.json').read_text())

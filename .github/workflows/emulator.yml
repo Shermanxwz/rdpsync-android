@@ -71,9 +71,14 @@ jobs:
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
+      - name: Prove fresh disposable AVD before creation
+        run: |
+          epoch="$(python3 scripts/fixtures/record_ime_environment.py --preflight build/emulator-evidence)"
+          echo "RDP_AVD_SETUP_STARTED=$epoch" >> "$GITHUB_ENV"
       - name: Exercise real remote rendering, input, resize and weak link
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d
         with:
+          avd-name: test
           api-level: 35
           force-avd-creation: true
           enable-hw-keyboard: false
@@ -83,7 +88,7 @@ jobs:
           ram-size: 2048M
           heap-size: 512M
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
           script: bash scripts/fixtures/run-emulator-tests.sh
       - name: Collect server and build evidence
         if: always()

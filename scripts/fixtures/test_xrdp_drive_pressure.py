@@ -9,18 +9,24 @@ import xrdp_drive_pressure as p
 
 
 class PressureTest(unittest.TestCase):
+    fixture_uid = 1000
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.mount = self.root/'mount'; self.mount.mkdir()
         self.control = self.root/'control'; self.control.mkdir()
-        self.dev = self.mount.stat().st_dev
+        # Synthetic FUSE and fusectl identities are independent of the host
+        # backing /tmp filesystem (overlay major 0, ext4 major 8/259, etc.).
+        self.mount_inode = self.mount.stat().st_ino
+        self.dev = os.makedev(0,51)
+        self.control_dev = os.makedev(0,52)
         self.cid = str(os.minor(self.dev))
         self.conn = self.control/self.cid; self.conn.mkdir()
         for name,value in zip(p.NAMES,(12,9)):
             (self.conn/name).write_text(f'{value}\n')
-        self.mountinfo = (f'10 9 0:{self.cid} / /home/rdpfixture/thinclient_drives rw - fuse xrdp-chansrv rw,user_id=1000,group_id=1000\n'
-                          f'11 9 0:{self.cid} / /sys/fs/fuse/connections rw - fusectl fusectl rw\n')
+        self.mountinfo = (f'10 9 0:{self.cid} / /home/rdpfixture/thinclient_drives rw - fuse xrdp-chansrv rw,user_id={self.fixture_uid},group_id={self.fixture_uid}\n'
+                          f'11 9 0:{os.minor(self.control_dev)} / /sys/fs/fuse/connections rw - fusectl fusectl rw\n')
         self.original_write = p._write
         self.original_fstat = os.fstat
         self.original_readtext = Path.read_text
@@ -29,7 +35,8 @@ class PressureTest(unittest.TestCase):
         self.write_fault = None
         def fake_fstat(fd):
             x=self.original_fstat(fd)
-            return SimpleNamespace(st_dev=x.st_dev,st_ino=x.st_ino,st_uid=1000,st_mode=x.st_mode)
+            return SimpleNamespace(st_dev=self.dev if x.st_ino==self.mount_inode else self.control_dev,
+                                   st_ino=x.st_ino,st_uid=self.fixture_uid,st_mode=x.st_mode)
         def directory(path):
             mapping={Path('/home/rdpfixture/thinclient_drives'):self.mount,p.CONTROL:self.control}
             return self.original_directory(mapping[Path(path)])
@@ -48,7 +55,7 @@ class PressureTest(unittest.TestCase):
             finally:
                 os.close(fd)
             return self.original_write(attribute,value)
-        self.patches=[patch.object(p.os,'geteuid',return_value=1000),patch.object(p.os,'fstat',side_effect=fake_fstat),
+        self.patches=[patch.object(p.os,'geteuid',return_value=self.fixture_uid),patch.object(p.os,'fstat',side_effect=fake_fstat),
                       patch.object(p,'_directory',side_effect=directory),patch.object(Path,'read_text',text),patch.object(p,'_write',side_effect=write)]
         for item in self.patches:item.start()
 
@@ -60,6 +67,22 @@ class PressureTest(unittest.TestCase):
     def configure(self):
         obj=self.prepare();obj.configure();return obj
     def values(self):return [int((self.conn/name).read_text()) for name in p.NAMES]
+
+    def test_raw_host_device_and_uid_do_not_define_fuse_identity(self):
+        raw_fstat=self.original_fstat
+        try:
+            for major,minor,uid in ((0,99,0),(8,1,1001),(259,2,1002)):
+                def host_fstat(fd,device=os.makedev(major,minor),owner=uid):
+                    info=raw_fstat(fd)
+                    return SimpleNamespace(st_dev=device,st_ino=info.st_ino,st_uid=owner,st_mode=info.st_mode)
+                self.original_fstat=host_fstat
+                obj=self.configure()
+                self.assertEqual(obj.identity['mount_device'],'0:51')
+                self.assertEqual(obj.identity['control_device'],os.makedev(0,52))
+                self.assertEqual(obj.identity['owner_uid'],self.fixture_uid)
+                self.assertEqual(obj.restore()['restoration'],'restored_same_connection')
+                self.assertEqual(self.values(),[12,9])
+        finally:self.original_fstat=raw_fstat
 
     def test_same_connection_configure_restore(self):
         obj=self.configure();self.assertEqual(self.values(),[32,32]);self.assertEqual(obj.receipt['before'],dict(zip(p.NAMES,(12,9))))
@@ -90,9 +113,10 @@ class PressureTest(unittest.TestCase):
         target=(self.conn/'congestion_threshold').stat().st_ino
         def mismatch(fd):
             x=self.original_fstat(fd)
-            return SimpleNamespace(st_dev=x.st_dev,st_ino=x.st_ino,st_uid=2000 if x.st_ino==target else 1000,st_mode=x.st_mode)
+            return SimpleNamespace(st_dev=self.dev if x.st_ino==self.mount_inode else self.control_dev,
+                                   st_ino=x.st_ino,st_uid=self.fixture_uid+123 if x.st_ino==target else self.fixture_uid,st_mode=x.st_mode)
         with patch.object(p.os,'fstat',side_effect=mismatch):
-            with self.assertRaises(ValueError):self.configure()
+            with self.assertRaisesRegex(ValueError,'Unexpected control file identity'):self.configure()
         self.assertFalse(self.writes)
 
     def test_low_level_short_write_and_bad_readback_fail(self):
@@ -153,7 +177,7 @@ class PressureTest(unittest.TestCase):
 
     def test_mount_source_owner_device_fusectl_and_duplicates(self):
         original=self.mountinfo
-        for changed in (original.replace('fuse xrdp-chansrv','fuse other'),original.replace('user_id=1000','user_id=2000'),
+        for changed in (original.replace('fuse xrdp-chansrv','fuse other'),original.replace(f'user_id={self.fixture_uid}',f'user_id={self.fixture_uid+123}'),
                         original.replace(f'0:{self.cid}',f'0:{int(self.cid)+1}',1),original.replace('fusectl fusectl','tmpfs tmpfs'),
                         original+original.splitlines()[0]+'\n'):
             self.mountinfo=changed
@@ -190,5 +214,13 @@ class PressureTest(unittest.TestCase):
         with patch.object(p.os,'geteuid',return_value=0):
             with self.assertRaises(ValueError):self.configure()
         self.assertFalse(self.writes)
+
+# Exercise the same ownership checks with distinct simulated fixture owners,
+# without chown, real mounts, or dependence on the runner's actual UID.
+class PressureUid1001Test(PressureTest):
+    fixture_uid = 1001
+
+class PressureUid1002Test(PressureTest):
+    fixture_uid = 1002
 
 if __name__=='__main__':unittest.main()

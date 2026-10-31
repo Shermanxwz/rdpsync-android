@@ -94,13 +94,31 @@ def validate_ime_setting(value):
     assert value.get('verified_before_activity') is True and value.get('restored') is True
     assert not any('failure' in key for key in value), 'IME prerequisite or restoration failure'
     original = value.get('original')
-    assert original in ('null', '0') and value.get('requested') == '1'
-    assert value.get('wrote_setting') is True
+    assert original in ('null', '0', '1') and value.get('requested') == '1'
+    factory = original == '1'
+    assert value.get('wrote_setting') is (not factory)
+    assert value.get('readiness_mode') == ('factory-default-no-write' if factory else 'same-service-observer-transition')
+    if factory:
+        assert 'write_started_elapsed_ms' not in value
+        proof = value['factory_default']
+        assert proof['resolved_default'] is True
+        assert re.fullmatch(r'_id:[0-9]+ name:show_ime_with_hard_keyboard pkg:android value:1 default:1 defaultSystemSet:true', proof['setting_row'])
+        env = proof['environment']
+        assert env['success'] is True and env['schema'] == 1 and env['action_sha'] == 'a421e43855164a8197daf9d8d40fe71c6996bb0d'
+        assert re.fullmatch(r'[0-9a-f]{40}', env['source_sha']) and re.fullmatch(r'[0-9]+', env['run_id'])
+        for key in ('avd_config_sha256', 'image_properties_sha256', 'preflight_sha256'):
+            assert re.fullmatch(r'[0-9a-f]{64}', env[key])
+        assert env['force_avd_creation'] is True and env['enable_hw_keyboard'] is False
+        assert env['fresh_avd_absence_verified'] is True and env['no_snapshot'] is True
+        assert env['avd_name'] == 'test' and env['device_sdk'] == '35'
+        assert env['avd_config_mtime'] >= env['setup_started_epoch'] > 0
+        assert env['image_sysdir'].replace('\\', '/').rstrip('/').endswith('/system-images/android-35/google_apis/x86_64')
+        assert env['device_fingerprint'] and re.fullmatch(r'[0-9a-f-]{36}', env['device_boot_id'])
     initial = value['initial_service']
     ime = 'com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME'
     assert value.get('ime') == ime
     assert initial['selected_ime'] == initial['bound_ime'] == [ime]
-    assert initial['observer_cache'] == ['1']
+    assert initial['observer_cache'] == (['2'] if factory else ['1'])
     assert initial['dump_complete'] is True
     for key in ('service_instance', 'method_identity'):
         assert len(initial[key]) == 1 and re.fullmatch(r'[A-Za-z0-9_.$]+@[0-9a-fA-F]+', initial[key][0])
@@ -114,6 +132,34 @@ def validate_ime_setting(value):
         assert sample['observer_cache'] in (['1'], ['2'])
     assert value['setup_elapsed_ms'] <= value['ready_elapsed_ms'] <= value['consumption_deadline_elapsed_ms']
     assert value['ready_elapsed_ms'] <= value['restore_elapsed_ms']
+
+
+IME_DUMPS = ('ime-setting-initial-dump.txt', 'ime-setting-latest-dump.txt',
+             'ime-setting-provider-dump.txt', 'ime-setting-overlay.txt', 'ime-setting-environment.txt')
+
+def validate_ime_raw(value, dumps, out):
+    if value['original'] != '1':
+        assert all(not dumps[name] for name in IME_DUMPS[2:])
+        return
+    proof = value['factory_default']
+    assert json.loads(dumps[IME_DUMPS[4]]) == proof['environment']
+    assert dumps[IME_DUMPS[3]].strip().splitlines()[-1] == 'true'
+    text = dumps[IME_DUMPS[2]]
+    assert not any(x in text for x in ('DUMP TIMEOUT', 'Permission Denial'))
+    sections = text.split('SECURE SETTINGS (user 0)\n')
+    assert len(sections) == 2 and 'SYSTEM SETTINGS (user 0)' in sections[1]
+    rows = [line for line in sections[1].split('SYSTEM SETTINGS (user 0)')[0].splitlines()
+            if line.startswith('_id:') and ' name:show_ime_with_hard_keyboard ' in line]
+    assert rows == [proof['setting_row']]
+    env = proof['environment']
+    assert env == json.loads((Path(out) / 'ime-environment.json').read_text())
+    for field, name in (('preflight_sha256', 'ime-preflight.json'), ('avd_config_sha256', 'avd-config.ini'),
+                        ('image_properties_sha256', 'image-source.properties'), ('image_package_sha256', 'image-package.xml'),
+                        ('workflow_sha256', 'workflow.yml')):
+        assert hashlib.sha256((Path(out) / name).read_bytes()).hexdigest() == env[field]
+    assert json.loads((Path(out) / 'ime-preflight.json').read_text()) == env['preflight']
+    assert env['source_sha'] == (Path(out) / 'tested-sha.txt').read_text().strip()
+    assert env['device_fingerprint'] == (Path(out) / 'emulator-fingerprint.txt').read_text().strip()
 
 
 class Collector:
@@ -194,10 +240,13 @@ class Collector:
             if kind == 'classic':
                 try:
                     prerequisite = json.loads(self.pull('rdpsync-evidence', 'ime-setting-receipt.json'))
-                    for name in ('ime-setting-initial-dump.txt', 'ime-setting-latest-dump.txt'):
+                    dumps = {}
+                    for name in IME_DUMPS:
                         data = self.pull('rdpsync-evidence', name)
+                        dumps[name] = data.decode('utf-8')
                         expected = prerequisite['dump_files'][name]
                         assert len(data) == expected['bytes'] and hashlib.sha256(data).hexdigest() == expected['sha256']
+                    validate_ime_raw(prerequisite, dumps, self.out)
                 except Exception as error:
                     errors.append(f'IME prerequisite evidence: {error}')
                     if not self.best_effort:

@@ -40,7 +40,7 @@ class ReadinessContract(unittest.TestCase):
         for after in (dump(2, instance='Gboard@ccc'), dump(2, method='Invoker@ddd')):
             self.assertNotEqual(before[3:], parse(after)[1][3:])
     def test_no_provider_only_or_unknown_cache_success(self):
-        self.assertIn('initial.cache == "1"', src)
+        self.assertIn('initial.cache == if (original == "1") "2" else "1"', src)
         self.assertIn('current.instance == initial.instance && current.method == initial.method', src)
         self.assertIn('if (original != "1")', src)
         self.assertIn('consumed = current.cache == "2"', src)
@@ -70,7 +70,7 @@ class ReadinessContract(unittest.TestCase):
                        service_instance=['Gboard@aaa'], method_identity=['Invoker@bbb'], dump_complete=True)
         after = dict(initial, observer_cache=['2'], consumed=True)
         good = dict(verified_before_activity=True, restored=True, original='0', requested='1',
-                    wrote_setting=True, ime=GBOARD, initial_service=initial, consumption_samples=[after],
+                    wrote_setting=True, readiness_mode='same-service-observer-transition', ime=GBOARD, initial_service=initial, consumption_samples=[after],
                     setup_elapsed_ms=1, ready_elapsed_ms=12, consumption_deadline_elapsed_ms=15, restore_elapsed_ms=20)
         collector.validate_ime_setting(good)
         for mutation in ('new_service', 'unknown', 'already_true', 'late', 'not_restored', 'no_callback', 'cleanup_failure'):
@@ -87,5 +87,53 @@ class ReadinessContract(unittest.TestCase):
         unchanged.update(original='1', wrote_setting=False)
         unchanged['initial_service']['observer_cache'] = ['2']
         with self.assertRaises(AssertionError): collector.validate_ime_setting(unchanged)
-        self.assertIn('check(original != "1")', src)
+        self.assertLess(src.index('val initial = observeIme'), src.index('if (original == "1") verifyFactoryDefault()'))
+    def test_factory_provenance_and_raw_binding(self):
+        import tempfile, hashlib
+        spec = importlib.util.spec_from_file_location('factory_collector', ROOT/'scripts/fixtures/collect_android_evidence.py')
+        collector = importlib.util.module_from_spec(spec); spec.loader.exec_module(collector)
+        initial = dict(selected_ime=[GBOARD], bound_ime=[GBOARD], observer_cache=['2'],
+                       service_instance=['Gboard@aaa'], method_identity=['Invoker@bbb'], dump_complete=True)
+        row = '_id:42 name:show_ime_with_hard_keyboard pkg:android value:1 default:1 defaultSystemSet:true'
+        env = dict(schema=1, success=True, action_sha='a421e43855164a8197daf9d8d40fe71c6996bb0d',
+                   source_sha='a'*40, run_id='123', force_avd_creation=True, enable_hw_keyboard=False,
+                   fresh_avd_absence_verified=True, no_snapshot=True, avd_name='test', device_sdk='35',
+                   avd_config_mtime=2, setup_started_epoch=1, image_sysdir='/sdk/system-images/android-35/google_apis/x86_64',
+                   device_fingerprint='synthetic', device_boot_id='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', preflight={'success':True})
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)
+            for field,name in (('preflight_sha256','ime-preflight.json'),('avd_config_sha256','avd-config.ini'),
+                               ('image_properties_sha256','image-source.properties'),('image_package_sha256','image-package.xml'),('workflow_sha256','workflow.yml')):
+                raw=json.dumps(env['preflight']).encode() if name=='ime-preflight.json' else b'synthetic'
+                (out/name).write_bytes(raw);env[field]=hashlib.sha256(raw).hexdigest()
+            (out/'ime-environment.json').write_text(json.dumps(env))
+            (out/'tested-sha.txt').write_text(env['source_sha'])
+            (out/'emulator-fingerprint.txt').write_text(env['device_fingerprint'])
+            good=dict(verified_before_activity=True,restored=True,original='1',requested='1',wrote_setting=False,
+                      readiness_mode='factory-default-no-write',ime=GBOARD,initial_service=initial,
+                      consumption_samples=[dict(initial,consumed=True)],setup_elapsed_ms=1,ready_elapsed_ms=2,
+                      consumption_deadline_elapsed_ms=15,restore_elapsed_ms=20,
+                      factory_default=dict(resolved_default=True,setting_row=row,environment=env))
+            dumps=dict(zip(collector.IME_DUMPS,[dump(2),dump(2),'SECURE SETTINGS (user 0)\n'+row+'\nSYSTEM SETTINGS (user 0)\n','trace\ntrue\n',json.dumps(env)]))
+            collector.validate_ime_setting(good);collector.validate_ime_raw(good,dumps,out)
+            for key,badvalue in [('success',False),('fresh_avd_absence_verified',False),('no_snapshot',False),('enable_hw_keyboard',True),('device_sdk','34'),('avd_config_mtime',0),('action_sha','b'*40)]:
+                bad=copy.deepcopy(good);bad['factory_default']['environment'][key]=badvalue
+                with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)
+            for altered in (row.replace('pkg:android','pkg:com.android.shell'), row.replace('default:1','default:0'), row.replace('defaultSystemSet:true','defaultSystemSet:false')):
+                bad=copy.deepcopy(good);bad['factory_default']['setting_row']=altered
+                with self.assertRaises(AssertionError):collector.validate_ime_setting(bad)
+            for key,badvalue in [('wrote_setting',True),('write_started_elapsed_ms',0),('readiness_mode','same-service-observer-transition')]:
+                bad=copy.deepcopy(good);bad[key]=badvalue
+                with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)
+            for changed in [dict(dumps,**{'ime-setting-overlay.txt':'false'}),
+                            dict(dumps,**{'ime-setting-provider-dump.txt':dumps['ime-setting-provider-dump.txt'].replace('pkg:android','pkg:com.android.shell')}),
+                            dict(dumps,**{'ime-setting-provider-dump.txt':dumps['ime-setting-provider-dump.txt'].replace(row,row+'\n'+row)}),
+                            dict(dumps,**{'ime-setting-environment.txt':'{}'})]:
+                with self.assertRaises(AssertionError):collector.validate_ime_raw(good,changed,out)
+            (out/'tested-sha.txt').write_text('b'*40)
+            with self.assertRaises(AssertionError):collector.validate_ime_raw(good,dumps,out)
+            (out/'tested-sha.txt').write_text(env['source_sha'])
+            (out/'avd-config.ini').write_text('tampered')
+            with self.assertRaises(AssertionError):collector.validate_ime_raw(good,dumps,out)
+
 if __name__ == '__main__': unittest.main()

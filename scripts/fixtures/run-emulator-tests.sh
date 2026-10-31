@@ -31,7 +31,13 @@ for directory in rdpsync-evidence; do
 done
 adb shell date +%s >"$OUT/evidence-start-device-seconds.txt"
 touch build/emulator-evidence/instrumentation-start.marker
+python3 scripts/fixtures/record_ime_environment.py "$OUT"
+adb shell mkdir -p /sdcard/Download/rdpsync-evidence
+adb push "$OUT/ime-environment.json" /sdcard/Download/rdpsync-evidence/ime-environment.json
+
 ./gradlew --no-daemon -PnativeAbis=x86_64 \
+  -Pandroid.testInstrumentationRunnerArguments.fixtureSourceSha="$(git rev-parse HEAD)" \
+  -Pandroid.testInstrumentationRunnerArguments.fixtureRunId="$GITHUB_RUN_ID" \
   -Pandroid.testInstrumentationRunnerArguments.rdpFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.rdpTlsFixture=true \
   -Pandroid.testInstrumentationRunnerArguments.fixtureFingerprint="$RDP_FIXTURE_FINGERPRINT" \

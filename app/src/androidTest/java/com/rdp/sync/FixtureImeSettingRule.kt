@@ -27,6 +27,9 @@ class FixtureImeSettingRule : TestRule {
     val receipt = JSONObject()
     private var initialDump = ""
     private var latestDump = ""
+    private var settingsDump = ""
+    private var overlayDump = ""
+    private var environmentRaw = ""
     private val setting = "show_ime_with_hard_keyboard"
     private val gboard = "com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME"
 
@@ -45,14 +48,13 @@ class FixtureImeSettingRule : TestRule {
             var failure: Throwable? = null
             var writeAttempted = false
             try {
-                check(original != "1") {
-                    "Already-enabled IME setting has no consumed-notification provenance; unsupported initial state"
-                }
                 val initial = observeIme(3_000)
                 initialDump = latestDump
                 receipt.put("initial_service", initial.json())
                 check(initial.readyBinding) { "No unique live Gboard service before prerequisite" }
-                check(initial.cache == "1") {
+                if (original == "1") verifyFactoryDefault()
+                receipt.put("readiness_mode", if (original == "1") "factory-default-no-write" else "same-service-observer-transition")
+                check(initial.cache == if (original == "1") "2" else "1") {
                     "Initial Gboard cache must match original provider value, not UNKNOWN or a pending transition"
                 }
                 if (original != "1") {
@@ -111,6 +113,44 @@ class FixtureImeSettingRule : TestRule {
         }
     }
 
+    private fun verifyFactoryDefault() {
+        // Save raw bounded evidence before parsing so an unknown device schema fails diagnostically.
+        environmentRaw = shell("cat /sdcard/Download/rdpsync-evidence/ime-environment.json")
+        overlayDump = shell("cmd overlay lookup --user 0 --verbose com.android.providers.settings com.android.providers.settings:bool/def_show_ime_with_hard_keyboard")
+        settingsDump = shell("dumpsys -t 2 settings", maxBytes = 2 * 1024 * 1024)
+        val environment = JSONObject(environmentRaw)
+        val arguments = InstrumentationRegistry.getArguments()
+        check(environment.getInt("schema") == 1 && environment.getBoolean("success"))
+        check(environment.getString("action_sha") == "a421e43855164a8197daf9d8d40fe71c6996bb0d")
+        check(environment.getString("source_sha").matches(Regex("[0-9a-f]{40}")) &&
+            environment.getString("source_sha") == arguments.getString("fixtureSourceSha"))
+        check(environment.getString("run_id").matches(Regex("[0-9]+")) &&
+            environment.getString("run_id") == arguments.getString("fixtureRunId"))
+        check(environment.getBoolean("force_avd_creation") && !environment.getBoolean("enable_hw_keyboard"))
+        check(environment.getBoolean("fresh_avd_absence_verified") && environment.getBoolean("no_snapshot"))
+        check(environment.getString("preflight_sha256").matches(Regex("[0-9a-f]{64}")))
+        check(environment.getString("avd_name") == "test" && environment.getString("device_sdk") == "35")
+        check(environment.getLong("avd_config_mtime") >= environment.getLong("setup_started_epoch"))
+        check(environment.getString("avd_config_sha256").matches(Regex("[0-9a-f]{64}")))
+        check(environment.getString("image_properties_sha256").matches(Regex("[0-9a-f]{64}")))
+        check(environment.getString("image_sysdir").replace('\\', '/').trimEnd('/').endsWith("/system-images/android-35/google_apis/x86_64"))
+        check(environment.getString("device_fingerprint") == Build.FINGERPRINT)
+        check(environment.getString("device_boot_id") == shell("cat /proc/sys/kernel/random/boot_id").trim())
+        // AOSP15 OverlayManagerShellCommand resolves enabled overlays. Unknown/reference formats
+        // do not gain an alternative success path: the terminal resolved bool must be literal true.
+        check(overlayDump.trim().lineSequence().last() == "true") { "Effective factory IME default is not verified true" }
+        val sections = settingsDump.split("SECURE SETTINGS (user 0)\n")
+        check(sections.size == 2 && sections[1].contains("SYSTEM SETTINGS (user 0)")) { "Unknown settings dump user0 scope" }
+        val secure = sections[1].substringBefore("SYSTEM SETTINGS (user 0)")
+        val rows = secure.lineSequence().filter { it.startsWith("_id:") && it.contains(" name:$setting ") }.toList()
+        check(rows.size == 1 && rows.single().matches(Regex("_id:[0-9]+ name:show_ime_with_hard_keyboard pkg:android value:1 default:1 defaultSystemSet:true"))) {
+            "IME setting lacks unmodified system-default attribution"
+        }
+        check(!settingsDump.contains("DUMP TIMEOUT") && !settingsDump.contains("Permission Denial"))
+        receipt.put("factory_default", JSONObject().put("resolved_default", true)
+            .put("setting_row", rows.single()).put("environment", environment))
+    }
+
     private data class ImeState(val selected: List<String>, val bound: List<String>, val caches: List<String>,
                                 val instances: List<String>, val methods: List<String>, val complete: Boolean) {
         val cache get() = caches.singleOrNull()
@@ -147,7 +187,9 @@ class FixtureImeSettingRule : TestRule {
         val directory = File(context.getExternalFilesDir(null), "rdp-evidence").apply { mkdirs() }
         // Disposable synthetic fixture only. Bounded full dumps retain parser failures;
         // ordinary production sessions never enable this rule or produce these records.
-        val dumps = listOf("ime-setting-initial-dump.txt" to initialDump, "ime-setting-latest-dump.txt" to latestDump)
+        val dumps = listOf("ime-setting-initial-dump.txt" to initialDump, "ime-setting-latest-dump.txt" to latestDump,
+            "ime-setting-provider-dump.txt" to settingsDump, "ime-setting-overlay.txt" to overlayDump,
+            "ime-setting-environment.txt" to environmentRaw)
         val hashes = JSONObject()
         for ((name, content) in dumps) {
             File(directory, name).writeText(content)
@@ -165,7 +207,7 @@ class FixtureImeSettingRule : TestRule {
             shell("cp ${File(directory, name).absolutePath} /sdcard/Download/rdpsync-evidence/$name")
         }
     }
-    private fun shell(command: String, timeoutMs: Long = 5_000): String {
+    private fun shell(command: String, timeoutMs: Long = 5_000, maxBytes: Int = 262144): String {
         check(timeoutMs > 0) { "IME prerequisite command deadline expired" }
         val closing = AtomicBoolean(false)
         val owned = AtomicReference<ParcelFileDescriptor?>()
@@ -181,10 +223,10 @@ class FixtureImeSettingRule : TestRule {
                     val output = ByteArrayOutputStream()
                     val buffer = ByteArray(512)
                     while (true) {
-                        val count = input.read(buffer, 0, minOf(buffer.size, 262145 - output.size()))
+                        val count = input.read(buffer, 0, minOf(buffer.size, maxBytes + 1 - output.size()))
                         if (count < 0) break
                         output.write(buffer, 0, count)
-                        check(output.size() <= 262144) { "Unexpectedly large IME prerequisite command response" }
+                        check(output.size() <= maxBytes) { "Unexpectedly large IME prerequisite command response" }
                     }
                     output.toString(Charsets.UTF_8.name())
                 }
