@@ -726,9 +726,16 @@ BOOL rdpsync_drive_pump(RdpDrive* d, freerdp* instance) {
     if (!d) return TRUE;
     /* This lifetime is held by the protocol owner. The source probe separately
      * locks the transport write state; no broker/provider runs under that lock. */
-    const INT64 pending = rdpsync_freerdp_pending_bytes(instance->context);
+    const INT64 observed = rdpsync_freerdp_pending_bytes(instance->context);
+    INT64 pending = observed;
+    /* A read-only high-water gate otherwise strands buffered ciphertext once
+     * socket backpressure clears: the client event loop does not flush it.
+     * No new credit or IRP completion until this owner-only drain succeeds. */
+    if (pending > 0) pending = rdpsync_freerdp_drain_pending(instance->context);
+    if (pending == -3) return FALSE;
     pthread_mutex_lock(&d->mutex);
     d->transport_pending = pending;
+    if (observed >= 0 && observed > d->peak_transport_pending) d->peak_transport_pending = observed;
     if (pending >= 0 && pending > d->peak_transport_pending) d->peak_transport_pending = pending;
     for (size_t i = 0; i < RDPSYNC_DRIVE_PENDING; ++i) {
         if (d->slots[i].reserved && !d->slots[i].irp &&

@@ -120,6 +120,31 @@ CLIPRDR file ceiling and unchanged finite CLIPRDR connection-response budget.
   Prepared work wakes the owner; the fallback 100 ms event wait is not a fixed
   per-operation delay. Complete/Discard consumes an IRP exactly once, even on
   send failure; bookkeeping is retired before consumption.
+- A separate protocol-owner-only direct-TLS drain sends at most 256 KiB of
+  already encrypted bytes from the exact pinned `BufferedSocket` queue head,
+  under the transport write lock, before applying the unchanged 256 KiB
+  admission gate. The original pending-byte probe remains read-only. The stock
+  client event checks do not drain buffered output, so a high-water gate alone
+  can strand queued ciphertext after a paused peer resumes reading.
+  Closed, gateway, custom callbacks, blocking mode, non-`TransportLayer` inner
+  BIOs and extra inner layers are rejected without touching their output.
+  A separate read-only validator in the pinned TCP translation unit checks all
+  five stock inner-layer callbacks, non-null context/event, valid fd and current
+  `fcntl(F_GETFL)` `O_NONBLOCK`; Linux/Android only, other platforms fail closed.
+  The scoped drain mirrors stock buffered write without append, but limits
+  `ringbuffer_peek` to 256 KiB and returns on EAGAIN/EINTR/zero progress. It
+  commits only bytes actually sent, preserving ordering and partial progress.
+  It visits at most two spans and makes at most two send calls; a short write
+  commits that prefix and returns immediately. It never waits, runs TLS or
+  changes authentication.
+  A legal larger shared queue (including an 8 MiB CLIPRDR range) is not rejected
+  or discarded: each call remains bounded independently of total queue length.
+  Locked WPENDING is re-read and must decrease by no more than the budget.
+  No progress does not signal another wake; the existing 100 ms owner fallback
+  services later progress. Fatal send or invalid accounting stops the owner
+  before completing any new IRP. Peak includes both pre/post-drain values.
+  The actual-drive 1,376,256-byte test ceiling and every IRP budget are unchanged.
+  No application operation is retried.
 - The incremental data-response contribution to that buffered TLS queue is the
   256 KiB gate plus one response (at most 1 MiB payload plus RDP/TLS framing).
   This is **not** a bound on total process RSS, kernel buffers, other channels,

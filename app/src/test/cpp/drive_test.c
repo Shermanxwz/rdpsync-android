@@ -16,6 +16,8 @@ BOOL WLog_PrintTextMessageVA(wLog* log,DWORD level,size_t line,const char* file,
 void winpr_log_backtrace(const char* tag,DWORD level,DWORD size){(void)tag;(void)level;(void)size;}
 void winpr_log_backtrace_ex(wLog* log,DWORD level,DWORD size){(void)log;(void)level;(void)size;}
 static INT64 transport_pending;
+static INT64 drain_override = INT64_MIN;
+static size_t drain_calls;
 static size_t sent_size, consumed, discarded, drained;
 static uint32_t sent_status;
 static BYTE sent[RDP_WS_MAX_IO + 4096];
@@ -25,6 +27,7 @@ static pthread_cond_t race_changed = PTHREAD_COND_INITIALIZER;
 static bool race_active, race_entered, race_attempting;
 static pthread_t protocol_owner;
 INT64 rdpsync_freerdp_pending_bytes(rdpContext* context){(void)context;assert(pthread_equal(pthread_self(),protocol_owner));return transport_pending;}
+INT64 rdpsync_freerdp_drain_pending(rdpContext* context){drain_calls++;INT64 p=rdpsync_freerdp_pending_bytes(context);return drain_override==INT64_MIN?p:drain_override;}
 BOOL freerdp_channels_check_fds(rdpChannels* channels,freerdp* instance){(void)channels;(void)instance;assert(pthread_equal(pthread_self(),protocol_owner));transport_pending += (INT64)sent_size;drained++;return TRUE;}
 static void put16(BYTE* p,uint16_t n){p[0]=(BYTE)n;p[1]=(BYTE)(n>>8);}
 static void put32(BYTE* p,uint32_t n){put16(p,(uint16_t)n);put16(p+2,(uint16_t)(n>>16));}
@@ -37,7 +40,7 @@ typedef struct {char home[128];RdpWorkspace* ws;RdpDrive* drive;RdpSyncContext c
 static BOOL control(Fixture* f,uint16_t type,const BYTE* body,size_t n){BYTE packet[64]={0};assert(n+4<=sizeof(packet));put16(packet,RDPDR_CTYP_CORE);put16(packet+2,type);if(n)memcpy(packet+4,body,n);return rdpsync_drive_ingress(f->drive,packet,n+4,CHANNEL_FLAG_FIRST|CHANNEL_FLAG_LAST,n+4);}
 static void announce(Fixture* f){BYTE body[8]={1,0,12,0};assert(control(f,PAKID_CORE_SERVER_ANNOUNCE,body,8));}
 static void accept(Fixture* f){BYTE caps[12]={1,0,0,0};put16(caps+4,CAP_DRIVE_TYPE);put16(caps+6,8);put32(caps+8,2);assert(control(f,PAKID_CORE_SERVER_CAPABILITY,caps,12));BYTE reply[8]={0};put32(reply,7);assert(control(f,PAKID_CORE_DEVICE_REPLY,reply,8));}
-static void setup(Fixture* f,int mode){memset(f,0,sizeof(*f));strcpy(f->home,"/tmp/rdpsync-drive-test-XXXXXX");assert(mkdtemp(f->home));int fd=open(f->home,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(fd>=0);assert(!rdp_ws_create(fd,name_key,NULL,&f->ws));close(fd);f->drive=rdpsync_drive_new(f->ws,41,mode,name_key,NULL);assert(f->drive);DriveDevice* dev=calloc(1,sizeof(*dev));assert(dev);dev->owner=f->drive;dev->device.id=7;dev->device.data=Stream_New(NULL,16);assert(dev->device.data);f->drive->device=dev;f->drive->device_id=7;f->context.drive=f->drive;f->instance.context=&f->context.common.context;f->drive->context=&f->context.common.context;f->sequence=10;transport_pending=0;sent_size=0;sent_status=0;fail_complete=0;announce(f);accept(f);assert(!drive_init(&dev->device));}
+static void setup(Fixture* f,int mode){memset(f,0,sizeof(*f));strcpy(f->home,"/tmp/rdpsync-drive-test-XXXXXX");assert(mkdtemp(f->home));int fd=open(f->home,O_RDONLY|O_DIRECTORY|O_CLOEXEC);assert(fd>=0);assert(!rdp_ws_create(fd,name_key,NULL,&f->ws));close(fd);f->drive=rdpsync_drive_new(f->ws,41,mode,name_key,NULL);assert(f->drive);DriveDevice* dev=calloc(1,sizeof(*dev));assert(dev);dev->owner=f->drive;dev->device.id=7;dev->device.data=Stream_New(NULL,16);assert(dev->device.data);f->drive->device=dev;f->drive->device_id=7;f->context.drive=f->drive;f->instance.context=&f->context.common.context;f->drive->context=&f->context.common.context;f->sequence=10;transport_pending=0;drain_override=INT64_MIN;sent_size=0;sent_status=0;fail_complete=0;announce(f);accept(f);assert(!drive_init(&dev->device));}
 static void cleanup(Fixture* f){if(f->drive->device)assert(!drive_free(&f->drive->device->device));rdpsync_drive_free(f->drive);rdp_ws_destroy(f->ws);char cmd[256];snprintf(cmd,sizeof(cmd),"rm -rf -- '%s'",f->home);assert(system(cmd)==0);}
 static size_t path_bytes(const char* path,BYTE* output){size_t units=0;uint16_t* wide=rdpsync_utf8_to_utf16(path,strlen(path),&units);assert(wide);for(size_t i=0;i<units;i++)put16(output+i*2,wide[i]);free(wide);return units*2;}
 static IRP* prepare(Fixture* f,uint32_t major,uint32_t minor,uint32_t handle,const BYTE* body,size_t n,uint32_t id){BYTE* wire=calloc(1,24+n);assert(wire);put16(wire,RDPDR_CTYP_CORE);put16(wire+2,PAKID_CORE_DEVICE_IOREQUEST);put32(wire+4,7);put32(wire+8,handle);put32(wire+12,id);put32(wire+16,major);put32(wire+20,minor);if(n)memcpy(wire+24,body,n);assert(rdpsync_drive_ingress(f->drive,wire,24+n,CHANNEL_FLAG_FIRST|CHANNEL_FLAG_LAST,24+n));free(wire);IRP* irp=calloc(1,sizeof(*irp));assert(irp);irp->input=Stream_New(NULL,n?n:1);assert(irp->input);if(n)Stream_Write(irp->input,body,n);Stream_SealLength(irp->input);Stream_SetPosition(irp->input,0);irp->output=Stream_New(NULL,128);assert(irp->output);Stream_Zero(irp->output,RDPDR_DEVICE_IO_RESPONSE_LENGTH);irp->MajorFunction=major;irp->MinorFunction=minor;irp->FileId=handle;irp->CompletionId=id;irp->Complete=complete;irp->Discard=discard;return irp;}
@@ -481,4 +484,21 @@ static void legacy_directory_close_guards(void) {
     assert(!request(&f,IRP_MJ_CLOSE,0,retained,NULL,0));assert(!stat(child,&st));cleanup(&f);
 }
 
-int main(void){protocol_owner=pthread_self();retained_mkdir_delete_tests();legacy_directory_close_guards();legacy_delete_tests();xrdp_broad_create_tests();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}
+
+static void drain_resume_tests(void) {
+ Fixture f;setup(&f,2);uint32_t h=create(&f,"drain.bin",GENERIC_READ,FILE_CREATE,FILE_NON_DIRECTORY_FILE);
+ BYTE body[32]={0};put32(body,8);enqueue(&f,IRP_MJ_READ,0,h,body,32);
+ size_t before=consumed,calls=drain_calls;transport_pending=RDPSYNC_DRIVE_TRANSPORT_HIGH+123;
+ assert(rdpsync_drive_pump(f.drive,&f.instance)&&consumed==before&&drain_calls==calls+1);
+ assert(f.drive->pending_count==1);drain_override=0;
+ assert(rdpsync_drive_pump(f.drive,&f.instance)&&consumed==before+1&&!f.drive->pending_count);
+ assert(f.drive->peak_transport_pending==RDPSYNC_DRIVE_TRANSPORT_HIGH+123);
+ enqueue(&f,IRP_MJ_READ,0,h,body,32);before=consumed;size_t reserved=f.drive->pending_response_bytes;
+ transport_pending=10;drain_override=-3;
+ assert(!rdpsync_drive_pump(f.drive,&f.instance)&&consumed==before&&f.drive->pending_count==1&&f.drive->pending_response_bytes==reserved);
+ cleanup(&f);
+ setup(&f,2);calls=drain_calls;transport_pending=0;assert(rdpsync_drive_pump(f.drive,&f.instance));
+ transport_pending=-1;assert(rdpsync_drive_pump(f.drive,&f.instance));transport_pending=-2;assert(rdpsync_drive_pump(f.drive,&f.instance));assert(drain_calls==calls);cleanup(&f);
+}
+
+int main(void){protocol_owner=pthread_self();drain_resume_tests();retained_mkdir_delete_tests();legacy_directory_close_guards();legacy_delete_tests();xrdp_broad_create_tests();missing_name_wire_status_tests();wire_separator_tests();diagnostic_privacy_test();xrdp_lookup_replay();utf_tests();filesystem_tests();timestamp_tests();flow_tests();epoch_tests();directory_identity_tests();lifecycle_race_test();rejection_test();admission_tests();readonly_tests();puts("production RDPDR codec: create/read/write/query/list/rename/delete/flush/RO, strict Unicode/path, actual broker, bounded admission, no-drain/revoke, consumed failure, reannounce epoch PASS (synthetic transport)");return 0;}

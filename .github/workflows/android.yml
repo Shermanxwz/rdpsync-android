@@ -55,6 +55,7 @@ jobs:
           python3 scripts/collect-native-notices.py --check
           python3 scripts/fixtures/test_collect_android_evidence.py
           python3 scripts/fixtures/test_emulator_boot_health.py
+          python3 scripts/fixtures/test_network_readiness.py
           python3 scripts/fixtures/test_xrdp_drive_files.py
           python3 scripts/test-freerdp-flow-patch.py
           python3 scripts/test-product-ui.py

@@ -30,6 +30,42 @@ class FlowPatchTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 patch.apply(root, pins)
 
+    def test_exact_old_suffix_upgrade_and_partial_rejection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pins = {}
+            for relative in patch.PINNED:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"original")
+                pins[relative] = hashlib.sha256(b"original").hexdigest()
+            target = root / "libfreerdp/core/transport.c"
+            target.write_bytes(b"original" + patch.READ_ONLY_SUFFIX)
+            self.assertTrue(patch.apply(root, pins))
+            self.assertEqual(target.read_bytes(), b"original" + patch.SUFFIX)
+            target.write_bytes(b"original" + patch.SUFFIX[:-10])
+            before = target.read_bytes()
+            with self.assertRaises(ValueError):
+                patch.apply(root, pins)
+            self.assertEqual(target.read_bytes(), before)
+
+    def test_tcp_partial_patch_refuses_both_writes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pins = {}
+            for relative in patch.PINNED:
+                target = root / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(b"original")
+                pins[relative] = hashlib.sha256(b"original").hexdigest()
+            tcp = root / "libfreerdp/core/tcp.c"
+            tcp.write_bytes(b"original" + patch.TCP_SUFFIX[:-7])
+            before = tcp.read_bytes()
+            with self.assertRaises(ValueError):
+                patch.apply(root, pins)
+            self.assertEqual(tcp.read_bytes(), before)
+            self.assertEqual((root / "libfreerdp/core/transport.c").read_bytes(), b"original")
+
     def test_dependency_drift_does_not_modify_transport(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

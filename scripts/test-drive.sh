@@ -34,9 +34,12 @@ root, out = map(Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location("probe", root / "scripts/patch-freerdp-flow-control.py")
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-(out / "flow_accessor_test.c").write_bytes((root / "app/src/test/cpp/flow_accessor_test.c").read_bytes() + module.SUFFIX)
+(out / "flow_accessor_test.c").write_bytes((root / "app/src/test/cpp/flow_accessor_test.c").read_bytes() + module.SUFFIX + module.TCP_VALIDATOR_SUFFIX)
 PYPROBE
 "${HOST_CC:-cc}" -std=c11 -g -O1 -Wall -Wextra -Werror \
   -fsanitize="${SANITIZERS:-address,undefined}" -fno-omit-frame-pointer \
   "$OUT/flow_accessor_test.c" -lssl -lcrypto -o "$OUT/flow_accessor_test"
 "$OUT/flow_accessor_test"
+
+# Actual nonblocking kernel socket with exact pinned buffered BIO/ringbuffer.
+python3 "$ROOT/scripts/test-flow-drain-socket.py"

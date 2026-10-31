@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.2.0 Preview 3 — candidate
+## 1.2.0 Preview 3 — implementation and release scope
 
 - Added an opt-in RDPDR filesystem for the persistent app-private Shared space, with read-only default and separate read/write consent. The app and remote peer access the same confined workspace; explicit Android file-picker import/export copies do not synchronize phone folders.
 - Added app-side browsing, create/rename/delete, bounded storage and remote backpressure, conflicting-handle errors, revocation and reconnect persistence. Remote access never includes other app files or arbitrary phone directories.

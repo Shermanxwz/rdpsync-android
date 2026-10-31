@@ -31,5 +31,7 @@ void rdpsync_drive_state(RdpDrive* drive, int64_t state[13]);
 void rdpsync_drive_diagnostics(RdpDrive* drive, char* output, size_t capacity);
 /* The exact pinned, read-only upstream addition. Negative != an empty queue. */
 INT64 rdpsync_freerdp_pending_bytes(rdpContext* context);
+/* Owner only: one bounded nonblocking ciphertext drain; -3 is fatal. */
+INT64 rdpsync_freerdp_drain_pending(rdpContext* context);
 
 #endif

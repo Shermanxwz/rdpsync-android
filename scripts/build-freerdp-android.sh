@@ -17,8 +17,8 @@ fi
 # Verify the exact tested upstream commit, rather than silently accepting a moved tag.
 [[ "$(git -C "$FREERDP_DIR" rev-parse HEAD)" == "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc" ]] || { echo "Unexpected FreeRDP source revision" >&2; exit 1; }
 # A pinned HEAD alone does not establish a reviewed working tree. Allow only
-# the exact idempotent accessor addition; reject unrelated dirty cache sources.
-if [[ -n "$(git -C "$FREERDP_DIR" diff --name-only HEAD -- | grep -v '^libfreerdp/core/transport.c$')" ]] ||
+# the exact idempotent scoped flow-control addition; reject unrelated dirty cache sources.
+if [[ -n "$(git -C "$FREERDP_DIR" diff --name-only HEAD -- | grep -Ev '^libfreerdp/core/(transport|tcp)\.c$')" ]] ||
    [[ -n "$(git -C "$FREERDP_DIR" ls-files --others --exclude-standard)" ]]; then
     echo "Unreviewed FreeRDP working-tree changes" >&2; exit 1
 fi
@@ -35,11 +35,13 @@ sha = lambda value: hashlib.sha256(value).hexdigest()
 record = {
     "abi": sys.argv[4],
     "upstream_commit": "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc",
-    "read_only_patch_script_sha256": sha(script.read_bytes()),
-    "read_only_patch_suffix_sha256": sha(patch.SUFFIX),
+    "flow_patch_script_sha256": sha(script.read_bytes()),
+    "flow_patch_suffix_sha256": sha(patch.SUFFIX),
+    "tcp_flow_suffix_sha256": sha(patch.TCP_SUFFIX),
+    "patched_tcp_sha256": sha((source / "libfreerdp/core/tcp.c").read_bytes()),
     "patched_transport_sha256": sha((source / "libfreerdp/core/transport.c").read_bytes()),
     "unpatched_source_sha256": patch.PINNED,
-    "scope": "direct TLS/default transport only; read-only buffered ciphertext count; stock DRIVE disabled",
+    "scope": "direct TLS/default transport only; read-only buffered ciphertext count plus owner-only bounded nonblocking ciphertext drain; stock DRIVE disabled",
 }
 (build / ("rdpsync-native-provenance-" + sys.argv[4] + ".json")).write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")
 PYPROVENANCE

@@ -208,7 +208,7 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 Get the latest APK from the project's GitHub Releases page.
 
 - The existing [Preview 2 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.1.0-preview.2) remains unchanged; its APK does not include Preview 3 changes.
-- Preview 3 (`1.2.0-preview.3-debug`, `com.rdp.sync.preview3`) is a candidate, not yet a published release. Publication awaits all exact-commit acceptance gates; no candidate download is promised here.
+- For Preview 3 (`1.2.0-preview.3-debug`, `com.rdp.sync.preview3`), use only the APK attached to a tagged GitHub Release with its exact-commit acceptance report. Source code and CI artifacts alone are not a published release; the release carries the verified download details.
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 
