@@ -99,12 +99,14 @@ class ReadinessContract(unittest.TestCase):
                    source_sha='a'*40, run_id='123', force_avd_creation=True, enable_hw_keyboard=False,
                    fresh_avd_absence_verified=True, no_snapshot=True, avd_name='test', device_sdk='35',
                    avd_config_mtime=2, setup_started_epoch=1, image_sysdir='/sdk/system-images/android-35/google_apis/x86_64',
-                   device_fingerprint='synthetic', device_boot_id='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', preflight={'success':True})
+                   device_fingerprint='synthetic', device_boot_id='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', preflight={'success':True,'avd_root':'/home/runner/.android/avd'},
+                   avd_metadata_path='/home/runner/.android/avd/test.ini', avd_config_path='/home/runner/.android/avd/test.avd/config.ini',
+                   avd_metadata_mtime=2,avd_identity_proof='fresh named metadata path plus live emulator console name')
         with tempfile.TemporaryDirectory() as directory:
             out=Path(directory)
-            for field,name in (('preflight_sha256','ime-preflight.json'),('avd_config_sha256','avd-config.ini'),
+            for field,name in (('avd_metadata_sha256','avd-metadata.ini'),('preflight_sha256','ime-preflight.json'),('avd_config_sha256','avd-config.ini'),
                                ('image_properties_sha256','image-source.properties'),('image_package_sha256','image-package.xml'),('workflow_sha256','workflow.yml')):
-                raw=json.dumps(env['preflight']).encode() if name=='ime-preflight.json' else b'synthetic'
+                raw=json.dumps(env['preflight']).encode() if name=='ime-preflight.json' else b'path=/home/runner/.android/avd/test.avd\ntarget=android-35\n' if name=='avd-metadata.ini' else b'synthetic'
                 (out/name).write_bytes(raw);env[field]=hashlib.sha256(raw).hexdigest()
             (out/'ime-environment.json').write_text(json.dumps(env))
             (out/'tested-sha.txt').write_text(env['source_sha'])
@@ -116,7 +118,7 @@ class ReadinessContract(unittest.TestCase):
                       factory_default=dict(resolved_default=True,setting_row=row,environment=env))
             dumps=dict(zip(collector.IME_DUMPS,[dump(2),dump(2),'SECURE SETTINGS (user 0)\n'+row+'\nSYSTEM SETTINGS (user 0)\n','trace\ntrue\n',json.dumps(env)]))
             collector.validate_ime_setting(good);collector.validate_ime_raw(good,dumps,out)
-            for key,badvalue in [('success',False),('fresh_avd_absence_verified',False),('no_snapshot',False),('enable_hw_keyboard',True),('device_sdk','34'),('avd_config_mtime',0),('action_sha','b'*40)]:
+            for key,badvalue in [('success',False),('fresh_avd_absence_verified',False),('no_snapshot',False),('enable_hw_keyboard',True),('device_sdk','34'),('avd_config_mtime',0),('action_sha','b'*40),('avd_metadata_mtime',0),('avd_metadata_path','/other/test.ini'),('avd_identity_proof','placeholder')]:
                 bad=copy.deepcopy(good);bad['factory_default']['environment'][key]=badvalue
                 with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)
             for altered in (row.replace('pkg:android','pkg:com.android.shell'), row.replace('default:1','default:0'), row.replace('defaultSystemSet:true','defaultSystemSet:false')):
@@ -130,6 +132,25 @@ class ReadinessContract(unittest.TestCase):
                             dict(dumps,**{'ime-setting-provider-dump.txt':dumps['ime-setting-provider-dump.txt'].replace(row,row+'\n'+row)}),
                             dict(dumps,**{'ime-setting-environment.txt':'{}'})]:
                 with self.assertRaises(AssertionError):collector.validate_ime_raw(good,changed,out)
+            metadata_path = out/'avd-metadata.ini'
+            original_metadata = metadata_path.read_bytes()
+            metadata_path.write_bytes(original_metadata + b'# tampered\n')
+            with self.assertRaises(AssertionError):collector.validate_ime_raw(good,dumps,out)
+            metadata_path.write_bytes(original_metadata)
+            collector.validate_ime_raw(good,dumps,out)
+            for raw in (b'path=/other/test.avd\ntarget=android-35\n',
+                        original_metadata + b'path=/home/runner/.android/avd/test.avd\n',
+                        original_metadata.replace(b'android-35',b'android-34')):
+                metadata_path.write_bytes(raw)
+                changed = copy.deepcopy(good)
+                changed['factory_default']['environment']['avd_metadata_sha256'] = hashlib.sha256(raw).hexdigest()
+                changed_env = changed['factory_default']['environment']
+                (out/'ime-environment.json').write_text(json.dumps(changed_env))
+                changed_dumps = dict(dumps, **{'ime-setting-environment.txt':json.dumps(changed_env)})
+                with self.assertRaises(AssertionError):collector.validate_ime_raw(changed,changed_dumps,out)
+            metadata_path.write_bytes(original_metadata)
+            (out/'ime-environment.json').write_text(json.dumps(env))
+            collector.validate_ime_raw(good,dumps,out)
             (out/'tested-sha.txt').write_text('b'*40)
             with self.assertRaises(AssertionError):collector.validate_ime_raw(good,dumps,out)
             (out/'tested-sha.txt').write_text(env['source_sha'])

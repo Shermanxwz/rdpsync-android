@@ -131,6 +131,12 @@ class FixtureImeSettingRule : TestRule {
         check(environment.getString("preflight_sha256").matches(Regex("[0-9a-f]{64}")))
         check(environment.getString("avd_name") == "test" && environment.getString("device_sdk") == "35")
         check(environment.getLong("avd_config_mtime") >= environment.getLong("setup_started_epoch"))
+        check(environment.getLong("avd_metadata_mtime") >= environment.getLong("setup_started_epoch"))
+        check(environment.getString("avd_metadata_sha256").matches(Regex("[0-9a-f]{64}")))
+        check(environment.getString("avd_identity_proof") == "fresh named metadata path plus live emulator console name")
+        val avdRoot = environment.getJSONObject("preflight").getString("avd_root")
+        check(environment.getString("avd_metadata_path") == "$avdRoot/test.ini" &&
+            environment.getString("avd_config_path") == "$avdRoot/test.avd/config.ini")
         check(environment.getString("avd_config_sha256").matches(Regex("[0-9a-f]{64}")))
         check(environment.getString("image_properties_sha256").matches(Regex("[0-9a-f]{64}")))
         check(environment.getString("image_sysdir").replace('\\', '/').trimEnd('/').endsWith("/system-images/android-35/google_apis/x86_64"))

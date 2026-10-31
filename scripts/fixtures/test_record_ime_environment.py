@@ -18,6 +18,9 @@ class ProvenanceTest(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text('AvdId=test\nimage.sysdir.1='+m.IMAGE+'/\n')
         os.utime(self.config, (110,110))
+        self.marker=self.home/'.android/avd/test.ini'
+        self.marker.write_text('path='+str(self.config.parent)+'\npath.rel=avd/test.avd\ntarget=android-35\n')
+        os.utime(self.marker,(110,110))
         self.image = self.sdk/m.IMAGE
         self.image.mkdir(parents=True)
         (self.image/'source.properties').write_text('AndroidVersion.ApiLevel=35\nSystemImage.Abi=x86_64\nSystemImage.TagId=google_apis\n')
@@ -28,8 +31,34 @@ class ProvenanceTest(unittest.TestCase):
     def inspect(self, boundary=100, now=120):
         return m.inspect_files(self.home, self.sdk, boundary, now, self.workflow)
 
+    def test_actual_a0a95_config_old_red_new_green(self):
+        actual=(Path(__file__).parent/'testdata/avd-config-a0a95.ini').read_bytes()
+        self.assertNotIn('AvdId',m.properties(actual, {'AvdId','image.sysdir.1'}))
+        self.assertFalse(m.properties(actual, {'AvdId','image.sysdir.1'}).get('AvdId') == 'test')
+        self.config.write_bytes(actual);os.utime(self.config,(110,110))
+        fields,_=self.inspect();self.assertEqual(fields['avd_metadata_path'],str(self.marker))
+    def test_wrong_metadata_path(self):
+        self.marker.write_text('path=/elsewhere/test.avd\ntarget=android-35\n');os.utime(self.marker,(110,110))
+        with self.assertRaises(ValueError):self.inspect()
+    def test_wrong_metadata_relative_path(self):
+        self.marker.write_text('path='+str(self.config.parent)+'\npath.rel=avd/other.avd\ntarget=android-35\n');os.utime(self.marker,(110,110))
+        with self.assertRaises(ValueError):self.inspect()
+    def test_metadata_old(self):
+        os.utime(self.marker,(90,90))
+        with self.assertRaises(ValueError):self.inspect()
+    def test_metadata_symlink(self):
+        dest=self.root/'metadata';self.marker.rename(dest);self.marker.symlink_to(dest)
+        with self.assertRaises(ValueError):self.inspect()
+    def test_metadata_duplicate(self):
+        with self.marker.open('a') as f:f.write('path=/other\n')
+        os.utime(self.marker,(110,110))
+        with self.assertRaises(ValueError):self.inspect()
+    def test_raw_image_preserved_on_bad_config(self):
+        self.config.write_text('junk');os.utime(self.config,(110,110));raw={}
+        with self.assertRaises(ValueError):m.inspect_files(self.home,self.sdk,100,120,self.workflow,lambda n,d:raw.update({n:d}))
+        self.assertIn('image-source.properties',raw);self.assertIn('image-package.xml',raw)
     def test_good_real_files(self):
-        fields,raw=self.inspect();self.assertEqual(len(fields['avd_config_sha256']),64);self.assertEqual(len(raw),5)
+        fields,raw=self.inspect();self.assertEqual(len(fields['avd_config_sha256']),64);self.assertEqual(len(raw),6)
     def test_old_avd(self):
         with self.assertRaises(ValueError):self.inspect(111)
     def test_future_avd(self):
@@ -121,7 +150,9 @@ class ProvenanceTest(unittest.TestCase):
              'ANDROID_SERIAL':'emulator-5554','GITHUB_RUN_ID':'12345'}
         out=self.root/'evidence'
         moved=self.root/'moved';self.config.parent.rename(moved)
+        marker_bytes=self.marker.read_bytes();self.marker.unlink()
         pre=m.preflight(out,env,run);moved.rename(self.config.parent);os.utime(self.config,None)
+        self.marker.write_bytes(marker_bytes)
         env['RDP_AVD_SETUP_STARTED']=str(pre['setup_started_epoch'])
         w=self.root/'.github/workflows/emulator.yml';w.parent.mkdir(parents=True);w.write_bytes(self.workflow.read_bytes())
         if override:override(env,values,out)

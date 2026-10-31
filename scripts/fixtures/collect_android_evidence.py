@@ -106,11 +106,15 @@ def validate_ime_setting(value):
         env = proof['environment']
         assert env['success'] is True and env['schema'] == 1 and env['action_sha'] == 'a421e43855164a8197daf9d8d40fe71c6996bb0d'
         assert re.fullmatch(r'[0-9a-f]{40}', env['source_sha']) and re.fullmatch(r'[0-9]+', env['run_id'])
-        for key in ('avd_config_sha256', 'image_properties_sha256', 'preflight_sha256'):
+        for key in ('avd_config_sha256', 'image_properties_sha256', 'preflight_sha256', 'avd_metadata_sha256'):
             assert re.fullmatch(r'[0-9a-f]{64}', env[key])
         assert env['force_avd_creation'] is True and env['enable_hw_keyboard'] is False
         assert env['fresh_avd_absence_verified'] is True and env['no_snapshot'] is True
         assert env['avd_name'] == 'test' and env['device_sdk'] == '35'
+        assert env['avd_identity_proof'] == 'fresh named metadata path plus live emulator console name'
+        assert env['avd_metadata_mtime'] >= env['setup_started_epoch']
+        root = env['preflight']['avd_root']
+        assert env['avd_metadata_path'] == root + '/test.ini' and env['avd_config_path'] == root + '/test.avd/config.ini'
         assert env['avd_config_mtime'] >= env['setup_started_epoch'] > 0
         assert env['image_sysdir'].replace('\\', '/').rstrip('/').endswith('/system-images/android-35/google_apis/x86_64')
         assert env['device_fingerprint'] and re.fullmatch(r'[0-9a-f-]{36}', env['device_boot_id'])
@@ -153,11 +157,21 @@ def validate_ime_raw(value, dumps, out):
     assert rows == [proof['setting_row']]
     env = proof['environment']
     assert env == json.loads((Path(out) / 'ime-environment.json').read_text())
-    for field, name in (('preflight_sha256', 'ime-preflight.json'), ('avd_config_sha256', 'avd-config.ini'),
+    for field, name in (('avd_metadata_sha256', 'avd-metadata.ini'), ('preflight_sha256', 'ime-preflight.json'), ('avd_config_sha256', 'avd-config.ini'),
                         ('image_properties_sha256', 'image-source.properties'), ('image_package_sha256', 'image-package.xml'),
                         ('workflow_sha256', 'workflow.yml')):
         assert hashlib.sha256((Path(out) / name).read_bytes()).hexdigest() == env[field]
     assert json.loads((Path(out) / 'ime-preflight.json').read_text()) == env['preflight']
+    metadata = {}
+    for line in (Path(out) / 'avd-metadata.ini').read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith(('#', ';')): continue
+        key, val = line.split('=', 1)
+        key, val = key.strip(), val.strip()
+        assert key and key not in metadata
+        metadata[key] = val
+    assert metadata['path'] == str(Path(env['avd_config_path']).parent)
+    assert metadata.get('path.rel', 'avd/test.avd') == 'avd/test.avd' and metadata['target'] == 'android-35'
     assert env['source_sha'] == (Path(out) / 'tested-sha.txt').read_text().strip()
     assert env['device_fingerprint'] == (Path(out) / 'emulator-fingerprint.txt').read_text().strip()
 

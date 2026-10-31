@@ -85,37 +85,51 @@ def inspect_files(home, sdk, boundary, now, workflow, save=lambda name, data: No
     require(isinstance(boundary, int) and 0 < boundary <= now and now-boundary <= 7200, 'invalid setup boundary')
     home, sdk = Path(home), Path(sdk)
     require(home.is_absolute() and sdk.is_absolute(), 'relative host root')
-    raw = {}
-    data, _ = read_regular(workflow)
-    raw['workflow.yml'] = data
-    save('workflow.yml', data)
-    raw['action-block.txt'] = workflow_policy(data).encode()
     config = home / '.android/avd/test.avd/config.ini'
-    data, info = read_regular(config)
-    raw['avd-config.ini'] = data
-    save('avd-config.ini', data)
+    marker = home / '.android/avd/test.ini'
+    image_path = sdk / IMAGE
+    raw, stats, errors = {}, {}, []
+    # Read only predetermined expected paths; preserve all bounded raw evidence
+    # before interpreting any schema. Never follow a path supplied by config.
+    for name, path in [('workflow.yml', workflow), ('avd-config.ini', config),
+                       ('avd-metadata.ini', marker), ('image-source.properties', image_path/'source.properties'),
+                       ('image-package.xml', image_path/'package.xml')]:
+        try:
+            raw[name], stats[name] = read_regular(path)
+            save(name, raw[name])
+        except (OSError, ValueError) as error:
+            errors.append(name + ': ' + str(error))
+    require(not errors, 'bounded provenance reads failed: ' + '; '.join(errors))
+    raw['action-block.txt'] = workflow_policy(raw['workflow.yml']).encode()
+    data, info = raw['avd-config.ini'], stats['avd-config.ini']
     require(boundary <= info.st_mtime <= now, 'AVD configuration predates setup or is future dated')
+    marker_info = stats['avd-metadata.ini']
+    require(boundary <= marker_info.st_mtime <= now, 'AVD metadata predates setup or is future dated')
+    metadata = properties(raw['avd-metadata.ini'])
+    require(metadata.get('path') == str(config.parent), 'AVD metadata path does not bind expected directory')
+    require(metadata.get('path.rel', 'avd/test.avd') == 'avd/test.avd', 'AVD metadata relative path mismatch')
+    require(metadata.get('target') == 'android-35', 'AVD metadata target mismatch')
     props = properties(data, {'AvdId', 'image.sysdir.1'})
-    require(props.get('AvdId') == 'test', 'wrong AVD identity')
+    # AvdId is not a required disk schema key. Current emulator hardware defaults
+    # contain avd.id/avd.name=<build>; neither is treated as identity proof.
+    # Identity is fresh test.ini->exact test.avd plus live console name below.
+    require('AvdId' not in props or props['AvdId'] == 'test', 'conflicting legacy AVD identity')
     image = props.get('image.sysdir.1', '')
     require(image.rstrip('/') == IMAGE or image.rstrip('/') == str(sdk / IMAGE), 'unexpected system image path')
-    image_path = sdk / IMAGE
-    p, _ = read_regular(image_path / 'source.properties')
-    raw['image-source.properties'] = p
-    save('image-source.properties', p)
+    p, x = raw['image-source.properties'], raw['image-package.xml']
     ip = properties(p)
     for key, value in {'AndroidVersion.ApiLevel': '35', 'SystemImage.Abi': 'x86_64', 'SystemImage.TagId': 'google_apis'}.items():
         require(ip.get(key) == value, 'unexpected image metadata: ' + key)
-    x, _ = read_regular(image_path / 'package.xml')
-    raw['image-package.xml'] = x
-    save('image-package.xml', x)
     root = ET.fromstring(x)
     local = [e for e in root.iter() if e.tag.split('}')[-1] == 'localPackage']
     require(len(local) == 1 and local[0].get('path') == PACKAGE, 'unexpected package identity')
     def texts(name):
         return [e.text for e in local[0].iter() if e.tag.split('}')[-1] == name]
     require(texts('api-level') == ['35'] and texts('abi') == ['x86_64'] and 'google_apis' in texts('id'), 'unexpected package details')
-    return dict(avd_config_path=str(config), avd_config_mtime=info.st_mtime,
+    return dict(avd_metadata_path=str(marker), avd_metadata_mtime=marker_info.st_mtime,
+                avd_metadata_sha256=hashlib.sha256(raw['avd-metadata.ini']).hexdigest(),
+                avd_identity_proof='fresh named metadata path plus live emulator console name',
+                avd_config_path=str(config), avd_config_mtime=info.st_mtime,
                 avd_config_sha256=hashlib.sha256(data).hexdigest(), image_sysdir=str(image_path),
                 image_properties_sha256=hashlib.sha256(p).hexdigest(), image_package_sha256=hashlib.sha256(x).hexdigest(),
                 image_properties=ip, workflow_sha256=hashlib.sha256(raw['workflow.yml']).hexdigest()), raw
