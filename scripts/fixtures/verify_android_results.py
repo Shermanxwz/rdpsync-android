@@ -9,7 +9,7 @@ import xml.etree.ElementTree as ET
 EXPECTED = {
     'com.rdp.sync.NativeRuntimeInstrumentedTest': 1,
     'com.rdp.sync.NativeTlsInstrumentedTest': 1,
-    'com.rdp.sync.RdpFixtureInstrumentedTest': 1,
+    'com.rdp.sync.RdpFixtureInstrumentedTest': 2,
     'com.rdp.sync.security.CredentialStorageInstrumentedTest': 11,
 }
 
@@ -36,13 +36,17 @@ def verify(results, marker):
                 raise ValueError('Duplicate Android test result')
             identities.add(identity)
             classes[identity[0]] += 1
-    if dict(classes) != EXPECTED or len(identities) != 14:
-        raise ValueError(f'Expected all 14 required Android tests, observed {dict(classes)}')
-    return {'tests': 14, 'failures': 0, 'errors': 0, 'skipped': 0,
+    if dict(classes) != EXPECTED or len(identities) != 15:
+        raise ValueError(f'Expected all 15 required Android tests, observed {dict(classes)}')
+    required_rotation_cases = {('com.rdp.sync.RdpFixtureInstrumentedTest', name) for name in (
+        'realDesktopDisplayInputResizeAndWeakLink', 'actualNavigationBackRestoresSessionOrientationWithoutConnecting')}
+    if not required_rotation_cases <= identities:
+        raise ValueError('Missing named live-RDP or navigation rotation test')
+    return {'tests': 15, 'failures': 0, 'errors': 0, 'skipped': 0,
             'classes': dict(classes), 'reports': [str(p.relative_to(results)) for p in reports]}
 
 
 if __name__ == '__main__':
     result = verify(pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]))
     pathlib.Path(sys.argv[3]).write_text(json.dumps(result, indent=2) + '\n')
-    print('Verified all 14 required Android tests: zero failures, errors or skips')
+    print('Verified all 15 required Android tests: zero failures, errors or skips')

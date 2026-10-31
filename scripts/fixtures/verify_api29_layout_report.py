@@ -54,6 +54,10 @@ def verify(out: Path, reports: Path):
     assert report['legacy_edge_gesture']['visibility_asserted'] is False, 'Do not infer API29 transient reveal from flags'
     assert report['restored_bars']['status'] == report['original_bars']['status']
     assert report['restored_bars']['navigation'] == report['original_bars']['navigation']
+    assert report['production_orientation_roundtrips'] == 2
+    assert report['original_orientation_request'] == report['restored_orientation_request'] == 1
+    assert report['session_key_replacement_restored_predecessor'] is True
+    assert report['disposed_callback_ignored'] is True
     hashes = {}
     for name in ('portrait-01-hidden', 'portrait-02-ime-visible', 'portrait-03-restored',
                  'portrait-04-bordered', 'portrait-05-fullscreen-restored',

@@ -1,15 +1,24 @@
-# RdpSync
+# RDPsync
 
 Android RDP remote desktop client with WebDAV device synchronization and mobile-first touch controls.
 
-RdpSync is an open Android RDP client that combines remote desktop connections, WebDAV profile portability and mobile touch controls.
+RDPsync is an open Android RDP client that combines remote desktop connections, WebDAV profile portability and mobile touch controls.
 
 [![Android](https://img.shields.io/badge/Android-8.0%2B-green)](https://developer.android.com)
 [![Kotlin](https://img.shields.io/badge/Kotlin-2.0-blue)](https://kotlinlang.org)
 [![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-## Preview 3: Shared space and refreshed UI (development preview)
+## Preview 4: Phone rotation and RDPsync naming (development preview)
+
+Open the remote session menu and choose **Rotate screen / 旋转屏幕** to switch
+between phone portrait and landscape without moving the handset. This is an
+Android orientation request, not a rotated remote bitmap. The session keeps its
+existing desktop view; leaving restores the prior orientation policy. Platform
+or device restrictions (such as some multi-window modes) can refuse the request.
+The launcher and app title now display **RDPsync** in both languages.
+
+### Shared space and refreshed UI from Preview 3
 
 The current development work adds a **real RDPDR filesystem drive**, not a renamed
 clipboard transfer. The persistent, app-private **Shared space** is the only
@@ -44,14 +53,14 @@ phone folders. Opening the Shared space browser alone grants no remote access.
 [verification notes](docs/VERIFICATION.md); definitions and host tests are not a
 substitute for an actual mounted drive, stalled-peer recovery or Android UI tests.
 
-The delivery package is **RdpSync Preview 3** (`com.rdp.sync.preview3`), using a
-development signer. It installs alongside Preview 2; it does not overwrite or
-migrate its profiles/files, and no uninstall is required. Persistent signing-key
+The delivery package is **RDPsync** (`com.rdp.sync.preview4`), using a
+development signer. It installs alongside Preview 3; it does not overwrite or
+migrate existing profiles/files, and no uninstall is required. Persistent signing-key
 setup was declined for this iteration. Future differently signed development
 builds cannot be promised to update the same package in place. The published
-[Preview 2 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.1.0-preview.2)
-is preserved unchanged. No physical Windows-server/phone or Windows App parity
-claim is made by the new fixture plan.
+[Preview 3 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.3)
+and older releases are preserved unchanged. No physical Windows-server/phone or
+Windows App parity claim is made by the fixture plan.
 
 ## Published Preview 2 baseline: display, input and compatibility
 

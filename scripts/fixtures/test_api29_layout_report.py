@@ -28,6 +28,8 @@ class Api29EvidenceGateTest(unittest.TestCase):
                            samples=[dict(elapsed_ms=10001)], logical_callbacks=[dict(elapsed_ms=10002)],
                            legacy_edge_gesture=dict(visibility_asserted=False),
                            original_bars=dict(status=True, navigation=True), restored_bars=dict(status=True, navigation=True))
+        self.report.update(production_orientation_roundtrips=2, original_orientation_request=1, restored_orientation_request=1,
+                           session_key_replacement_restored_predecessor=True, disposed_callback_ignored=True)
         for mode in ('portrait', 'landscape'):
             self.report[f'{mode}_ime_preserved_every_logical_callback'] = True
             self.report[f'{mode}_visible_samples'] = 10
@@ -96,6 +98,20 @@ class Api29EvidenceGateTest(unittest.TestCase):
     def test_falsely_claimed_transient_reveal_rejected(self):
         self.report['legacy_edge_gesture']['visibility_asserted'] = True
         with self.assertRaises(AssertionError): self.validate()
+
+    def test_missing_rotation_roundtrip_rejected(self):
+        self.report['production_orientation_roundtrips'] = 1
+        with self.assertRaises(AssertionError): self.validate()
+
+    def test_wrong_orientation_restore_rejected(self):
+        self.report['restored_orientation_request'] = 0
+        with self.assertRaises(AssertionError): self.validate()
+
+    def test_missing_lifecycle_proof_rejected(self):
+        for key in ('session_key_replacement_restored_predecessor', 'disposed_callback_ignored'):
+            self.report[key] = False
+            with self.assertRaises(AssertionError): self.validate()
+            self.report[key] = True
 
     def test_missing_required_screenshot_rejected(self):
         (self.folder / 'portrait-02-ime-visible.png').unlink()

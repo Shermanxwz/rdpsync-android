@@ -15,7 +15,7 @@ def ledger(method):
     prefix = prefix_for(method, spec)
     expected = [f'{prefix}-{x}.png' for x in spec['suffixes']]
     return {'success': True, 'method': method, 'source_commit': COMMIT,
-            'package': 'com.rdp.sync.preview3', 'sdk': 35, 'synthetic_ui_only': True,
+            'package': 'com.rdp.sync.preview4', 'sdk': 35, 'synthetic_ui_only': True,
             'credential_screenshots': False, 'physical_foldable_test': False,
             'locale': spec['locale'], 'dark': spec['dark'], 'font_scale': spec['font_scale'],
             'activity_locale': spec['locale'], 'activity_font_scale': spec['font_scale'],

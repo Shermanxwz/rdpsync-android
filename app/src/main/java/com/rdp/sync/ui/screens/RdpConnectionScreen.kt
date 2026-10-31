@@ -71,6 +71,7 @@ import com.rdp.sync.security.CertificateTrustStore
 import com.rdp.sync.security.PendingCertificateTrust
 import com.rdp.sync.network.RdpInputDispatcher
 import com.rdp.sync.ui.rdp.RdpDesktopView
+import com.rdp.sync.ui.rdp.rememberSessionOrientation
 import com.rdp.sync.ui.rdp.SessionSystemBars
 import com.rdp.sync.ui.rdp.SessionUiDefaults
 import com.rdp.sync.ui.rdp.SessionViewportLayout
@@ -101,6 +102,7 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     val wideLandscapeToolbar = configuration.screenWidthDp >= 520
     var fullscreen by remember(device.id) { mutableStateOf(SessionUiDefaults.FULLSCREEN) }
     SessionSystemBars(fullscreen)
+    val rotateScreen = rememberSessionOrientation(device.id)
     var expandedLandscapeTools by remember(device.id) { mutableStateOf(false) }
     val compactLandscape = landscape && !expandedLandscapeTools
     val preferences = remember(context) { context.getSharedPreferences("session_preferences", Context.MODE_PRIVATE) }
@@ -462,7 +464,7 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                 onPaste = { showPaste = true }, onResetZoom = { desktopView?.resetZoom() },
                 onSendFiles = { openFiles(FileTransferDirection.SEND) },
                 onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) }, onExit = ::exitSession,
-                onSharedSpace = ::openSharedSpace, onSharedDrive = ::openSharedDrive)
+                onSharedSpace = ::openSharedSpace, onSharedDrive = ::openSharedDrive, onRotateScreen = rotateScreen)
         }
     )
     if (showSharedSpace) Dialog(onDismissRequest = { showSharedSpace = false },
@@ -554,7 +556,7 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
     pointerMode: Boolean, connected: Boolean, onKeyboard: () -> Unit, onPointerMode: () -> Unit,
     onChromeMode: () -> Unit, onSettings: () -> Unit, onPaste: () -> Unit, onResetZoom: () -> Unit,
     onSendFiles: () -> Unit, onReceiveFiles: () -> Unit, onExit: () -> Unit,
-    onSharedSpace: () -> Unit = {}, onSharedDrive: () -> Unit = {}) {
+    onSharedSpace: () -> Unit = {}, onSharedDrive: () -> Unit = {}, onRotateScreen: () -> Unit = {}) {
     val context = LocalContext.current
     var showTools by remember { mutableStateOf(false) }
     val menuScroll = rememberScrollState()
@@ -596,6 +598,8 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
                     if (fullscreen) DropdownMenuItem(text = { Text(context.getString(R.string.disconnect)) }, onClick = { showTools = false; onExit() })
                     DropdownMenuItem(text = { Text(if (fullscreen) context.getString(R.string.show_toolbar) else context.getString(R.string.fullscreen)) },
                         onClick = { showTools = false; onChromeMode() })
+                    DropdownMenuItem(text = { Text(context.getString(R.string.rotate_screen)) },
+                        onClick = { showTools = false; onRotateScreen() })
                     DropdownMenuItem(text = { Text(if (pointerMode) context.getString(R.string.direct_touch) else context.getString(R.string.trackpad)) }, enabled = connected,
                         onClick = { showTools = false; onPointerMode() })
                     DropdownMenuItem(text = { Text(context.getString(R.string.display_settings)) }, onClick = { showTools = false; onSettings() })

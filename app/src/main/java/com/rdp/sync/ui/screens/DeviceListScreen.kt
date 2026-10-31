@@ -50,7 +50,7 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
         if (!text.isNullOrBlank() && !showSettings) { snackbar.showSnackbar(UiMessages.text(context, text)); onMessageShown() }
     }
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }, topBar = {
-        TopAppBar(title = { Text("RdpSync") }, actions = {
+        TopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
             IconButton(onClick = onSharedSpace) { Icon(Icons.Default.FolderShared, stringResource(R.string.space_title)) }
             Box {
                 IconButton(enabled = uiState.webDavSettingsLoaded && !uiState.isSyncing, onClick = { showSyncMenu = true },
