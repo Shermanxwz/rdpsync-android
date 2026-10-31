@@ -26,6 +26,16 @@ def parse(text):
     complete = 'mNavigationBarController=' in text and not any(s in text for s in ('DUMP TIMEOUT', 'Failed to dump', 'Permission Denial'))
     ready = complete and selected == [GBOARD] and bound == selected and all(len(v) == 1 for v in (caches, instances, methods)) and methods != ['null']
     return ready, values
+
+def stream_receipt(scope='ime', size=100):
+    result = dict(scope=scope, source_bytes=size+30, selected_bytes=size, source_sha256='a'*64,
+                  producer_eof=True, complete=True, failure='', exit_status=0, exit_trailers=1,
+                  source_limit=16*1024*1024, line_prefix_limit=8192, selected_limit=65536, lines=10,
+                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
+    for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
+        result[key]=1
+    return result
+
 class ReadinessContract(unittest.TestCase):
     def test_false_to_true_same_existing_service(self):
         ok, before = parse(dump(1)); self.assertTrue(ok)
@@ -59,6 +69,11 @@ class ReadinessContract(unittest.TestCase):
         self.assertIn('SystemClock.elapsedRealtime() + 15_000', src)
         self.assertNotIn('sleep(10_000)', src)
         self.assertNotIn('ime set ', src)
+        self.assertIn('executeShellCommandRw("sh")', src)
+        self.assertIn('FixtureDumpProjection.shellScript(command)', src)
+        self.assertIn('ownedInput.getAndSet(null)', src)
+        self.assertIn('val buffer = ByteArray(4096)', src)
+        self.assertNotIn('executeShellCommand(executed)', src)
         workflow = (ROOT/'.github/workflows/emulator.yml').read_text()
         self.assertIn('force-avd-creation: true', workflow)
         self.assertIn('enable-hw-keyboard: false', workflow)
@@ -72,6 +87,7 @@ class ReadinessContract(unittest.TestCase):
         good = dict(verified_before_activity=True, restored=True, original='0', requested='1',
                     wrote_setting=True, readiness_mode='same-service-observer-transition', ime=GBOARD, initial_service=initial, consumption_samples=[after],
                     setup_elapsed_ms=1, ready_elapsed_ms=12, consumption_deadline_elapsed_ms=15, restore_elapsed_ms=20)
+        good['stream_projections'] = dict(initial=stream_receipt(),latest=stream_receipt())
         collector.validate_ime_setting(good)
         for mutation in ('new_service', 'unknown', 'already_true', 'late', 'not_restored', 'no_callback', 'cleanup_failure'):
             bad = copy.deepcopy(good)
@@ -117,7 +133,13 @@ class ReadinessContract(unittest.TestCase):
                       consumption_deadline_elapsed_ms=15,restore_elapsed_ms=20,
                       factory_default=dict(resolved_default=True,setting_row=row,environment=env))
             dumps=dict(zip(collector.IME_DUMPS,[dump(2),dump(2),'SECURE SETTINGS (user 0)\n'+row+'\nSYSTEM SETTINGS (user 0)\n','trace\ntrue\n',json.dumps(env)]))
+            good['stream_projections'] = dict(initial=stream_receipt(size=len(dumps[collector.IME_DUMPS[0]].encode())),
+                latest=stream_receipt(size=len(dumps[collector.IME_DUMPS[1]].encode())),
+                provider=stream_receipt('settings',len(dumps[collector.IME_DUMPS[2]].encode())))
             collector.validate_ime_setting(good);collector.validate_ime_raw(good,dumps,out)
+            for field, badvalue in [('producer_eof',False),('complete',False),('exit_trailers',2),('exit_status',1),('source_bytes',17*1024*1024),('service_headers',2),('source_sha256',''),('failure','late error')]:
+                bad=copy.deepcopy(good);bad['stream_projections']['initial'][field]=badvalue
+                with self.assertRaises(AssertionError,msg=field):collector.validate_ime_setting(bad)
             for key,badvalue in [('success',False),('fresh_avd_absence_verified',False),('no_snapshot',False),('enable_hw_keyboard',True),('device_sdk','34'),('avd_config_mtime',0),('action_sha','b'*40),('avd_metadata_mtime',0),('avd_metadata_path','/other/test.ini'),('avd_identity_proof','placeholder')]:
                 bad=copy.deepcopy(good);bad['factory_default']['environment'][key]=badvalue
                 with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)

@@ -12,6 +12,16 @@ spec = importlib.util.spec_from_file_location('collector', Path(__file__).with_n
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 
+
+def stream_receipt(scope='ime', size=100):
+    result = dict(scope=scope, source_bytes=size+30, selected_bytes=size, source_sha256='a'*64,
+                  producer_eof=True, complete=True, failure='', exit_status=0, exit_trailers=1,
+                  source_limit=16*1024*1024, line_prefix_limit=8192, selected_limit=65536, lines=10,
+                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
+    for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
+        result[key]=1
+    return result
+
 class CompositionPlanTests(unittest.TestCase):
     def test_declared_pinyin_frames_and_no_extra_gesture(self):
         value = dict(software_keyboard_declared_plan=dict(mode='pinyin-compose-commit-newline', gestures=['a', 'commit-Enter', 'newline-Enter']),
@@ -178,6 +188,7 @@ class Tests(unittest.TestCase):
             setup_elapsed_ms=1, ready_elapsed_ms=12, consumption_deadline_elapsed_ms=15, restore_elapsed_ms=20)
         names = m.IME_DUMPS
         data = b'synthetic dump fixture'
+        prerequisite['stream_projections'] = dict(initial=stream_receipt(size=len(data)), latest=stream_receipt(size=len(data)))
         contents = {name: data if i < 2 else b'' for i, name in enumerate(names)}
         prerequisite['dump_files'] = {name: dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()) for name, raw in contents.items()}
         prefix = '/sdcard/Download/rdpsync-evidence/'

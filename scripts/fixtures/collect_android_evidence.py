@@ -93,6 +93,19 @@ def validate_ledger(directory, value):
 def validate_ime_setting(value):
     assert value.get('verified_before_activity') is True and value.get('restored') is True
     assert not any('failure' in key for key in value), 'IME prerequisite or restoration failure'
+    streams = value['stream_projections']
+    expected = {'initial', 'latest', 'provider'} if value.get('original') == '1' else {'initial', 'latest'}
+    assert set(streams) == expected
+    for key, stream in streams.items():
+        scope = 'settings' if key == 'provider' else 'ime'
+        assert stream['scope'] == scope and stream['command_source'] == ('dumpsys -t 2 settings' if scope == 'settings' else 'dumpsys -t 2 input_method')
+        assert stream['producer_eof'] is True and stream['complete'] is True and stream['failure'] == ''
+        assert stream['exit_status'] == 0 and stream['exit_trailers'] == 1
+        assert stream['source_limit'] == 16*1024*1024 and stream['line_prefix_limit'] == 8192 and stream['selected_limit'] == 65536
+        assert 0 < stream['selected_bytes'] <= 65536 and stream['selected_bytes'] <= stream['source_bytes'] <= stream['source_limit']
+        assert re.fullmatch(r'[0-9a-f]{64}', stream['source_sha256']) and stream['lines'] > 0
+        required = ('secure_sections', 'system_sections', 'setting_rows') if scope == 'settings' else ('service_headers', 'observer_rows', 'service_completions', 'selected_ids', 'bound_ids', 'method_ids')
+        assert all(stream[k] == 1 for k in required)
     original = value.get('original')
     assert original in ('null', '0', '1') and value.get('requested') == '1'
     factory = original == '1'
@@ -142,6 +155,10 @@ IME_DUMPS = ('ime-setting-initial-dump.txt', 'ime-setting-latest-dump.txt',
              'ime-setting-provider-dump.txt', 'ime-setting-overlay.txt', 'ime-setting-environment.txt')
 
 def validate_ime_raw(value, dumps, out):
+    for key, name in (('initial', IME_DUMPS[0]), ('latest', IME_DUMPS[1])):
+        assert len(dumps[name].encode('utf-8')) == value['stream_projections'][key]['selected_bytes']
+    if value['original'] == '1':
+        assert len(dumps[IME_DUMPS[2]].encode('utf-8')) == value['stream_projections']['provider']['selected_bytes']
     if value['original'] != '1':
         assert all(not dumps[name] for name in IME_DUMPS[2:])
         return

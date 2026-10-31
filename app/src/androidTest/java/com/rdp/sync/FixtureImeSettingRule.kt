@@ -114,10 +114,10 @@ class FixtureImeSettingRule : TestRule {
     }
 
     private fun verifyFactoryDefault() {
-        // Save raw bounded evidence before parsing so an unknown device schema fails diagnostically.
+        // Save bounded content-minimal projections and provenance before parsing; unknown schemas fail diagnostically.
         environmentRaw = shell("cat /sdcard/Download/rdpsync-evidence/ime-environment.json")
         overlayDump = shell("cmd overlay lookup --user 0 --verbose com.android.providers.settings com.android.providers.settings:bool/def_show_ime_with_hard_keyboard")
-        settingsDump = shell("dumpsys -t 2 settings", maxBytes = 2 * 1024 * 1024)
+        settingsDump = shell("dumpsys -t 2 settings", projectionScope = "settings", projectionKey = "provider")
         val environment = JSONObject(environmentRaw)
         val arguments = InstrumentationRegistry.getArguments()
         check(environment.getInt("schema") == 1 && environment.getBoolean("success"))
@@ -173,7 +173,8 @@ class FixtureImeSettingRule : TestRule {
     }
 
     private fun observeIme(timeoutMs: Long): ImeState {
-        val dump = shell("dumpsys -t 2 input_method", timeoutMs)
+        val dump = shell("dumpsys -t 2 input_method", timeoutMs, projectionScope = "ime",
+            projectionKey = if (receipt.has("initial_service")) "latest" else "initial")
         latestDump = dump
         fun matches(pattern: String) = Regex(pattern).findAll(dump).map { it.groupValues[1] }.toList()
         return ImeState(
@@ -191,7 +192,7 @@ class FixtureImeSettingRule : TestRule {
     private fun persist() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val directory = File(context.getExternalFilesDir(null), "rdp-evidence").apply { mkdirs() }
-        // Disposable synthetic fixture only. Bounded full dumps retain parser failures;
+        // Disposable synthetic fixture only. Safe projections plus full-stream hashes retain parser failures;
         // ordinary production sessions never enable this rule or produce these records.
         val dumps = listOf("ime-setting-initial-dump.txt" to initialDump, "ime-setting-latest-dump.txt" to latestDump,
             "ime-setting-provider-dump.txt" to settingsDump, "ime-setting-overlay.txt" to overlayDump,
@@ -213,19 +214,60 @@ class FixtureImeSettingRule : TestRule {
             shell("cp ${File(directory, name).absolutePath} /sdcard/Download/rdpsync-evidence/$name")
         }
     }
-    private fun shell(command: String, timeoutMs: Long = 5_000, maxBytes: Int = 262144): String {
+    private fun shell(command: String, timeoutMs: Long = 5_000, maxBytes: Int = 262144,
+                      projectionScope: String? = null, projectionKey: String? = null): String {
         check(timeoutMs > 0) { "IME prerequisite command deadline expired" }
+        val projection = projectionScope?.let { FixtureDumpProjection(it) }
+        val executed = if (projection == null) command else FixtureDumpProjection.shellScript(command)
         val closing = AtomicBoolean(false)
         val owned = AtomicReference<ParcelFileDescriptor?>()
+        val ownedInput = AtomicReference<ParcelFileDescriptor?>()
         val executor = Executors.newSingleThreadExecutor()
         val future = executor.submit<String> {
             var descriptor: ParcelFileDescriptor? = null
+            var inputDescriptor: ParcelFileDescriptor? = null
+            var workerFailure: Throwable? = null
             try {
                 check(!closing.get()) { "IME prerequisite command canceled before launch" }
-                descriptor = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(command)
-                owned.set(descriptor)
+                val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+                if (projection == null) {
+                    descriptor = automation.executeShellCommand(command)
+                    owned.set(descriptor)
+                } else {
+                    // API35 UiAutomationConnection uses Runtime.exec(String), not a shell parser.
+                    // Start sh itself and feed its script through the public RW stdin pipe.
+                    val pipes = automation.executeShellCommandRw("sh")
+                    if (pipes.size != 2) {
+                        val error = IllegalStateException("Unexpected shell RW pipe count")
+                        for (pipe in pipes) try { pipe?.close() } catch (cleanup: Throwable) { error.addSuppressed(cleanup) }
+                        throw error
+                    }
+                    descriptor = pipes[0]
+                    inputDescriptor = pipes[1]
+                    owned.set(descriptor)
+                    ownedInput.set(inputDescriptor)
+                    check(!closing.get()) { "IME prerequisite command returned after deadline" }
+                    ParcelFileDescriptor.AutoCloseOutputStream(inputDescriptor).use {
+                        it.write(executed.toByteArray(Charsets.UTF_8))
+                    }
+                    ownedInput.compareAndSet(inputDescriptor, null)
+                }
                 check(!closing.get()) { "IME prerequisite command returned after deadline" }
                 ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { input ->
+                    if (projection != null) {
+                        val buffer = ByteArray(4096)
+                        try {
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                projection.accept(buffer, count)
+                            }
+                        } catch (error: Throwable) {
+                            try { projection.finish(false) } catch (incomplete: Throwable) { error.addSuppressed(incomplete) }
+                            throw error
+                        }
+                        return@use projection.finish(true)
+                    }
                     val output = ByteArrayOutputStream()
                     val buffer = ByteArray(512)
                     while (true) {
@@ -236,10 +278,20 @@ class FixtureImeSettingRule : TestRule {
                     }
                     output.toString(Charsets.UTF_8.name())
                 }
+            } catch (error: Throwable) {
+                workerFailure = error
+                throw error
             } finally {
-                // Worker also owns closure if Binder returns after the caller's deadline.
-                descriptor?.close()
+                // Worker also owns both pipes if Binder returns after the caller's deadline.
+                var closeFailure: Throwable? = null
+                for (pipe in listOf(inputDescriptor, descriptor)) {
+                    try { pipe?.close() } catch (error: Throwable) {
+                        if (closeFailure == null) closeFailure = error else closeFailure.addSuppressed(error)
+                    }
+                }
                 owned.compareAndSet(descriptor, null)
+                ownedInput.compareAndSet(inputDescriptor, null)
+                closeFailure?.let { if (workerFailure != null) workerFailure.addSuppressed(it) else throw it }
             }
         }
         var failure: Throwable? = null
@@ -251,7 +303,11 @@ class FixtureImeSettingRule : TestRule {
         } finally {
             closing.set(true)
             var cleanupFailure: Throwable? = null
-            try { owned.getAndSet(null)?.close() } catch (error: Throwable) { cleanupFailure = error }
+            for (pipe in listOf(ownedInput.getAndSet(null), owned.getAndSet(null))) {
+                try { pipe?.close() } catch (error: Throwable) {
+                    if (cleanupFailure == null) cleanupFailure = error else cleanupFailure.addSuppressed(error)
+                }
+            }
             future.cancel(true)
             executor.shutdownNow()
             try {
@@ -259,6 +315,20 @@ class FixtureImeSettingRule : TestRule {
             } catch (error: Throwable) {
                 if (error is InterruptedException) Thread.currentThread().interrupt()
                 if (cleanupFailure == null) cleanupFailure = error else cleanupFailure.addSuppressed(error)
+            }
+            if (projection != null && projectionKey != null) {
+                // Even timeout/overflow retains the actual bytes/hash and safe partial projection.
+                try { projection.finish(false) } catch (_: Throwable) { /* primary failure is retained */ }
+                val streams = receipt.optJSONObject("stream_projections") ?: JSONObject().also {
+                    receipt.put("stream_projections", it)
+                }
+                streams.put(projectionKey, JSONObject(projection.receipt()).put("command_source", command))
+                val partial = projection.projection()
+                when (projectionKey) {
+                    "initial" -> { initialDump = partial; latestDump = partial }
+                    "latest" -> latestDump = partial
+                    "provider" -> settingsDump = partial
+                }
             }
             cleanupFailure?.let { if (failure != null) failure.addSuppressed(it) else throw it }
         }

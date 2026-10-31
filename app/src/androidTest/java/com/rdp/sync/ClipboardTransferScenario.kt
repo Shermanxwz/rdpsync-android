@@ -24,6 +24,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
+import com.rdp.sync.network.CertificateChallenge
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.transfer.TransferFailure
 import com.rdp.sync.ui.rdp.RdpDesktopView
@@ -42,11 +43,15 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 
 /** Shared strict SAF/CLIPRDR scenario; each concrete class uses a real, fixed peer. */
+@OptIn(androidx.compose.ui.test.ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer) {
     @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("gnomeFixture", "xrdpFileFixture")
-    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+    // Keep external IO completion effects on the test-clock owner, not its worker.
+    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private val automation get() = instrumentation.uiAutomation
@@ -117,14 +122,45 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             // One original deadline covers both the observed acknowledgement and
             // exact app-dialog readiness; no trust/input is retried after failure.
             val trustReadyDeadline = SystemClock.elapsedRealtime() + 30_000
+            val certificateReadiness = JSONArray()
+            measurements.put("certificate_readiness", certificateReadiness)
+            var nextCertificateSample = 0L
             val beforeTrust = acknowledgeSystemImmersiveCoachmark(compose.activity,
                 { compose.mainClock.advanceTimeBy(32); instrumentation.waitForIdleSync() },
                 { screenshot("00-system-immersive-coachmark") },
                 { retainCoachmark("before_certificate", it) }, deadlineElapsedMs = trustReadyDeadline,
                 readyWhenSystemOverlayAbsent = {
-                    RdpConnector.certificateChallenge()?.fingerprint == fingerprint &&
-                        compose.onAllNodesWithText(trustTitle).fetchSemanticsNodes().size == 1 &&
-                        focusedCertificateTitle(trustTitle)
+                    // Exactly one existing native read, with the connector's same
+                    // Throwable->null guard and production parser. Never re-connect.
+                    val raw = try { RdpConnector.nativeGetCertificateChallenge() } catch (error: Throwable) {
+                        android.util.Log.e("RdpConnector", "certificateChallenge failed", error)
+                        null
+                    }
+                    val challenge = CertificateChallenge.fromNative(raw)
+                    val now = SystemClock.elapsedRealtime()
+                    val sample = if (certificateReadiness.length() < 20 && now >= nextCertificateSample) {
+                        nextCertificateSample = now + 1_500
+                        JSONObject().put("elapsed_ms", now).put("raw_field_count", raw?.size ?: 0)
+                            .put("parsed", challenge != null).put("fingerprint_matches", challenge?.fingerprint == fingerprint)
+                            .put("title_count", JSONObject.NULL).put("focused_title", JSONObject.NULL)
+                            .also { row ->
+                                // Synthetic endpoint/fingerprint only; omit subject and issuer text.
+                                for ((index, name) in listOf(0 to "generation", 1 to "fingerprint", 4 to "host",
+                                    5 to "port", 6 to "server_name", 7 to "reason")) {
+                                    row.put(name, raw?.getOrNull(index)?.take(256) ?: JSONObject.NULL)
+                                }
+                                certificateReadiness.put(row)
+                            }
+                    } else null
+                    // Preserve original short-circuit order: no new semantics/window
+                    // probe when the native fingerprint has not matched.
+                    val matched = challenge?.fingerprint == fingerprint
+                    val titleCount = if (matched) compose.onAllNodesWithText(trustTitle).fetchSemanticsNodes().size else null
+                    if (titleCount != null) sample?.put("title_count", titleCount)
+                    val focused = if (matched && titleCount == 1) focusedCertificateTitle(trustTitle, sample) else false
+                    if (matched && titleCount == 1) sample?.put("focused_title", focused)
+                    sample?.put("completed_elapsed_ms", SystemClock.elapsedRealtime())
+                    matched && titleCount == 1 && focused
                 }, allowAcknowledgement = !coachmarkAcknowledged)
             coachmarkAcknowledged = coachmarkAcknowledged || beforeTrust.getBoolean("acknowledged")
             assertEquals("No remote frame before explicit certificate trust", 0L, RdpConnector.nativeGetFrameId())
@@ -531,11 +567,13 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             measurements.put("system_immersive_coachmark", value)
         }
     }
-    private fun focusedCertificateTitle(title: String): Boolean {
+    private fun focusedCertificateTitle(title: String, observation: JSONObject? = null): Boolean {
         var count = 0
         val windows = automation.windows
+        val windowEvidence = observation?.let { JSONArray().also { rows -> it.put("windows", rows) } }
         try {
             for (window in windows) {
+                windowEvidence?.put(JSONObject().put("id", window.id).put("type", window.type).put("focused", window.isFocused))
                 if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION || !window.isFocused) continue
                 val root = window.root ?: continue
                 val nodes = mutableListOf<AccessibilityNodeInfo>()
