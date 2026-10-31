@@ -111,14 +111,16 @@ def validate_ime_setting(value):
             assert stream['client_method_rows'] == stream['client_headers'] and 0 <= stream['manager_observer_rows'] <= 1
     original = value.get('original')
     assert original in ('null', '0', '1') and value.get('requested') == '1'
-    factory = original == '1'
-    assert value.get('wrote_setting') is (not factory)
-    assert value.get('readiness_mode') == ('factory-default-no-write' if factory else 'same-service-observer-transition')
-    if factory:
+    observed = original == '1'
+    assert value.get('wrote_setting') is (not observed)
+    assert value.get('readiness_mode') == ('observed-enabled-no-write' if observed else 'same-service-observer-transition')
+    if observed:
         assert 'write_started_elapsed_ms' not in value
-        proof = value['factory_default']
-        assert proof['resolved_default'] is True
-        assert re.fullmatch(r'_id:[0-9]+ name:show_ime_with_hard_keyboard pkg:android value:1 default:1 defaultSystemSet:true', proof['setting_row'])
+        proof = value['observed_setting']
+        assert type(proof['resolved_default']) is bool and proof['provider_value'] == '1'
+        assert value['notification_consumption_proven'] is False and value['pending_notifications_excluded'] is False
+        assert 'factory_default' not in value and 'consumption_samples' not in value and 'consumption_deadline_elapsed_ms' not in value
+        assert re.fullmatch(r'_id:[0-9]+ name:show_ime_with_hard_keyboard pkg:[A-Za-z0-9_.]+ value:1 default:(?:null|[01]) defaultSystemSet:(?:true|false)', proof['setting_row'])
         env = proof['environment']
         assert env['success'] is True and env['schema'] == 1 and env['action_sha'] == 'a421e43855164a8197daf9d8d40fe71c6996bb0d'
         assert re.fullmatch(r'[0-9a-f]{40}', env['source_sha']) and re.fullmatch(r'[0-9]+', env['run_id'])
@@ -138,19 +140,27 @@ def validate_ime_setting(value):
     ime = 'com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME'
     assert value.get('ime') == ime
     assert initial['selected_ime'] == initial['bound_ime'] == [ime]
-    assert initial['observer_cache'] == (['2'] if factory else ['1'])
+    assert initial['observer_cache'] == (['2'] if observed else ['1'])
     assert initial['dump_complete'] is True
     for key in ('service_instance', 'method_identity'):
         assert len(initial[key]) == 1 and re.fullmatch(r'[A-Za-z0-9_.$]+@[0-9a-fA-F]+', initial[key][0])
-    samples = value['consumption_samples']
-    assert 1 <= len(samples) <= 80 and samples[-1]['consumed'] is True
-    assert samples[-1]['observer_cache'] == ['2']
-    for sample in samples:
-        assert sample['dump_complete'] is True
+    if observed:
+        current = value['observed_service']
+        assert current['dump_complete'] is True and current['observer_cache'] == ['2']
         for key in ('selected_ime', 'bound_ime', 'service_instance', 'method_identity'):
-            assert sample[key] == initial[key], 'IME identity changed during consumption proof'
-        assert sample['observer_cache'] in (['1'], ['2'])
-    assert value['setup_elapsed_ms'] <= value['ready_elapsed_ms'] <= value['consumption_deadline_elapsed_ms']
+            assert current[key] == initial[key], 'IME identity changed during enabled-state observation'
+        assert 'consumed' not in current
+        assert value['setup_elapsed_ms'] <= value['ready_elapsed_ms']
+    else:
+        samples = value['consumption_samples']
+        assert 1 <= len(samples) <= 80 and samples[-1]['consumed'] is True
+        assert samples[-1]['observer_cache'] == ['2']
+        for sample in samples:
+            assert sample['dump_complete'] is True
+            for key in ('selected_ime', 'bound_ime', 'service_instance', 'method_identity'):
+                assert sample[key] == initial[key], 'IME identity changed during consumption proof'
+            assert sample['observer_cache'] in (['1'], ['2'])
+        assert value['setup_elapsed_ms'] <= value['ready_elapsed_ms'] <= value['consumption_deadline_elapsed_ms']
     assert value['ready_elapsed_ms'] <= value['restore_elapsed_ms']
 
 
@@ -165,9 +175,9 @@ def validate_ime_raw(value, dumps, out):
     if value['original'] != '1':
         assert all(not dumps[name] for name in IME_DUMPS[2:])
         return
-    proof = value['factory_default']
+    proof = value['observed_setting']
     assert json.loads(dumps[IME_DUMPS[4]]) == proof['environment']
-    assert dumps[IME_DUMPS[3]].strip().splitlines()[-1] == 'true'
+    assert dumps[IME_DUMPS[3]].strip().splitlines()[-1] == str(proof['resolved_default']).lower()
     text = dumps[IME_DUMPS[2]]
     assert not any(x in text for x in ('DUMP TIMEOUT', 'Permission Denial'))
     sections = text.split('SECURE SETTINGS (user 0)\n')

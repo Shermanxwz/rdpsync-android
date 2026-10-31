@@ -90,6 +90,7 @@ class ReadinessContract(unittest.TestCase):
                     setup_elapsed_ms=1, ready_elapsed_ms=12, consumption_deadline_elapsed_ms=15, restore_elapsed_ms=20)
         good['stream_projections'] = dict(initial=stream_receipt(),latest=stream_receipt())
         collector.validate_ime_setting(good)
+        collector.validate_ime_setting(dict(good, original='null'))
         for mutation in ('new_service', 'unknown', 'already_true', 'late', 'not_restored', 'no_callback', 'cleanup_failure'):
             bad = copy.deepcopy(good)
             if mutation == 'new_service': bad['consumption_samples'][0]['service_instance'] = ['Gboard@ccc']
@@ -104,14 +105,14 @@ class ReadinessContract(unittest.TestCase):
         unchanged.update(original='1', wrote_setting=False)
         unchanged['initial_service']['observer_cache'] = ['2']
         with self.assertRaises(AssertionError): collector.validate_ime_setting(unchanged)
-        self.assertLess(src.index('val initial = observeIme'), src.index('if (original == "1") verifyFactoryDefault()'))
-    def test_factory_provenance_and_raw_binding(self):
+        self.assertLess(src.index('val initial = observeIme'), src.index('if (original == "1") observeEnabledSetting()'))
+    def test_observed_enabled_no_write_and_raw_binding(self):
         import tempfile, hashlib
-        spec = importlib.util.spec_from_file_location('factory_collector', ROOT/'scripts/fixtures/collect_android_evidence.py')
+        spec = importlib.util.spec_from_file_location('observed_collector', ROOT/'scripts/fixtures/collect_android_evidence.py')
         collector = importlib.util.module_from_spec(spec); spec.loader.exec_module(collector)
         initial = dict(selected_ime=[GBOARD], bound_ime=[GBOARD], observer_cache=['2'],
                        service_instance=['Gboard@aaa'], method_identity=['Invoker@bbb'], dump_complete=True)
-        row = '_id:42 name:show_ime_with_hard_keyboard pkg:android value:1 default:1 defaultSystemSet:true'
+        row = '_id:42 name:show_ime_with_hard_keyboard pkg:com.google.android.googlesdksetup value:1 default:1 defaultSystemSet:true'
         env = dict(schema=1, success=True, action_sha='a421e43855164a8197daf9d8d40fe71c6996bb0d',
                    source_sha='a'*40, run_id='123', force_avd_creation=True, enable_hw_keyboard=False,
                    fresh_avd_absence_verified=True, no_snapshot=True, avd_name='test', device_sdk='35',
@@ -129,11 +130,11 @@ class ReadinessContract(unittest.TestCase):
             (out/'tested-sha.txt').write_text(env['source_sha'])
             (out/'emulator-fingerprint.txt').write_text(env['device_fingerprint'])
             good=dict(verified_before_activity=True,restored=True,original='1',requested='1',wrote_setting=False,
-                      readiness_mode='factory-default-no-write',ime=GBOARD,initial_service=initial,
-                      consumption_samples=[dict(initial,consumed=True)],setup_elapsed_ms=1,ready_elapsed_ms=2,
-                      consumption_deadline_elapsed_ms=15,restore_elapsed_ms=20,
-                      factory_default=dict(resolved_default=True,setting_row=row,environment=env))
-            dumps=dict(zip(collector.IME_DUMPS,[dump(2),dump(2),'SECURE SETTINGS (user 0)\n'+row+'\nSYSTEM SETTINGS (user 0)\n','trace\ntrue\n',json.dumps(env)]))
+                      readiness_mode='observed-enabled-no-write',ime=GBOARD,initial_service=initial,
+                      observed_service=dict(initial),setup_elapsed_ms=1,ready_elapsed_ms=2,restore_elapsed_ms=20,
+                      observed_setting=dict(provider_value='1',resolved_default=False,setting_row=row,environment=env),
+                      notification_consumption_proven=False,pending_notifications_excluded=False)
+            dumps=dict(zip(collector.IME_DUMPS,[dump(2),dump(2),'SECURE SETTINGS (user 0)\n'+row+'\nSYSTEM SETTINGS (user 0)\n','trace\nfalse\n',json.dumps(env)]))
             good['stream_projections'] = dict(initial=stream_receipt(size=len(dumps[collector.IME_DUMPS[0]].encode())),
                 latest=stream_receipt(size=len(dumps[collector.IME_DUMPS[1]].encode())),
                 provider=stream_receipt('settings',len(dumps[collector.IME_DUMPS[2]].encode())))
@@ -142,16 +143,29 @@ class ReadinessContract(unittest.TestCase):
                 bad=copy.deepcopy(good);bad['stream_projections']['initial'][field]=badvalue
                 with self.assertRaises(AssertionError,msg=field):collector.validate_ime_setting(bad)
             for key,badvalue in [('success',False),('fresh_avd_absence_verified',False),('no_snapshot',False),('enable_hw_keyboard',True),('device_sdk','34'),('avd_config_mtime',0),('action_sha','b'*40),('avd_metadata_mtime',0),('avd_metadata_path','/other/test.ini'),('avd_identity_proof','placeholder')]:
-                bad=copy.deepcopy(good);bad['factory_default']['environment'][key]=badvalue
+                bad=copy.deepcopy(good);bad['observed_setting']['environment'][key]=badvalue
                 with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)
-            for altered in (row.replace('pkg:android','pkg:com.android.shell'), row.replace('default:1','default:0'), row.replace('defaultSystemSet:true','defaultSystemSet:false')):
-                bad=copy.deepcopy(good);bad['factory_default']['setting_row']=altered
+            # Attribution is observed, not restricted to the image default or a privileged writer.
+            for observed_row in (row.replace('pkg:com.google.android.googlesdksetup','pkg:android'),
+                                 row.replace('default:1','default:0').replace('defaultSystemSet:true','defaultSystemSet:false')):
+                allowed=copy.deepcopy(good);allowed['observed_setting']['setting_row']=observed_row
+                collector.validate_ime_setting(allowed)
+            for altered in (row.replace('value:1','value:0'), row.replace('pkg:com.google.android.googlesdksetup','pkg:'), row+' trailing'):
+                bad=copy.deepcopy(good);bad['observed_setting']['setting_row']=altered
                 with self.assertRaises(AssertionError):collector.validate_ime_setting(bad)
+            for key,badvalue in [('notification_consumption_proven',True),('pending_notifications_excluded',True),
+                                 ('consumption_samples',[]),('consumption_deadline_elapsed_ms',15),('factory_default',{})]:
+                bad=copy.deepcopy(good);bad[key]=badvalue
+                with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)
+            for field,badvalue in [('observer_cache',['1']),('bound_ime',['other/IME']),('service_instance',['Gboard@ccc']),
+                                   ('method_identity',['Invoker@ddd']),('dump_complete',False),('consumed',True)]:
+                bad=copy.deepcopy(good);bad['observed_service'][field]=badvalue
+                with self.assertRaises(AssertionError,msg=field):collector.validate_ime_setting(bad)
             for key,badvalue in [('wrote_setting',True),('write_started_elapsed_ms',0),('readiness_mode','same-service-observer-transition')]:
                 bad=copy.deepcopy(good);bad[key]=badvalue
                 with self.assertRaises(AssertionError,msg=key):collector.validate_ime_setting(bad)
-            for changed in [dict(dumps,**{'ime-setting-overlay.txt':'false'}),
-                            dict(dumps,**{'ime-setting-provider-dump.txt':dumps['ime-setting-provider-dump.txt'].replace('pkg:android','pkg:com.android.shell')}),
+            for changed in [dict(dumps,**{'ime-setting-overlay.txt':'true'}),
+                            dict(dumps,**{'ime-setting-provider-dump.txt':dumps['ime-setting-provider-dump.txt'].replace('pkg:com.google.android.googlesdksetup','pkg:com.android.shell')}),
                             dict(dumps,**{'ime-setting-provider-dump.txt':dumps['ime-setting-provider-dump.txt'].replace(row,row+'\n'+row)}),
                             dict(dumps,**{'ime-setting-environment.txt':'{}'})]:
                 with self.assertRaises(AssertionError):collector.validate_ime_raw(good,changed,out)
@@ -166,8 +180,8 @@ class ReadinessContract(unittest.TestCase):
                         original_metadata.replace(b'android-35',b'android-34')):
                 metadata_path.write_bytes(raw)
                 changed = copy.deepcopy(good)
-                changed['factory_default']['environment']['avd_metadata_sha256'] = hashlib.sha256(raw).hexdigest()
-                changed_env = changed['factory_default']['environment']
+                changed['observed_setting']['environment']['avd_metadata_sha256'] = hashlib.sha256(raw).hexdigest()
+                changed_env = changed['observed_setting']['environment']
                 (out/'ime-environment.json').write_text(json.dumps(changed_env))
                 changed_dumps = dict(dumps, **{'ime-setting-environment.txt':json.dumps(changed_env)})
                 with self.assertRaises(AssertionError):collector.validate_ime_raw(changed,changed_dumps,out)

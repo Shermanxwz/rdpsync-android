@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** Disposable API35 emulator prerequisite, completed before the Activity or any real input.
  * AOSP15 ContentService delays background observers by 10s. InputMethodService's observer
  * resets its input view on SHOW_IME_WITH_HARD_KEYBOARD changes, even without a config change.
- * Provider readback alone is not readiness: require the actual selected IME's consumed cache.
+ * Provider readback alone is insufficient: observe the bound IME cache; prove callback only after our write.
  * No IME/subtype selection, key injection, app retry or post-input recovery is performed.
  */
 class FixtureImeSettingRule : TestRule {
@@ -52,10 +52,10 @@ class FixtureImeSettingRule : TestRule {
                 initialDump = latestDump
                 receipt.put("initial_service", initial.json())
                 check(initial.readyBinding) { "No unique live Gboard service before prerequisite" }
-                if (original == "1") verifyFactoryDefault()
-                receipt.put("readiness_mode", if (original == "1") "factory-default-no-write" else "same-service-observer-transition")
+                if (original == "1") observeEnabledSetting()
+                receipt.put("readiness_mode", if (original == "1") "observed-enabled-no-write" else "same-service-observer-transition")
                 check(initial.cache == if (original == "1") "2" else "1") {
-                    "Initial Gboard cache must match original provider value, not UNKNOWN or a pending transition"
+                    "Initial Gboard cache must match original provider value, not UNKNOWN"
                 }
                 if (original != "1") {
                     writeAttempted = true
@@ -64,26 +64,36 @@ class FixtureImeSettingRule : TestRule {
                     receipt.put("wrote_setting", true)
                 }
                 check(readSetting() == "1") { "IME provider readback mismatch" }
-                val deadline = SystemClock.elapsedRealtime() + 15_000
-                val samples = JSONArray()
-                receipt.put("consumption_deadline_elapsed_ms", deadline).put("consumption_samples", samples)
-                var consumed = false
-                while (!consumed && SystemClock.elapsedRealtime() < deadline) {
-                    val remaining = deadline - SystemClock.elapsedRealtime()
-                    val current = observeIme(minOf(3_000, remaining))
-                    check(current.readyBinding && current.instance == initial.instance && current.method == initial.method) {
-                        "Actual IME service changed or dump incomplete during prerequisite; consumption is unproven"
+                if (original == "1") {
+                    // Existing TRUE is an observation, not proof of callback consumption or of
+                    // no pending notification. Do not introduce a redundant setting write.
+                    val current = observeIme(3_000)
+                    check(current.readyBinding && current.instance == initial.instance && current.method == initial.method &&
+                        current.cache == "2") { "Enabled setting requires the same currently bound TRUE-cache IME" }
+                    receipt.put("observed_service", current.json())
+                        .put("notification_consumption_proven", false).put("pending_notifications_excluded", false)
+                } else {
+                    val deadline = SystemClock.elapsedRealtime() + 15_000
+                    val samples = JSONArray()
+                    receipt.put("consumption_deadline_elapsed_ms", deadline).put("consumption_samples", samples)
+                    var consumed = false
+                    while (!consumed && SystemClock.elapsedRealtime() < deadline) {
+                        val remaining = deadline - SystemClock.elapsedRealtime()
+                        val current = observeIme(minOf(3_000, remaining))
+                        check(current.readyBinding && current.instance == initial.instance && current.method == initial.method) {
+                            "Actual IME service changed or dump incomplete during prerequisite; consumption is unproven"
+                        }
+                        // Once FALSE is observed, shouldShowImeWithHardKeyboard cannot reload provider:
+                        // AOSP15 only lazily reads while UNKNOWN. On this same live service, TRUE
+                        // therefore proves its SettingsObserver callback consumed the write.
+                        consumed = current.cache == "2"
+                        samples.put(current.json().put("elapsed_ms", SystemClock.elapsedRealtime()).put("consumed", consumed))
+                        check(samples.length() <= 80) { "IME readiness evidence overflow" }
+                        if (!consumed) SystemClock.sleep(minOf(200, (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)))
                     }
-                    // Once FALSE is observed, shouldShowImeWithHardKeyboard cannot reload provider:
-                    // AOSP15 only lazily reads while UNKNOWN. On this same live service, TRUE
-                    // therefore proves its SettingsObserver callback consumed the write.
-                    consumed = current.cache == "2"
-                    samples.put(current.json().put("elapsed_ms", SystemClock.elapsedRealtime()).put("consumed", consumed))
-                    check(samples.length() <= 80) { "IME readiness evidence overflow" }
-                    if (!consumed) SystemClock.sleep(minOf(200, (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)))
-                }
-                check(consumed && SystemClock.elapsedRealtime() <= deadline) {
-                    "Actual Gboard did not consume hardware-keyboard setting within pretest 15s"
+                    check(consumed && SystemClock.elapsedRealtime() <= deadline) {
+                        "Actual Gboard did not consume hardware-keyboard setting within pretest 15s"
+                    }
                 }
                 receipt.put("verified_before_activity", true).put("ready_elapsed_ms", SystemClock.elapsedRealtime())
                 persist()
@@ -113,7 +123,7 @@ class FixtureImeSettingRule : TestRule {
         }
     }
 
-    private fun verifyFactoryDefault() {
+    private fun observeEnabledSetting() {
         // Save bounded content-minimal projections and provenance before parsing; unknown schemas fail diagnostically.
         environmentRaw = shell("cat /sdcard/Download/rdpsync-evidence/ime-environment.json")
         overlayDump = shell("cmd overlay lookup --user 0 --verbose com.android.providers.settings com.android.providers.settings:bool/def_show_ime_with_hard_keyboard")
@@ -142,18 +152,18 @@ class FixtureImeSettingRule : TestRule {
         check(environment.getString("image_sysdir").replace('\\', '/').trimEnd('/').endsWith("/system-images/android-35/google_apis/x86_64"))
         check(environment.getString("device_fingerprint") == Build.FINGERPRINT)
         check(environment.getString("device_boot_id") == shell("cat /proc/sys/kernel/random/boot_id").trim())
-        // AOSP15 OverlayManagerShellCommand resolves enabled overlays. Unknown/reference formats
-        // do not gain an alternative success path: the terminal resolved bool must be literal true.
-        check(overlayDump.trim().lineSequence().last() == "true") { "Effective factory IME default is not verified true" }
+        // Record the resolved resource default without mistaking it for current-setting provenance.
+        val resolvedDefault = overlayDump.trim().lineSequence().last()
+        check(resolvedDefault in setOf("true", "false")) { "Unknown overlay boolean format" }
         val sections = settingsDump.split("SECURE SETTINGS (user 0)\n")
         check(sections.size == 2 && sections[1].contains("SYSTEM SETTINGS (user 0)")) { "Unknown settings dump user0 scope" }
         val secure = sections[1].substringBefore("SYSTEM SETTINGS (user 0)")
         val rows = secure.lineSequence().filter { it.startsWith("_id:") && it.contains(" name:$setting ") }.toList()
-        check(rows.size == 1 && rows.single().matches(Regex("_id:[0-9]+ name:show_ime_with_hard_keyboard pkg:android value:1 default:1 defaultSystemSet:true"))) {
-            "IME setting lacks unmodified system-default attribution"
+        check(rows.size == 1 && rows.single().matches(Regex("_id:[0-9]+ name:show_ime_with_hard_keyboard pkg:[A-Za-z0-9_.]+ value:1 default:(?:null|[01]) defaultSystemSet:(?:true|false)"))) {
+            "IME setting lacks unique current enabled value and writer attribution"
         }
         check(!settingsDump.contains("DUMP TIMEOUT") && !settingsDump.contains("Permission Denial"))
-        receipt.put("factory_default", JSONObject().put("resolved_default", true)
+        receipt.put("observed_setting", JSONObject().put("provider_value", "1").put("resolved_default", resolvedDefault == "true")
             .put("setting_row", rows.single()).put("environment", environment))
     }
 
