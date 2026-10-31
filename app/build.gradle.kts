@@ -18,8 +18,8 @@ android {
         applicationId = "com.rdp.sync"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.1.1-preview"
+        versionCode = 15
+        versionName = "1.2.0-preview.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -29,9 +29,9 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".preview2"
+            applicationIdSuffix = ".preview3"
             versionNameSuffix = "-debug"
-            resValue("string", "app_name", "RdpSync Preview 2")
+            resValue("string", "app_name", "RdpSync Preview 3")
         }
         release {
             isMinifyEnabled = false

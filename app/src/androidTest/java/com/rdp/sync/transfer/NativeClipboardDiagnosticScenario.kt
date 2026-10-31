@@ -7,6 +7,10 @@ import android.system.OsConstants
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.ClipboardFixturePeer
 import com.rdp.sync.network.RdpConnector
+import com.rdp.sync.network.SharedDriveMode
+import com.rdp.sync.network.SharedDriveState
+import com.rdp.sync.network.SharedDriveStatus
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
@@ -50,7 +54,8 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
             assertTrue("Synthetic exact-pin opt-in connect must start", RdpConnector.connectDevice(
                 "10.0.2.2", peer.rdpPort, "rdpfixture", "rdpsync-fixture-only", "", "10.0.2.2",
                 width = 1024, height = 768, enableTouchInput = false,
-                expectedFingerprint = fingerprint, fileTransferEnabled = true))
+                expectedFingerprint = fingerprint, fileTransferEnabled = true,
+                sharedDriveMode = if (peer == ClipboardFixturePeer.GNOME) SharedDriveMode.READ_ONLY else SharedDriveMode.OFF))
             await("actual frame and negotiated file stream", 45_000) {
                 val state = RdpConnector.nativeFileTransferState()
                 RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && state.size == 10 && state[1] == 1L
@@ -59,6 +64,7 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
             assertTrue(RdpConnector.getDiag().contains("certificate=pin-matched"))
             assertFalse(RdpConnector.getDiag().contains("connection=compatibility-retry"))
             val generation = RdpConnector.sessionGeneration()
+            if (peer == ClipboardFixturePeer.GNOME) recordGnomeDriveObservation("after_real_frame", generation)
             val active = RdpFileTransferTransport(generation).also { transport = it }
             assertTrue(active.capability().available)
             assertEquals(TRANSFER_SEND_BUDGET_BYTES, active.remainingSendBytes())
@@ -155,6 +161,7 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
             store.lease(sentinel.id).use { assertArrayEquals(sentinelBytes, it.input.readBytes()) }
             outbound.forEach { file -> store.lease(file.id).use { assertArrayEquals(originals.getValue(file.name), it.input.readBytes()) } }
             assertEquals(generation, RdpConnector.sessionGeneration())
+            if (peer == ClipboardFixturePeer.GNOME) recordGnomeDriveObservation("after_real_clipboard_bytes", generation)
             measurements.put("inbound_operation", offeredOperation).put("peer_to_private_store", received)
                 .put("cancelled_remote_bytes", partialBytes).put("partial_receive_removed", true)
                 .put("private_snapshot_collision_sentinel_unchanged", true).put("success", true)
@@ -177,6 +184,31 @@ abstract class NativeClipboardDiagnosticScenario(private val peer: ClipboardFixt
                 assertFalse(RdpConnector.isConnected())
             }
         }
+    }
+
+    private fun recordGnomeDriveObservation(phase: String, generation: Long) {
+        val raw = RdpConnector.nativeSharedDriveState()
+        val state = SharedDriveState.fromNative(raw)
+        val observation = JSONObject().put("phase", phase).put("elapsed_ms", SystemClock.elapsedRealtime())
+            .put("raw", JSONArray(raw.toList())).put("status", state.status.name)
+            .put("ui_consent_covered", false).put("mounted_drive_covered", false)
+        val observations = measurements.optJSONArray("gnome_drive_observations") ?: JSONArray().also {
+            measurements.put("gnome_drive_observations", it)
+        }
+        observations.put(observation)
+        assertEquals("Exact native drive schema", 13, raw.size)
+        assertEquals(generation, state.generation)
+        assertEquals(SharedDriveMode.READ_ONLY, state.mode)
+        assertFalse("GNOME46 must not be mislabeled as an accepted filesystem device", state.accepted)
+        val classification = when (state.status) {
+            SharedDriveStatus.UNSUPPORTED -> "explicit_no_drive_capability"
+            SharedDriveStatus.REJECTED -> "explicit_device_rejection"
+            SharedDriveStatus.REQUESTED, SharedDriveStatus.CAPABLE -> "unconfirmed_no_device_acceptance"
+            else -> throw AssertionError("Unexpected GNOME drive state: $observation")
+        }
+        observation.put("classification", classification)
+        // No acceptance inferred from timeout. The existing byte/hash/cancel assertions
+        // below still require genuine bidirectional CLIPRDR on this SAME connection.
     }
 
     private fun assertGeneration(expected: Long) {

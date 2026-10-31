@@ -40,7 +40,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: build/freerdp-android
-          key: native-arm64-${{ runner.os }}-${{ hashFiles('scripts/native-env.sh', 'scripts/build-openssl-android.sh', 'scripts/build-freerdp-android.sh') }}
+          key: native-arm64-${{ runner.os }}-${{ hashFiles('scripts/native-env.sh', 'scripts/build-openssl-android.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py') }}
           # Reuse only intermediates; the pinned source check and CMake/native build always run.
           restore-keys: |
             native-arm64-${{ runner.os }}-
@@ -54,7 +54,16 @@ jobs:
           python3 scripts/test-native-notices.py
           python3 scripts/collect-native-notices.py --check
           python3 scripts/fixtures/test_collect_android_evidence.py
+          python3 scripts/test-ime-setting-readiness.py
+          python3 scripts/test-fixture-dump-projection.py
+          python3 scripts/fixtures/test_record_ime_environment.py
           python3 scripts/fixtures/test_emulator_boot_health.py
+          python3 scripts/fixtures/test_network_readiness.py
+          python3 scripts/fixtures/test_xrdp_drive_files.py
+          python3 scripts/fixtures/test_xrdp_drive_pressure.py
+          python3 scripts/test-freerdp-flow-patch.py
+          python3 scripts/test-product-ui.py
+          python3 scripts/fixtures/test_collect_product_ui.py
       - name: Unit tests, lint, and side-by-side preview APK
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
       - name: Verify JNI exports, dependency closure, signature and 16 KiB alignment
@@ -66,6 +75,7 @@ jobs:
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             build/apk-verification.txt
+            build/freerdp-android/rdpsync-native-provenance-arm64-v8a.json
           if-no-files-found: error
       - name: Upload test and lint reports
         if: always()

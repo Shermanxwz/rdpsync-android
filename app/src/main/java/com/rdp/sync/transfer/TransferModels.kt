@@ -14,9 +14,11 @@ data class TransferLimits(
     val maxNameUtf16Units: Int = 240,
     val maxDirectoryEntries: Int = 4096
 ) {
+    // Larger explicit ceilings are for Shared space import/export only. CLIPRDR
+    // retains these defaults and its independent native 32 MiB connection budget.
     init {
-        require(maxFiles in 1..64 && maxFileBytes in 1..128L * 1024 * 1024)
-        require(maxSessionBytes in maxFileBytes..256L * 1024 * 1024)
+        require(maxFiles in 1..64 && maxFileBytes in 1..512L * 1024 * 1024)
+        require(maxSessionBytes in maxFileBytes..1024L * 1024 * 1024)
         require(freeSpaceReserveBytes >= 0 && maxNameUtf16Units in 1..240 && maxDirectoryEntries in 1..4096)
     }
 }

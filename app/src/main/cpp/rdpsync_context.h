@@ -3,7 +3,8 @@
 #include <freerdp/client.h>
 
 typedef struct RdpSession RdpSession;
-typedef struct { rdpClientContext common; RdpSession* session; } RdpSyncContext;
+typedef struct RdpDrive RdpDrive;
+typedef struct { rdpClientContext common; RdpSession* session; RdpDrive* drive; } RdpSyncContext;
 
 /* Shared production factory, also compiled against a separate-TU allocator in
  * the optimized regression. Do not replace instance->context with ctx below. */

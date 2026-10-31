@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from bounded_trace import launch as launch_trace, finish_collectors, cleanup_preserving_primary
 
 ROOT = Path(sys.argv[1]).resolve()
 PRIVATE = Path(sys.argv[2]).resolve()
@@ -17,10 +18,19 @@ assert os.environ.get('GITHUB_ACTIONS') == 'true' and os.environ.get('RUNNER_ENV
 assert os.getuid() != 0
 children = []
 files = []
+traces = []
 stopping = False
 
 
 def spawn(args, name, env=None):
+    if name == 'desktop':
+        # Diagnostic only: one synthetic client, not GRD/Mutter or arbitrary users.
+        trace_env = dict(os.environ if env is None else env, WAYLAND_DEBUG='client')
+        p, trace = launch_trace(args, OUT / 'desktop.log', trace_env)
+        p.owns_group = False
+        traces.append(trace)
+        children.append(p)
+        return p
     f = (OUT / f'{name}.log').open('wb')
     files.append(f)
     p = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT, start_new_session=(name == 'session'), env=env)
@@ -38,6 +48,8 @@ def stop(*_):
     stopping = True
     for p in reversed(children):
         if p.poll() is None:
+            if getattr(p, 'bounded_trace', None):
+                p.bounded_trace.note_termination('SIGTERM')
             if p.owns_group:
                 os.killpg(p.pid, signal.SIGTERM)
             else:
@@ -46,13 +58,14 @@ def stop(*_):
         try:
             p.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            if getattr(p, 'bounded_trace', None):
+                p.bounded_trace.note_termination('SIGKILL')
             if p.owns_group:
                 os.killpg(p.pid, signal.SIGKILL)
             else:
                 p.kill()
             p.wait(timeout=5)
-    for f in files:
-        f.close()
+    finish_collectors(traces, files)
 
 
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
@@ -102,6 +115,8 @@ try:
         spawn(['socat', f'UNIX-LISTEN:{PRIVATE}/rdp.sock,fork,mode=600', 'TCP:127.0.0.1:3389'], 'rdp-unix-relay')
         spawn(['socat', f'UNIX-LISTEN:{PRIVATE}/state.sock,fork,mode=600', 'TCP:127.0.0.1:8768'], 'state-unix-relay')
         (OUT / 'runtime.json').write_text(json.dumps(dict(mode=MODE, supervisor_pid=os.getpid(),
+            desktop_wayland_trace=dict(mode='client', retention_bytes=8*1024*1024,
+                scope='Owned synthetic desktop only; diagnostics may add timing overhead and pipe backpressure'),
             fixture_mutter_animations=dict(environment='MUTTER_DEBUG_DISABLE_ANIMATIONS=1',
                 scope='Only the owned synthetic Mutter process; no animation/high-motion coverage claim',
                 installed_version=(OUT / 'mutter-version.txt').read_text().strip(),
@@ -115,4 +130,4 @@ try:
                 raise RuntimeError(f'Owned fixture component exited ({p.returncode})')
         time.sleep(0.25)
 finally:
-    stop()
+    cleanup_preserving_primary(stop, sys.exception())

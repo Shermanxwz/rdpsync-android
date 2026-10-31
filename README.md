@@ -9,7 +9,51 @@ RdpSync is an open Android RDP client that combines remote desktop connections, 
 [![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-## 1.1 preview: display, input and compatibility
+## Preview 3: Shared space and refreshed UI (development preview)
+
+The current development work adds a **real RDPDR filesystem drive**, not a renamed
+clipboard transfer. The persistent, app-private **Shared space** is the only
+directory exposed: remote and local file operations use the same confined broker.
+Sharing starts **off**; consent applies to the explicitly confirmed target session
+and defaults to **read-only**, with a separate warning and acknowledgment for
+remote create/write/rename/delete access. Android SAF
+imports and exports are deliberate copies, not automatic synchronization with
+phone folders. Opening the Shared space browser alone grants no remote access.
+
+- The workspace is not purged on disconnect; accepted delete-on-close requests
+  can still complete as handles close. The app browser remains usable while
+  connected; conflicts are reported rather than bypassing active file handles.
+- Changing access requires an explicit reconnect. Stopping sharing revokes future
+  access without purging the workspace or undoing accepted writes/deletions; a
+  remote drive icon may remain visible but
+  unavailable until the next connection.
+- Enforced limits are 1 GiB workspace, 512 MiB per file, 4096 entries and a 128 MiB
+  free-space reserve. The drive’s transport backpressure is separate from the
+  existing clipboard transfer’s 32 MiB connection allowance.
+- The current GNOME Remote Desktop 46 fixture leaves drive access at
+  **REQUESTED / unconfirmed**: no mounted drive or explicit server rejection was
+  confirmed. Unconfirmed, unsupported, rejected and actually accepted states stay
+  distinct. Explicit **CLIPRDR clipboard file transfer** remains a separate
+  fallback where negotiated; it does not establish filesystem-drive support.
+- Main screens, forms, status/consent dialogs and navigation use shared accessible
+  design tokens, English/Chinese resources, and light/dark layouts. The established
+  fullscreen desktop, touch/IME mapping and certificate enforcement are retained.
+
+**Verification is commit-specific**; feature descriptions alone are not acceptance. See the
+[implementation contract](docs/SHARED_DRIVE_DESIGN.md) and
+[verification notes](docs/VERIFICATION.md); definitions and host tests are not a
+substitute for an actual mounted drive, stalled-peer recovery or Android UI tests.
+
+The delivery package is **RdpSync Preview 3** (`com.rdp.sync.preview3`), using a
+development signer. It installs alongside Preview 2; it does not overwrite or
+migrate its profiles/files, and no uninstall is required. Persistent signing-key
+setup was declined for this iteration. Future differently signed development
+builds cannot be promised to update the same package in place. The published
+[Preview 2 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.1.0-preview.2)
+is preserved unchanged. No physical Windows-server/phone or Windows App parity
+claim is made by the new fixture plan.
+
+## Published Preview 2 baseline: display, input and compatibility
 
 The GNOME/software-GFX, default-fullscreen and explicit file-transfer follow-up below is **not included in the existing `v1.1.0-preview` APK**. Its exact-commit runtime checks are tracked separately in [verification notes](docs/VERIFICATION.md).
 
@@ -25,7 +69,7 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 - New/changed TLS certificates stop before login and require explicit fingerprint trust. Saved passwords migrate to device-bound Android Keystore AES-GCM; unavailable credentials remain visible and require deliberate re-entry.
 - Default WebDAV sync uses password-free `rdpsync_profiles.json`; explicit legacy sync uses the separate secret-bearing `rdpsync_devices.json`, without silently overwriting old backups.
 
-**Install safely:** This follow-up CI produces `RdpSync Preview 2` (`com.rdp.sync.preview2`), signed with a development key. It installs alongside both the original app and the previously released `com.rdp.sync.preview`; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged. Development keys can differ between CI runs. The separate Preview 2 identity avoids replacing the old preview, but future Preview 2 APKs are not guaranteed to update each other unless their signing certificates match. Do not uninstall either app as a workaround; preserve its saved profiles and credentials.
+**Previous release:** The published Preview 2 APK is `RdpSync Preview 2` (`com.rdp.sync.preview2`), signed with a development key. It installs alongside both the original app and the previously released `com.rdp.sync.preview`; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged. Development keys can differ between CI runs. The separate Preview 2 identity avoids replacing the old preview, but future Preview 2 APKs are not guaranteed to update each other unless their signing certificates match. Do not uninstall either app as a workaround; preserve its saved profiles and credentials.
 
 **Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/hardware video decoding is not enabled; RDPGFX uses software decoding rather than a zero-copy video surface; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. GNOME per-user desktop sharing/headless sessions and GDM system Remote Login are distinct: server redirection remains blocked rather than forwarding credentials to an untrusted target. First-use certificate trust requires independent fingerprint verification; local passwords use Android Keystore encryption, while explicitly selected legacy WebDAV sync still contains plaintext passwords and is not end-to-end encrypted. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
 
@@ -163,7 +207,8 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 Get the latest APK from the project's GitHub Releases page.
 
-- Existing published preview: `v1.1.0-preview`; the follow-up source identifies as `1.1.1-preview` and is not included in that older APK.
+- The existing [Preview 2 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.1.0-preview.2) remains unchanged; its APK does not include Preview 3 changes.
+- For Preview 3 (`1.2.0-preview.3-debug`, `com.rdp.sync.preview3`), use only the APK attached to a tagged GitHub Release with its exact-commit acceptance report. Source code and CI artifacts alone are not a published release; the release carries the verified download details.
 - Minimum Android version: Android 8.0, API 26
 - Current packaged ABI target: `arm64-v8a`
 

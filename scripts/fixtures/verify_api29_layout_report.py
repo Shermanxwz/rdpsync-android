@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed exact API29 class/count + fresh actual geometry/IME evidence."""
+"""Fail-closed exact API29 layout + Shared-space storage counts and fresh IME evidence."""
 import collections
 import hashlib
 import json
@@ -9,6 +9,18 @@ import xml.etree.ElementTree as ET
 
 CLASS = 'com.rdp.sync.ui.rdp.SessionFullscreenApi29ProbeTest'
 TEST = 'actualPre30FullscreenBarsAndImeKeepLogicalViewportStable'
+STORAGE_CLASS = 'com.rdp.sync.sharedspace.SharedSpaceStorageInstrumentedTest'
+STORAGE_TESTS = (
+    'realBinderSafImportAndUniqueExportHaveExactHashesAndPersistAcrossManagerInstances',
+    'existingAndOutsideProviderReturnsAreNotWrittenAndCommittedSourceSurvives',
+    'unknownSizeIsBoundedVirtualFilesAndRevokedGrantsFailWithoutNewWorkspaceData',
+    'cancellationAndUnicodeCaseAliasesDoNotOverwritePublishedData',
+    'nativeReadLeaseBlocksLocalDeleteAndRenameWithoutDisconnectingSession',
+    'pickerSelectionsPinTheObjectAndParentAcrossRemoteStyleNamespaceChanges',
+    'closedPickerSelectionNeverReopensAReplacementAtTheSamePath',
+    'dedicatedSharedSpaceStagedAccessorAllowsLargeSyntheticFileWithoutChangingClipboardCap',
+)
+EXPECTED_CASES = {(CLASS, TEST): 1, **{(STORAGE_CLASS, name): 1 for name in STORAGE_TESTS}}
 
 
 def verify(out: Path, reports: Path):
@@ -24,7 +36,7 @@ def verify(out: Path, reports: Path):
         for case in root.iter('testcase'):
             assert not any(case.find(k) is not None for k in ('failure', 'error', 'skipped'))
             cases[(case.get('classname'), case.get('name'))] += 1
-    assert cases == {(CLASS, TEST): 1}, f'Wrong actual test set: {cases}'
+    assert cases == EXPECTED_CASES, f'Wrong actual test set: {cases}'
     start_seconds = int((out / 'instrumentation-device-start-seconds.txt').read_text().strip())
     assert int((out / 'report-device-mtime.txt').read_text().strip()) >= start_seconds, 'Stale device report'
     start_ms = float((out / 'instrumentation-device-uptime.txt').read_text().split()[0]) * 1000
@@ -51,11 +63,11 @@ def verify(out: Path, reports: Path):
         data = path.read_bytes()
         assert data.startswith(b'\x89PNG\r\n\x1a\n') and len(data) > 1024, 'Missing actual screenshot'
         hashes[path.name] = hashlib.sha256(data).hexdigest()
-    return dict(tests=1, failures=0, errors=0, skipped=0, classes={CLASS: 1},
+    return dict(tests=9, failures=0, errors=0, skipped=0, classes={CLASS: 1, STORAGE_CLASS: 8},
                 production_commit=report['production_commit'], production_tree=report['production_tree'],
                 actual_ime_every_callback=True, fresh=True, screenshot_sha256=hashes,
                 api29_transient_bar_reveal_automatically_verified=False,
-                scope='Local editor with production fullscreen/layout only; no RDP server or remote input proof')
+                scope='Local editor with production fullscreen/layout and actual Shared-space broker/SAF storage; no RDP server, RDPDR mount or remote input proof')
 
 
 if __name__ == '__main__':

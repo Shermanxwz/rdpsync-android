@@ -24,6 +24,9 @@ int rdpsync_transfer_ingress(RdpTransferIngress* state, const uint8_t* data, siz
 int rdpsync_transfer_admit_incoming(RdpTransfer* transfer, const uint8_t* first, size_t size, size_t total);
 /* Local staging only: runtime_cache is the immutable Application-initialized
  * directory, never a JNI path argument. Returns an owned CLOEXEC readonly fd. */
+/* Fixed 512 MiB Shared Space staging opener; not a CLIPRDR budget override. */
+int rdpsync_sharedspace_open_staged(const char* runtime_cache, const char* directory_id,
+    const char* file_id, uint64_t expected_size);
 int rdpsync_transfer_open_staged(const char* runtime_cache, const char* directory_id,
     const char* file_id, uint64_t expected_size);
 /* Name checks here are structural, not Unicode normalization. Kotlin applies

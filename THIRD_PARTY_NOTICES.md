@@ -14,6 +14,19 @@ The project's [MIT license](LICENSE) is unchanged. Bundled third-party component
 
 All notice assets and their [provenance manifest](app/src/main/assets/third_party/manifest.json) are included in the APK at `assets/third_party/`. `scripts/verify-apk.py` checks that the APK contains the exact committed asset bytes. When changing dependency pins, regenerate and review the notices with `scripts/collect-native-notices.py` against the pinned source inputs, then run its `--check` mode and rebuild/verify the APK. No production signing, app-store or legal certification is implied by this packaging check.
 
+## Narrow local FreeRDP transport addition
+
+The Shared Space build applies [`patch-freerdp-flow-control.py`](scripts/patch-freerdp-flow-control.py)
+to the exact commit above. It appends one read-only pending-ciphertext accessor;
+it does not change TLS, authentication, certificate checks or transport writes.
+The patch rejects four source-file hash mismatches, and the build rejects all
+other working-tree changes. Its script SHA256 is
+`2bff70af5face163878447ac2c53518029193c7a15f41a5db14b399c16e7cc5b`.
+Per-ABI build provenance records the source pins, patch-suffix hash and resulting
+transport-source hash. The separately built official reference client remains
+unpatched. Upstream notices above are collected from the immutable upstream
+commit; the local addition is this project's code, not an upstream feature.
+
 ## Android/JVM dependencies
 
 This implementation does not add or change production Maven dependencies: their declarations remain in [app/build.gradle.kts](app/build.gradle.kts). Existing packaged resources, including OkHttp's public-suffix NOTICE, are retained. New `org.json`, MockWebServer and coroutine-test dependencies are `testImplementation` only and are not bundled into the user APK. Test tools and their notices do not turn the preview APK into a production-signed release.

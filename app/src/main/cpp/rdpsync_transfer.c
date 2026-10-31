@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "rdpsync_transfer.h"
+#include "rdpsync_workspace.h"
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -71,8 +72,8 @@ static int open_directory_path(char* path) {
     }
     return fd;
 }
-int rdpsync_transfer_open_staged(const char* runtime_cache,const char* directory_id,const char* file_id,uint64_t expected_size) {
-    if(!uuid_valid(directory_id)||!uuid_valid(file_id)||expected_size>RDPSYNC_TRANSFER_FILE_BYTES)return TF_INVALID;
+static int open_staged_bounded(const char* runtime_cache,const char* directory_id,const char* file_id,uint64_t expected_size,uint64_t maximum) {
+    if(!uuid_valid(directory_id)||!uuid_valid(file_id)||expected_size>maximum)return TF_INVALID;
     if(!runtime_cache||!runtime_cache[0])return TF_UNAVAILABLE;
     size_t length=strnlen(runtime_cache,PATH_MAX);if(length>=PATH_MAX)return TF_INVALID;
     char parent[PATH_MAX],filename[41];memcpy(parent,runtime_cache,length+1);
@@ -93,6 +94,14 @@ int rdpsync_transfer_open_staged(const char* runtime_cache,const char* directory
 done:
     if(directory>=0)close(directory);if(base>=0)close(base);if(root>=0)close(root);
     return file>=0?file:TF_IO;
+}
+/* Separate fixed ceilings: Shared Space does not enlarge the CLIPRDR offer,
+ * ingress, connection-response budget, or its existing staging entrypoint. */
+int rdpsync_transfer_open_staged(const char* cache,const char* directory,const char* file,uint64_t size) {
+    return open_staged_bounded(cache,directory,file,size,RDPSYNC_TRANSFER_FILE_BYTES);
+}
+int rdpsync_sharedspace_open_staged(const char* cache,const char* directory,const char* file,uint64_t size) {
+    return open_staged_bounded(cache,directory,file,size,RDP_WS_MAX_FILE_BYTES);
 }
 static uint16_t get16(const uint8_t* p) { return (uint16_t)(p[0]|(uint16_t)p[1]<<8); }
 static uint32_t get32(const uint8_t* p) { return (uint32_t)get16(p)|(uint32_t)get16(p+2)<<16; }

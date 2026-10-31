@@ -40,6 +40,7 @@
 #include "rdpsync_context.h"
 #include "rdpsync_gfx_policy.h"
 #include "rdpsync_transfer.h"
+#include "rdpsync_drive.h"
 
 #define TAG "FreeRDP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -75,6 +76,7 @@ struct RdpSession {
     int touch_available;
     RdpgfxClientContext* gfx;
     RdpTransfer* transfer;
+    RdpDrive* drive;
     int file_transfer_enabled;
     RdpTransferIngress transfer_ingress;
     pReceiveChannelData receive_channel_data;
@@ -105,6 +107,8 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_lifecycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_startup_error[1024];
 static char g_runtime_home[PATH_MAX], g_runtime_cache[PATH_MAX];
+
+#include "rdpsync_sharedspace_jni.inc"
 
 /* Android has no shell HOME. FreeRDP requires it while allocating settings,
  * before any connection callback. Only the Application's private directories
@@ -507,6 +511,12 @@ static BOOL receive_channel_data(freerdp* instance, UINT16 id, const BYTE* data,
     size_t size, UINT32 flags, size_t total) {
     RdpSession* s = s_from_ctx(instance->context);
     const char* name = freerdp_channels_get_name_by_id(instance, id);
+    if (name && strcmp(name, "rdpdr") == 0 && s &&
+        !rdpsync_drive_ingress(s->drive, data, size, flags, total)) {
+        s_error(s, "共享空间通道请求超出安全限制");
+        s_diag(s, "shared-space=ingress-rejected");
+        return FALSE;
+    }
     if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 &&
         (!s || !rdpsync_transfer_ingress(&s->transfer_ingress, data, size, flags, total))) {
         s_error(s, "文件传输通道消息超出安全限制");
@@ -747,6 +757,8 @@ static BOOL configure_transfer_profile(rdpSettings* settings, BOOL enabled) {
             enabled ? CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES : 0);
 }
 static BOOL load_session_channels(freerdp* instance) {
+    RdpSession* drive_owner = s_from_ctx(instance->context);
+    if (drive_owner && drive_owner->drive) rdpsync_drive_install_provider();
     if (!freerdp_client_load_channels(instance)) return FALSE;
     const rdpSettings* settings = instance->context->settings;
     RdpSession* owner = s_from_ctx(instance->context);
@@ -761,7 +773,7 @@ static BOOL load_session_channels(freerdp* instance) {
      * A duplicate load can turn fake rdpsnd into AudioPlayback=TRUE. */
     if (freerdp_settings_get_bool(settings, FreeRDP_AudioPlayback) ||
         freerdp_settings_get_bool(settings, FreeRDP_AudioCapture) ||
-        freerdp_settings_get_uint32(settings, FreeRDP_DeviceCount) != 0) {
+        !rdpsync_drive_settings_valid(owner ? owner->drive : NULL, settings)) {
         LOGE("Channel loading unexpectedly enabled audio or device redirection");
         RdpSession* session = s_from_ctx(instance->context);
         if (session) s_error(session, "通道隐私设置不一致，已阻止连接");
@@ -955,6 +967,10 @@ static BOOL process_commands(RdpSession* s) {
     }
     return TRUE;
 }
+static void drive_wake_owner(void* context) {
+    RdpSession* session = context;
+    if (session->wake_event) SetEvent(session->wake_event);
+}
 static void* thread_fn(void* arg) {
     RdpSession* s = arg;
     freerdp* instance = s->instance;
@@ -985,6 +1001,7 @@ static void* thread_fn(void* arg) {
     while (!atomic_load(&s->terminating)) {
         if (rdpsync_transfer_pump(s->transfer) != CHANNEL_RC_OK) { s_error(s, "文件传输通道发送失败"); break; }
         if (!process_commands(s)) { s_error(s, "输入发送失败，连接已停止"); break; }
+        if (!rdpsync_drive_pump(s->drive, instance)) { s_error(s, "共享空间通道发送失败"); break; }
         HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {0};
         DWORD count = freerdp_get_event_handles(instance->context, handles, MAXIMUM_WAIT_OBJECTS - 1);
         if (!count) { s_error(s, "连接中断"); break; }
@@ -1020,6 +1037,7 @@ static void session_destroy(RdpSession* s) {
     pthread_mutex_destroy(&s->channel_mutex);
     pthread_mutex_destroy(&s->mutex);
     rdpsync_transfer_free(s->transfer);
+    rdpsync_drive_free(s->drive);
     free(s->fb_pixels); free(s);
 }
 static int enqueue_input(InputCommand command) {
@@ -1158,10 +1176,10 @@ JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetLibDir(JN
     /* FreeRDP uses WinPR's WITH_INTERNAL_MD4 implementation. Do not cast raw
      * MD4_CTX functions to EVP_MD_CTX callbacks: those structures are unrelated. */
 }
-JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect7(
     JNIEnv* env, jobject obj, jstring jhost, jint port, jstring juser, jstring jpassword,
     jstring jdomain, jstring jserver_name, jint width, jint height, jboolean touch, jboolean compatibility,
-    jstring jexpected_fingerprint, jboolean transfer_enabled) {
+    jstring jexpected_fingerprint, jboolean transfer_enabled, jint shared_space_mode) {
     (void)obj;
     /* Even a rejected new request invalidates an earlier UI trust challenge. */
     pthread_mutex_lock(&g_lock);
@@ -1172,6 +1190,15 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(
         pthread_mutex_unlock(&g_session->mutex);
     }
     pthread_mutex_unlock(&g_lock);
+    if (shared_space_mode < 0 || shared_space_mode > 2) return 0;
+    uint32_t workspace_status = 0;
+    RdpWorkspace* workspace = shared_space_mode ? workspace_require(env, &workspace_status) : NULL;
+    if (shared_space_mode && !workspace) {
+        pthread_mutex_lock(&g_lock);
+        snprintf(g_startup_error, sizeof(g_startup_error), "共享空间初始化失败 [0x%08x]", workspace_status);
+        pthread_mutex_unlock(&g_lock);
+        return 0;
+    }
     if (!rdpsync_valid_size(width, height) || port < 1 || port > 65535) return 0;
     const char* host = (*env)->GetStringUTFChars(env, jhost, NULL);
     const char* user = (*env)->GetStringUTFChars(env, juser, NULL);
@@ -1204,6 +1231,11 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(
     session->endpoint_port = port;
     session->expected_pin_state = rdpsync_normalize_pin(expected_pin, session->expected_fingerprint);
     pthread_mutex_lock(&g_lock); session->generation = ++g_next_generation; pthread_mutex_unlock(&g_lock);
+    if (shared_space_mode) {
+        failure_stage = "共享空间会话";
+        session->drive = rdpsync_drive_new(workspace, session->generation, shared_space_mode, workspace_pattern_key, NULL);
+        if (!session->drive) { session_destroy(session); goto failure; }
+    }
     failure_stage = "文件传输会话";
     session->file_transfer_enabled = transfer_enabled;
     session->transfer = rdpsync_transfer_new(session->generation, transfer_enabled);
@@ -1211,6 +1243,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(
     failure_stage = "唤醒事件";
     session->wake_event = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!session->wake_event) { session_destroy(session); goto failure; }
+    rdpsync_drive_set_wakeup(session->drive, drive_wake_owner, session);
     failure_stage = "FreeRDP 上下文";
     session->instance = rdpsync_create_instance(session, client_ctx_new);
     if (!session->instance) { session_destroy(session); goto failure; }
@@ -1232,7 +1265,8 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(
     s_diag(session, "certificate=security-settings-ready");
     failure_stage = "显示与通道设置";
     if (!configure_session_profile(settings, width, height, touch, compatibility) ||
-        !configure_transfer_profile(settings, transfer_enabled)) {
+        !configure_transfer_profile(settings, transfer_enabled) ||
+        !rdpsync_drive_configure(session->drive, session->instance->context)) {
         session_destroy(session); goto failure;
     }
     invariant = certificate_context_failure(session->instance, session, 1);
@@ -1267,6 +1301,9 @@ release:
     if (server_name) (*env)->ReleaseStringUTFChars(env, jserver_name, server_name);
     if (expected_pin) (*env)->ReleaseStringUTFChars(env, jexpected_fingerprint, expected_pin);
     return result;
+}
+JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(JNIEnv* e,jobject o,jstring h,jint p,jstring u,jstring pw,jstring d,jstring n,jint w,jint hh,jboolean t,jboolean compat,jstring pin,jboolean transfer) {
+    return Java_com_rdp_sync_network_RdpConnector_nativeConnect7(e,o,h,p,u,pw,d,n,w,hh,t,compat,pin,transfer,0);
 }
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect5(JNIEnv* e,jobject o,jstring h,jint p,jstring u,jstring pw,jstring d,jstring n,jint w,jint hh,jboolean t,jboolean compat,jstring pin) {
     return Java_com_rdp_sync_network_RdpConnector_nativeConnect6(e,o,h,p,u,pw,d,n,w,hh,t,compat,pin,JNI_FALSE);
@@ -1366,6 +1403,8 @@ JNIEXPORT jstring JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetDiag(J
                  (long long)s->input_drops, s->gfx_ready ? "software-ready" : "not-negotiated",
                  s->gfx_last_codec, (long long)s->gfx_commands);
         pthread_mutex_unlock(&s->mutex);
+        const size_t used = strlen(text);
+        rdpsync_drive_diagnostics(s->drive, text + used, sizeof(text) - used);
     }
     pthread_mutex_unlock(&g_lock);
     return (*e)->NewStringUTF(e, text);

@@ -24,6 +24,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
+import com.rdp.sync.network.CertificateChallenge
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.transfer.TransferFailure
 import com.rdp.sync.ui.rdp.RdpDesktopView
@@ -42,23 +43,33 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 
 /** Shared strict SAF/CLIPRDR scenario; each concrete class uses a real, fixed peer. */
+@OptIn(androidx.compose.ui.test.ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer) {
-    @get:Rule val compose = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("gnomeFixture", "xrdpFileFixture")
+    // Keep external IO completion effects on the test-clock owner, not its worker.
+    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val context get() = instrumentation.targetContext
     private val automation get() = instrumentation.uiAutomation
     private val evidence by lazy { File(context.getExternalFilesDir(null), peer.evidenceName).apply { mkdirs() } }
     private val measurements = JSONObject()
+    private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
     private val seededMediaUris = linkedMapOf<String, Pair<String, String>>()
     private val pickerEvents = JSONArray()
     private val routeBackCallbacks = AtomicInteger()
     private val routeBackCallbackElapsed = AtomicLong()
     private val folder = "rdpsync-transfer-${SystemClock.uptimeMillis()}"
     private val downloads get() = "/sdcard/Download/$folder"
+    private var coachmarkAcknowledged = false
 
     @Test fun explicitSafAndNativeClipboardFileRoundTrip() {
+        measurements.put("fixture_app_locale", appLocale.receipt)
+        assertEquals("Explicit legacy fixture app language", "zh", compose.activity.resources.configuration.locales[0].language)
+        measurements.put("fixture_activity_locales", compose.activity.resources.configuration.locales.toLanguageTags())
         val args = InstrumentationRegistry.getArguments()
         assertEquals("true", args.getString(peer.enabledArgument))
         val fingerprint = requireNotNull(args.getString(peer.fingerprintArgument))
@@ -78,6 +89,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768)
         compose.runOnUiThread { compose.activity.setContent {
             MaterialTheme {
+                boundedScroll.Bind()
                 BackHandler(enabled = showing.value) {
                     routeBackCallbacks.incrementAndGet()
                     routeBackCallbackElapsed.set(SystemClock.elapsedRealtime())
@@ -86,10 +98,77 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 if (showing.value) RdpConnectionScreen(device) { showing.value = false }
             }
         } }
+        var primaryFailure: Throwable? = null
+        var cleanupFailure: Throwable? = null
+        val cleanupFailures = JSONArray()
+        fun failureEvidence(error: Throwable) = JSONObject()
+            .put("class", error.javaClass.name).put("message", error.message ?: JSONObject.NULL)
+            .put("stack", error.stackTraceToString()).put("elapsed_ms", SystemClock.elapsedRealtime())
+        fun cleanupStep(name: String, block: () -> Unit) {
+            try { block() } catch (error: Throwable) {
+                cleanupFailures.put(failureEvidence(error).put("step", name))
+                android.util.Log.e("ClipboardTransferScenario", "Cleanup failed: $name", error)
+                val first = primaryFailure ?: cleanupFailure
+                if (first == null) cleanupFailure = error else if (first !== error) first.addSuppressed(error)
+            }
+        }
+        fun persistFailureEvidence() {
+            measurements.put("cleanup_failures", cleanupFailures)
+            File(evidence, "measurements.json").writeText(measurements.toString(2))
+            shell("mkdir -p /sdcard/Download/rdpsync-${peer.evidenceName}")
+            shell("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-${peer.evidenceName}/")
+        }
         try {
-            waitFor("explicit certificate prompt") { compose.onAllNodesWithText("确认服务器证书").fetchSemanticsNodes().isNotEmpty() }
-            compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹").performScrollTo().performClick()
+            val trustTitle = "确认服务器证书"
+            // The first-use SYSTEM overlay can precede the app's certificate Dialog.
+            // One original deadline covers both the observed acknowledgement and
+            // exact app-dialog readiness; no trust/input is retried after failure.
+            val trustReadyDeadline = SystemClock.elapsedRealtime() + 30_000
+            val certificateReadiness = JSONArray()
+            measurements.put("certificate_readiness", certificateReadiness)
+            var nextCertificateSample = 0L
+            val beforeTrust = acknowledgeSystemImmersiveCoachmark(compose.activity,
+                { compose.mainClock.advanceTimeBy(32); instrumentation.waitForIdleSync() },
+                { screenshot("00-system-immersive-coachmark") },
+                { retainCoachmark("before_certificate", it) }, deadlineElapsedMs = trustReadyDeadline,
+                readyWhenSystemOverlayAbsent = {
+                    // Exactly one existing native read, with the connector's same
+                    // Throwable->null guard and production parser. Never re-connect.
+                    val raw = try { RdpConnector.nativeGetCertificateChallenge() } catch (error: Throwable) {
+                        android.util.Log.e("RdpConnector", "certificateChallenge failed", error)
+                        null
+                    }
+                    val challenge = CertificateChallenge.fromNative(raw)
+                    val now = SystemClock.elapsedRealtime()
+                    val sample = if (certificateReadiness.length() < 20 && now >= nextCertificateSample) {
+                        nextCertificateSample = now + 1_500
+                        JSONObject().put("elapsed_ms", now).put("raw_field_count", raw?.size ?: 0)
+                            .put("parsed", challenge != null).put("fingerprint_matches", challenge?.fingerprint == fingerprint)
+                            .put("title_count", JSONObject.NULL).put("focused_title", JSONObject.NULL)
+                            .also { row ->
+                                // Synthetic endpoint/fingerprint only; omit subject and issuer text.
+                                for ((index, name) in listOf(0 to "generation", 1 to "fingerprint", 4 to "host",
+                                    5 to "port", 6 to "server_name", 7 to "reason")) {
+                                    row.put(name, raw?.getOrNull(index)?.take(256) ?: JSONObject.NULL)
+                                }
+                                certificateReadiness.put(row)
+                            }
+                    } else null
+                    // Preserve original short-circuit order: no new semantics/window
+                    // probe when the native fingerprint has not matched.
+                    val matched = challenge?.fingerprint == fingerprint
+                    val titleCount = if (matched) compose.onAllNodesWithText(trustTitle).fetchSemanticsNodes().size else null
+                    if (titleCount != null) sample?.put("title_count", titleCount)
+                    val focused = if (matched && titleCount == 1) focusedCertificateTitle(trustTitle, sample) else false
+                    if (matched && titleCount == 1) sample?.put("focused_title", focused)
+                    sample?.put("completed_elapsed_ms", SystemClock.elapsedRealtime())
+                    matched && titleCount == 1 && focused
+                }, allowAcknowledgement = !coachmarkAcknowledged)
+            coachmarkAcknowledged = coachmarkAcknowledged || beforeTrust.getBoolean("acknowledged")
+            assertEquals("No remote frame before explicit certificate trust", 0L, RdpConnector.nativeGetFrameId())
+            boundedScroll.to(compose.onNodeWithText(fingerprint)).assertIsDisplayed()
+            compose.onNodeWithText("保存指纹并重连").assertIsNotEnabled()
+            boundedScroll.to(compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹")).performClick()
             compose.onNodeWithText("保存指纹并重连").performClick()
             waitFor("actual ${peer.name} frame before transfer") { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 }
             waitFor("actual expected peer graphics path before transfer") {
@@ -103,9 +182,10 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 }
             }
             assertFalse("Peer must not silently downgrade to compatibility", RdpConnector.getDiag().contains("connection=compatibility-retry"))
-            measurements.put("system_immersive_coachmark", acknowledgeSystemImmersiveCoachmark(compose.activity,
+            val afterFrame = acknowledgeSystemImmersiveCoachmark(compose.activity,
                 { compose.mainClock.advanceTimeBy(32) }, { screenshot("00-system-immersive-coachmark") },
-                { measurements.put("system_immersive_coachmark", it) }))
+                { retainCoachmark("after_first_frame", it) }, allowAcknowledgement = !coachmarkAcknowledged)
+            coachmarkAcknowledged = coachmarkAcknowledged || afterFrame.getBoolean("acknowledged")
             focusRealPeerSurface()
             val firstGeneration = RdpConnector.sessionGeneration()
             assertEquals("File channel must be opt-in", -2L, RdpConnector.nativeFileTransferState()[1])
@@ -125,7 +205,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             measurements.put("opt_in_reconnected", true).put("streaming_generation", RdpConnector.sessionGeneration())
             waitFor("file dialog after confirmed reconnect") { compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().isNotEmpty() }
             seedOwnedDocuments()
-            compose.onNodeWithText("选择文件").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("选择文件")).performClick()
             navigateDocumentsFolder("source")
             val originals = samples("android")
             originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
@@ -135,8 +215,8 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                     node.text?.toString() in setOf("Open", "OPEN", "Select", "SELECT") || node.contentDescription?.toString() in setOf("Open", "Select")
             }
             waitFor("selected files privately staged") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
-            originals.keys.forEach { name -> compose.onNodeWithText("$name · ${originals.getValue(name).size} 字节").performScrollTo().assertExists() }
-            compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+            originals.keys.forEach { name -> boundedScroll.to(compose.onNodeWithText("$name · ${originals.getValue(name).size} 字节")).assertExists() }
+            boundedScroll.to(compose.onNodeWithText("提供给远程剪贴板")).performClick()
             waitFor("explicit outbound offer retained") { RdpConnector.nativeFileTransferState()[2] > 0 }
             val offer = RdpConnector.nativeFileTransferState()[2]
             assertTrue(RdpConnector.nativeFileTransferOfferRetained(offer))
@@ -164,7 +244,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             assertTrue(RdpConnector.nativeFileTransferOfferRetained(offer))
             screenshot("02-remote-read-completed")
             openFiles("发送文件")
-            compose.onNodeWithText("停止共享").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("停止共享")).performClick()
             waitFor("explicit stop-sharing revokes offer") { !RdpConnector.nativeFileTransferOfferRetained(offer) }
             assertEquals("Cancel must not reset sending budget", budgetAfterRead, RdpConnector.nativeFileTransferState()[9])
             assertTrue("Cancel must preserve desktop session", RdpConnector.isConnected())
@@ -173,16 +253,16 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             action("offer-server-files")
             waitFor("GTK publishes synthetic server URI list") { transferState().optString("phase") == "offered" }
             openFiles("接收文件")
-            compose.onNodeWithText("读取远程文件列表").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("读取远程文件列表")).performClick()
             waitFor("metadata awaits explicit receive confirmation") { compose.onAllNodesWithText("等待你确认接收").fetchSemanticsNodes().isNotEmpty() }
             val remote = samples("server")
-            remote.keys.forEach { name -> compose.onNodeWithText("$name · ${remote.getValue(name).size} 字节").performScrollTo().assertExists() }
+            remote.keys.forEach { name -> boundedScroll.to(compose.onNodeWithText("$name · ${remote.getValue(name).size} 字节")).assertExists() }
             screenshot("03-remote-metadata-before-consent")
-            compose.onNodeWithText("确认接收这些文件").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("确认接收这些文件")).performClick()
             waitFor("real streamed files received", 45_000) { compose.onAllNodesWithText("文件已接收，请选择目录导出").fetchSemanticsNodes().isNotEmpty() }
             for (name in remote.keys) {
                 val beforeExportCount = directoryHashes("destination").size
-                compose.onNodeWithContentDescription("导出文件：$name").performScrollTo().performClick()
+                boundedScroll.to(compose.onNodeWithContentDescription("导出文件：$name")).performClick()
                 navigateDocumentsFolder("destination")
                 screenshot("04-destination-${remote.keys.indexOf(name)}")
                 tapDocumentAction("grant-owned-subfolder") { node -> node.text?.toString()?.uppercase() == "USE THIS FOLDER" }
@@ -205,14 +285,25 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             // A new offer stays alive while its dialog is hidden, but real route
             // Back disposal must revoke it. Previously copied remote bytes remain
             // ordinary remote files; this does not claim retroactive deletion.
-            compose.onNodeWithText("发送文件", useUnmergedTree = true).performClick()
-            compose.onNodeWithText("选择文件").performScrollTo().performClick()
+            val sendChip = compose.onNode(hasText("发送文件") and hasClickAction())
+            val sendStarted = SystemClock.elapsedRealtime()
+            boundedScroll.to(sendChip).assertIsDisplayed().assertIsEnabled()
+            measurements.put("reoffer_send_chip", JSONObject().put("started_elapsed_ms", sendStarted)
+                .put("visible_bounds", sendChip.fetchSemanticsNode().boundsInRoot.toString()))
+            sendChip.performClick()
+            waitFor("single Send chip action selected its file chooser") {
+                val chips = compose.onAllNodes(hasText("发送文件") and hasClickAction()).fetchSemanticsNodes()
+                chips.size == 1 && isSelected().matches(chips.single()) &&
+                    compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().size == 1
+            }
+            measurements.getJSONObject("reoffer_send_chip").put("selected_elapsed_ms", SystemClock.elapsedRealtime())
+            boundedScroll.to(compose.onNodeWithText("选择文件")).assertIsDisplayed().assertIsEnabled().performClick()
             navigateDocumentsFolder("source")
             originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
             tapDocumentAction("confirm-reoffer-selection") { node -> node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT") }
             waitFor("restaged explicit selection") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
             val beforeReofferGeneration = RdpConnector.sessionGeneration()
-            compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("提供给远程剪贴板")).performClick()
             var expectedRouteOfferBudget = budgetAfterRead
             if (peer == ClipboardFixturePeer.XRDP) {
                 // This pinned peer does not negotiate snapshot locking. A second
@@ -221,7 +312,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 waitFor("actual no-lock peer reports explicit reconnect-required") {
                     compose.onAllNodesWithText(reason).fetchSemanticsNodes().size == 1
                 }
-                compose.onNodeWithText(reason).performScrollTo().assertIsDisplayed()
+                boundedScroll.to(compose.onNodeWithText(reason)).assertIsDisplayed()
                 val previousPoll = RdpConnector.pollDisplayStatus()
                 waitFor("live session remains stable after rejected reoffer") { RdpConnector.pollDisplayStatus() !== previousPoll }
                 assertTrue(RdpConnector.isConnected())
@@ -232,7 +323,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 assertEquals("Rejected replacement must preserve the destination sentinel", sha256(sentinel), directoryHashes("destination").getValue("server-binary.bin"))
                 measurements.put("no_lock_reoffer_rejected_without_reconnect_or_budget_reset", true)
                     .put("no_lock_reoffer_message", reason)
-                compose.onNodeWithText("重新连接以开始新的发送会话").performScrollTo().performTouchInput { click() }
+                boundedScroll.to(compose.onNodeWithText("重新连接以开始新的发送会话")).performTouchInput { click() }
                 compose.onNodeWithText("重新连接远程桌面？").assertIsDisplayed()
                 assertEquals("Confirmation must precede reconnect", beforeReofferGeneration, RdpConnector.sessionGeneration())
                 compose.onNodeWithText("重新连接").performTouchInput { click() }
@@ -249,14 +340,14 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 measurements.put("no_lock_manual_reconnect_generation", RdpConnector.sessionGeneration())
                 openFiles("发送文件")
                 waitFor("fresh file controller requires fresh explicit selection") { compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().size == 1 }
-                compose.onNodeWithText("选择文件").performScrollTo().performClick()
+                boundedScroll.to(compose.onNodeWithText("选择文件")).performClick()
                 navigateDocumentsFolder("source")
                 originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
                 tapDocumentAction("confirm-fresh-connection-selection") { node ->
                     node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT")
                 }
                 waitFor("new connection stages only the new SAF selection") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
-                compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+                boundedScroll.to(compose.onNodeWithText("提供给远程剪贴板")).performClick()
             }
             waitFor("fresh offer") { RdpConnector.nativeFileTransferState()[2] > 0 }
             val routeOffer = RdpConnector.nativeFileTransferState()[2]
@@ -303,22 +394,39 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             assertEquals("One actual route Back callback", 1, routeBackCallbacks.get())
             waitFor("route teardown disconnects owned session") { !RdpConnector.isConnected() }
             measurements.put("route_back_revoked_offer", true).put("success", true)
+        } catch (error: Throwable) {
+            // Preserve the original body failure before Compose rule teardown can mask it.
+            primaryFailure = error
+            measurements.put("primary_failure", failureEvidence(error))
+            android.util.Log.e("ClipboardTransferScenario", "Primary scenario failure", error)
+            throw error
         } finally {
-            measurements.put("picker_events", pickerEvents).put("diagnostics", RdpConnector.getDiag())
-                .put("native_transfer_state", RdpConnector.nativeFileTransferState().joinToString(","))
-            screenshot("99-transfer-final")
-            val seedCleanup = cleanOwnedMediaSeeds()
-            measurements.put("synthetic_seed_cleanup", seedCleanup)
-            File(evidence, "measurements.json").writeText(measurements.toString(2))
-            File(evidence, "accessibility-final.txt").writeText(documentNodes { true }.joinToString("\n") { node ->
-                try { "${node.packageName} ${node.viewIdResourceName} ${node.text} ${node.contentDescription}" } finally { node.recycle() }
-            })
-            shell("mkdir -p /sdcard/Download/rdpsync-${peer.evidenceName}")
-            shell("cp -R ${evidence.absolutePath}/. /sdcard/Download/rdpsync-${peer.evidenceName}/")
-            compose.runOnUiThread { showing.value = false }
-            RdpConnector.disconnect()
-            automation.serviceInfo = originalService
-            assertTrue("Only owned synthetic MediaStore seed rows must be removed", (0 until seedCleanup.length()).all { seedCleanup.getJSONObject(it).getBoolean("removed") })
+            measurements.put("picker_events", pickerEvents)
+            cleanupStep("precleanup-native-state") {
+                measurements.put("diagnostics", RdpConnector.getDiag())
+                    .put("native_transfer_state", RdpConnector.nativeFileTransferState().joinToString(","))
+                    .put("precleanup_elapsed_ms", SystemClock.elapsedRealtime())
+            }
+            // Write before screenshot/semantics/disposal: each may itself fail after a test error.
+            cleanupStep("persist-before-cleanup") { persistFailureEvidence() }
+            cleanupStep("final-screenshot") { screenshot("99-transfer-final") }
+            cleanupStep("owned-seed-cleanup") {
+                val seedCleanup = cleanOwnedMediaSeeds()
+                measurements.put("synthetic_seed_cleanup", seedCleanup)
+                assertTrue("Only owned synthetic MediaStore seed rows must be removed", (0 until seedCleanup.length()).all { seedCleanup.getJSONObject(it).getBoolean("removed") })
+            }
+            cleanupStep("final-accessibility") {
+                File(evidence, "accessibility-final.txt").writeText(documentNodes { true }.joinToString("\n") { node ->
+                    try { "${node.packageName} ${node.viewIdResourceName} ${node.text} ${node.contentDescription}" } finally { node.recycle() }
+                })
+            }
+            cleanupStep("persist-before-disposal") { persistFailureEvidence() }
+            cleanupStep("hide-route") { compose.runOnUiThread { showing.value = false } }
+            cleanupStep("disconnect") { RdpConnector.disconnect() }
+            cleanupStep("restore-accessibility-service") { automation.serviceInfo = originalService }
+            cleanupStep("persist-after-disposal") { persistFailureEvidence() }
+            // Cleanup-only failure remains red; body failure retains all cleanup errors as suppressed.
+            if (primaryFailure == null) cleanupFailure?.let { throw it }
         }
     }
 
@@ -450,6 +558,43 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             File(match.groupValues[2]).name to match.groupValues[1]
         }
     }
+    private fun retainCoachmark(phase: String, value: JSONObject) {
+        value.put("phase", phase)
+        val phases = measurements.optJSONArray("coachmark_phases") ?: JSONArray().also { measurements.put("coachmark_phases", it) }
+        assertTrue("Bounded two-phase immersive readiness evidence", phases.length() < 2)
+        phases.put(value)
+        // Keep the actual acknowledgement receipt for the strict image collector;
+        // a later no-overlay observation must not overwrite it.
+        if (!coachmarkAcknowledged) {
+            measurements.put("system_immersive_coachmark", value)
+        }
+    }
+    private fun focusedCertificateTitle(title: String, observation: JSONObject? = null): Boolean {
+        var count = 0
+        val windows = automation.windows
+        val windowEvidence = observation?.let { JSONArray().also { rows -> it.put("windows", rows) } }
+        try {
+            for (window in windows) {
+                windowEvidence?.put(JSONObject().put("id", window.id).put("type", window.type).put("focused", window.isFocused))
+                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION || !window.isFocused) continue
+                val root = window.root ?: continue
+                val nodes = mutableListOf<AccessibilityNodeInfo>()
+                fun visit(node: AccessibilityNodeInfo) {
+                    nodes += node
+                    for (i in 0 until node.childCount) {
+                        if (nodes.size >= 512) break
+                        node.getChild(i)?.let(::visit)
+                    }
+                }
+                visit(root)
+                try {
+                    if (root.packageName?.toString() == context.packageName &&
+                        nodes.count { it.isVisibleToUser && it.text?.toString() == title } == 1) count++
+                } finally { nodes.forEach { it.recycle() } }
+            }
+        } finally { windows.forEach { it.recycle() } }
+        return count == 1
+    }
     private fun openFiles(label: String) {
         val started = SystemClock.elapsedRealtime()
         val deadline = started + 15_000
@@ -469,7 +614,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             observation.put("node_count", nodes.size).put("enabled", enabled)
             nodes.size == 1 && enabled
         }
-        compose.onNodeWithText(label).performScrollTo()
+        boundedScroll.to(compose.onNodeWithText(label), deadline)
         waitFor("visible enabled file menu target", (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
             val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
             nodes.size == 1 && isEnabled().matches(nodes.single()) && compose.onNodeWithText(label).isDisplayed()
@@ -542,21 +687,44 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         tapDocumentLabel(child)
     }
     private fun documentBreadcrumbs(): List<String> {
-        // AOSP15 HorizontalBreadcrumb enables only the last title for styling.
-        // Read visible disabled ancestors too; all gesture lookups still demand
-        // enabled targets. The exact owned parent+destination guard is unchanged.
-        val nodes = documentNodes(requireEnabled = false) { it.viewIdResourceName?.endsWith("/breadcrumb_text") == true }
+        // This API35 fixture must observe the current external picker, not a
+        // cached tree. Public API34+ clearCache changes observations only: no
+        // navigation, gesture, grant, or fallback to an earlier accepted path.
+        check(Build.VERSION.SDK_INT >= 34) { "Fresh breadcrumb observation requires public API34+ cache clearing" }
+        val observations = measurements.optJSONArray("tree_breadcrumb_observations") ?: JSONArray().also {
+            measurements.put("tree_breadcrumb_observations", it)
+        }
+        val observation = JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime())
+        // Keep the last64 observations, including the failing boundary, rather
+        // than silently stop recording after the first64 polling snapshots.
+        if (observations.length() == 64) observations.remove(0)
+        observations.put(observation)
+        fun candidates() = documentNodes(requireEnabled = false, requireVisible = false) {
+            it.viewIdResourceName?.endsWith("/breadcrumb_text") == true
+        }
+        fun describe(nodes: List<AccessibilityNodeInfo>) = JSONArray().also { values ->
+            nodes.forEach { node ->
+                values.put(JSONObject().put("text", node.text).put("enabled", node.isEnabled)
+                    .put("visible", node.isVisibleToUser).put("resource_id", node.viewIdResourceName)
+                    .put("window_id", node.windowId).put("node_identity_hash", node.hashCode())
+                    .put("bounds", Rect().also(node::getBoundsInScreen).toShortString()))
+            }
+        }
+        val cached = candidates()
+        try { observation.put("cached_candidates", describe(cached)) }
+        finally { cached.forEach { it.recycle() } }
+        val cleared = automation.clearCache()
+        observation.put("cache_clear_succeeded", cleared).put("cache_cleared_elapsed_ms", SystemClock.elapsedRealtime())
+        assertTrue("Fresh external picker observation requires successful accessibility cache clearing", cleared)
+        val fresh = candidates()
         return try {
-            val ordered = nodes.sortedBy { Rect().also(it::getBoundsInScreen).left }
-            val observations = measurements.optJSONArray("tree_breadcrumb_observations") ?: JSONArray().also { measurements.put("tree_breadcrumb_observations", it) }
-            if (observations.length() < 64) observations.put(JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime())
-                .put("nodes", JSONArray().also { values -> ordered.forEach { node ->
-                    values.put(JSONObject().put("text", node.text).put("enabled", node.isEnabled)
-                        .put("window_id", node.windowId).put("node_identity_hash", node.hashCode())
-                        .put("bounds", Rect().also(node::getBoundsInScreen).toShortString()))
-                } }))
+            observation.put("fresh_candidates", describe(fresh))
+            // Disabled ancestors remain readable, but invisible nodes NEVER
+            // establish path readiness. Gesture helpers remain enabled+visible.
+            val ordered = fresh.filter { it.isVisibleToUser }.sortedBy { Rect().also(it::getBoundsInScreen).left }
+            observation.put("nodes", describe(ordered)).put("completed_elapsed_ms", SystemClock.elapsedRealtime())
             ordered.map { requireNotNull(it.text).toString() }
-        } finally { nodes.forEach { it.recycle() } }
+        } finally { fresh.forEach { it.recycle() } }
     }
 
     private fun navigateObservedTreeDestination() {
@@ -674,10 +842,10 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             screenshot("picker-${pickerEvents.length()}-after-single-gesture")
         } finally { node.recycle() }
     }
-    private fun documentNodes(requireEnabled: Boolean = true, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
+    private fun documentNodes(requireEnabled: Boolean = true, requireVisible: Boolean = true, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
         val found = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo) {
-            if (node.isVisibleToUser && (!requireEnabled || node.isEnabled) && predicate(node) && found.none { it == node }) found += AccessibilityNodeInfo.obtain(node)
+            if ((!requireVisible || node.isVisibleToUser) && (!requireEnabled || node.isEnabled) && predicate(node) && found.none { it == node }) found += AccessibilityNodeInfo.obtain(node)
             for (i in 0 until node.childCount) node.getChild(i)?.let { child -> try { visit(child) } finally { child.recycle() } }
         }
         automation.windows.forEach { window ->

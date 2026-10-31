@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="drive_stop_failed">Stopping sharing could not be confirmed for this session. Check the current drive status; disconnect explicitly if you need to revoke all remote access.</string>
+    <string name="drive_compatibility_manual">Activation compatibility retry is paused because this attempt requested a shared drive. Stop sharing, then explicitly reconnect to try without the drive. Access will not be silently re-enabled.</string>
+</resources>

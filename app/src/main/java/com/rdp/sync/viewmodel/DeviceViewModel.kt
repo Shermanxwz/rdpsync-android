@@ -30,7 +30,8 @@ data class UiState(
     val webDavUsername: String = "",
     val webDavPassword: String = "",
     val webDavCredentialUnavailable: Boolean = false,
-    val webDavSettingsLoaded: Boolean = false
+    val webDavSettingsLoaded: Boolean = false,
+    val webDavTestCompletion: Long = 0
 )
 
 class DeviceViewModel(application: Application) : AndroidViewModel(application) {
@@ -129,8 +130,8 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
                 WebDavSyncService.testConnection(cleanUrl, username.trim(), password)
             }
             result.fold(
-                onSuccess = { message -> _uiState.update { it.copy(isSyncing = false, message = message) } },
-                onFailure = { e -> _uiState.update { it.copy(isSyncing = false, error = "WebDAV 测试失败: ${safeOperationMessage(e)}") } }
+                onSuccess = { message -> _uiState.update { it.copy(isSyncing = false, message = message, webDavTestCompletion = it.webDavTestCompletion + 1) } },
+                onFailure = { e -> _uiState.update { it.copy(isSyncing = false, error = "WebDAV 测试失败: ${safeOperationMessage(e)}", webDavTestCompletion = it.webDavTestCompletion + 1) } }
             )
         }
     }

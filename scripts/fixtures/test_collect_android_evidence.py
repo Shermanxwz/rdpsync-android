@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Host-only synthetic adb read/ledger controls; never an Android runtime claim."""
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -11,6 +12,51 @@ spec = importlib.util.spec_from_file_location('collector', Path(__file__).with_n
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
 
 
+
+def stream_receipt(scope='ime', size=100):
+    result = dict(scope=scope, source_bytes=size+30, selected_bytes=size, source_sha256='a'*64,
+                  producer_eof=True, complete=True, failure='', exit_status=0, exit_trailers=1,
+                  source_limit=16*1024*1024, line_prefix_limit=8192, selected_limit=65536, lines=10,
+                  command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
+    for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
+        result[key]=1
+    result.update(manager_headers=1, client_headers=0, client_method_rows=0, manager_observer_rows=0)
+    return result
+
+class CompositionPlanTests(unittest.TestCase):
+    def test_declared_pinyin_frames_and_no_extra_gesture(self):
+        value = dict(software_keyboard_declared_plan=dict(mode='pinyin-compose-commit-newline', gestures=['a', 'commit-Enter', 'newline-Enter']),
+                     actual_software_keyboard_keys=[dict(stage=x) for x in ['type-a', 'commit-composition', 'newline']],
+                     software_keyboard_composition_kept_local=True, software_keyboard_composition_committed_text='ab\na',
+                     software_keyboard_committed_text='ab\na\n')
+        self.assertEqual(len(composition_frames := m.composition_frames(value)), 4)
+        self.assertEqual(len(set(composition_frames)), 4)
+        value['actual_software_keyboard_keys'].append(dict(stage='newline'))
+        with self.assertRaises(AssertionError): m.composition_frames(value)
+
+    def test_incomplete_plan_keeps_best_effort_failure_frames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            collector = m.Collector(Path(directory), 0, best_effort=True)
+            pulled = []
+            def pull(folder, name):
+                pulled.append(name)
+                return b'{}'
+            collector.pull = pull
+            collector.collect('classic')
+            self.assertIn('04d4-ime-key-failure-before-hide.png', pulled)
+            self.assertIn('04d3-ime-after-enter.png', pulled)
+            receipt = json.loads((Path(directory) / 'evidence-collection-best-effort.json').read_text())
+            self.assertFalse(receipt['complete'])
+            self.assertTrue(receipt['errors'])
+
+    def test_declared_latin_has_one_enter(self):
+        value = dict(software_keyboard_declared_plan=dict(mode='latin-direct-newline', gestures=['a', 'newline-Enter']),
+                     actual_software_keyboard_keys=[dict(stage=x) for x in ['type-a', 'newline']])
+        self.assertEqual(m.composition_frames(value), [])
+        value['software_keyboard_declared_plan']['mode'] = 'unknown'
+        with self.assertRaises(AssertionError): m.composition_frames(value)
+
+
 def transfer():
     return dict(success=True, offer_survived_dialog_hide=True, collision_original_unchanged=True,
                 route_back_revoked_offer=True, peer_to_saf_export={'synthetic': 'hash'}, synthetic_seed_cleanup=[{'removed': True}])
@@ -19,6 +65,17 @@ def transfer():
 def diagnostic():
     return dict(success=True, diagnostic_only=True, saf_ui_covered=False, no_retained_native_offer=True,
                 private_snapshot_removed_after_close=True, disconnected=True)
+
+
+def drive():
+    value={key: True for key in ('success','saf_ui_covered','actual_import_picker_cancel_no_import',
+        'actual_export_picker_cancel_no_copy','consent_cancel_kept_off','actual_ro_denied_write',
+        'actual_read_over_32mib','collision_original_unchanged','paused_revoke_and_stale_handle_denied',
+        'source_originals_unchanged','persistence_after_explicit_reconnect','disconnected')}
+    value.update(clipboard_used=False,windows_os_covered=False,actual_rw_operations={'fixture':True},
+        peer_to_saf_export={'fixture':'hash'},stalls=[{'phase':p,'actual_buffered_plateau':True} for p in ('resume','cancel')],
+        touch_attempts=[{'passed':True}]*2,synthetic_seed_cleanup=[{'removed':True}]*5)
+    return value
 
 
 class Reader:
@@ -85,9 +142,10 @@ class Tests(unittest.TestCase):
 
     def test_ledgers_before_images_and_missing_image_fails(self):
         self.files['/sdcard/Download/rdpsync-xrdp-transport-diagnostic/measurements.json']=json.dumps(diagnostic()).encode()
+        self.files['/sdcard/Download/rdpsync-shared-drive-evidence/measurements.json']=json.dumps(drive()).encode()
         reader=Reader(self.files)
         with self.assertRaises(RuntimeError):self.collector(reader).collect('xrdp')
-        pulls=[c[2] for c in reader.calls if c[1]=='pull'];self.assertEqual(len(pulls),2)
+        pulls=[c[2] for c in reader.calls if c[1]=='pull'];self.assertEqual(len(pulls),3)
         self.assertTrue(all(p.endswith('/measurements.json') for p in pulls))
         report=json.loads((Path(self.tmp.name)/'evidence-collection.json').read_text());self.assertFalse(report['complete'])
 
@@ -97,13 +155,48 @@ class Tests(unittest.TestCase):
         report=json.loads((Path(self.tmp.name)/'evidence-collection-best-effort.json').read_text())
         self.assertFalse(report['complete']);self.assertTrue(report['best_effort'])
 
+    def test_actual_drive_ledger(self):
+        m.validate_ledger('rdpsync-shared-drive-evidence', drive())
+
+    def test_drive_cannot_be_clipboard_or_synthetic_plateau(self):
+        for key in ('clipboard_used','windows_os_covered'):
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                m.validate_ledger('rdpsync-shared-drive-evidence',dict(drive(),**{key:True}))
+        value=drive();value['stalls'][0]['actual_buffered_plateau']=False
+        with self.assertRaises(AssertionError):m.validate_ledger('rdpsync-shared-drive-evidence',value)
+
+    def test_drive_missing_declared_phase_fails(self):
+        value=drive();value['stalls']=value['stalls'][:1]
+        with self.assertRaises(AssertionError):m.validate_ledger('rdpsync-shared-drive-evidence',value)
+
+    def test_drive_failed_tap_or_missing_seed_cleanup_fails(self):
+        for key in ('touch_attempts','synthetic_seed_cleanup'):
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                m.validate_ledger('rdpsync-shared-drive-evidence',dict(drive(),**{key:[]}))
+
     def test_frame_selection_error_receipt_is_not_complete(self):
         value={key:True for key in ('no_auth_before_first_trust','ime_tools_touch_and_software_typing_passed',
             'transient_system_bar_reveal_verified','same_pin_reconnect_without_prompt',
             'changed_certificate_blocked_until_explicit_reapproval','unsupported_resize_preserved_session')}
         value['touch_attempts']=[{'passed':True}]
         value['untrusted_certificate_phases']=[{'phase':'unexpected','system_immersive_coachmark':{'acknowledged':True}}]
-        reader=Reader({'/sdcard/Download/rdpsync-evidence/measurements.json':json.dumps(value).encode()})
+        ime = 'com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME'
+        initial = dict(selected_ime=[ime], bound_ime=[ime], observer_cache=['1'],
+                       service_instance=['Gboard@aaa'], method_identity=['Invoker@bbb'], dump_complete=True)
+        prerequisite = dict(verified_before_activity=True, restored=True, original='0', requested='1',
+            wrote_setting=True, readiness_mode="same-service-observer-transition", ime=ime, initial_service=initial,
+            consumption_samples=[dict(initial, observer_cache=['2'], consumed=True)],
+            setup_elapsed_ms=1, ready_elapsed_ms=12, consumption_deadline_elapsed_ms=15, restore_elapsed_ms=20)
+        names = m.IME_DUMPS
+        data = b'synthetic dump fixture'
+        prerequisite['stream_projections'] = dict(initial=stream_receipt(size=len(data)), latest=stream_receipt(size=len(data)))
+        contents = {name: data if i < 2 else b'' for i, name in enumerate(names)}
+        prerequisite['dump_files'] = {name: dict(bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()) for name, raw in contents.items()}
+        prefix = '/sdcard/Download/rdpsync-evidence/'
+        files = {prefix+'measurements.json': json.dumps(value).encode(),
+                 prefix+'ime-setting-receipt.json': json.dumps(prerequisite).encode()}
+        files.update({prefix+name: raw for name, raw in contents.items()})
+        reader=Reader(files)
         with self.assertRaises(AssertionError):self.collector(reader).collect('classic')
         report=json.loads((Path(self.tmp.name)/'evidence-collection.json').read_text())
         self.assertFalse(report['complete']);self.assertTrue(report['errors'])

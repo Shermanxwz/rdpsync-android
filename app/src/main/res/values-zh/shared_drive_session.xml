@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="drive_stop_failed">无法确认本会话已停止共享。请检查当前驱动器状态；如需撤销所有远程访问，请明确断开连接。</string>
+    <string name="drive_compatibility_manual">本次连接请求了共享驱动器，因此已暂停自动兼容重试。请先停止共享，再明确重新连接以尝试不共享驱动器的连接。不会静默重新授予访问权限。</string>
+</resources>

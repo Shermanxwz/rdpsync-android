@@ -12,6 +12,7 @@ android-10.0.0_r47 ProcessRecord/DisplayContent and android-15.0.0_r1
 ProcessErrorStateRecord/ProcessList/DisplayContent; no hidden app API is used.
 """
 import argparse
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -34,6 +35,80 @@ PROCESS_HEADER = re.compile(r'^  \*(?:APP|PERS)\* UID \d+ ProcessRecord\{[^ }]+ 
 ACTIVE_ERROR = re.compile(r'\b(?:mCrashing|mNotResponding|bad)=true\b|\b(?:AppNotRespondingDialog|AppErrorDialog)[{@]')
 DUMP_ERROR = re.compile(r'(?i)permission denial|dump.*?time(?:d[ -]out|out)|exception occurred')
 APP_PROCESS = re.compile(r'^com\.rdp\.sync(?:\.preview\d*)?(?:\.test)?(?::|$)')
+
+
+# Read-only route/address prerequisite, NOT TCP/TLS/GNOME/app-UID readiness.
+# No nc flags or network packets are used. Android main table may be empty;
+# only kernel route-get for the fixed emulator host target is authoritative.
+NETWORK_TARGET = '10.0.2.2'
+NETWORK_UNREACHABLE = {'RTNETLINK answers: Network is unreachable',
+                       'ip: RTNETLINK answers: Network is unreachable'}
+
+
+def network_route_state(addresses, route, route_rc, route_error):
+    if addresses and not addresses.endswith('\n'):
+        raise ValueError('Truncated IPv4 address output')
+    known = set()
+    for line in addresses.splitlines():
+        if not line.strip():
+            continue
+        match = re.fullmatch(r'\d+: ([A-Za-z0-9_.:-]+)(?:@[A-Za-z0-9_.:-]+)? +inet ([0-9.]+/\d+) +(.+)', line.strip())
+        if not match:
+            raise ValueError('Unknown IPv4 address observation format')
+        interface, cidr, detail = match.groups()
+        value = ipaddress.IPv4Interface(cidr)
+        if 'scope ' not in detail or not re.search(r'\bscope (?:host|link|global)\b', detail):
+            raise ValueError('Missing IPv4 address scope')
+        tokens = detail.replace('\\', ' ').split()
+        while tokens:
+            token = tokens.pop(0)
+            if token in {'brd', 'scope', 'valid_lft', 'preferred_lft'}:
+                if not tokens:
+                    raise ValueError('Truncated IPv4 address fields')
+                item = tokens.pop(0)
+                if token == 'brd': ipaddress.IPv4Address(item)
+                elif token == 'scope' and item not in {'host', 'link', 'global'}:
+                    raise ValueError('Unknown IPv4 address scope')
+                elif token.endswith('_lft') and item != 'forever' and not re.fullmatch(r'\d+sec', item):
+                    raise ValueError('Unknown address lifetime')
+            elif token not in {'secondary', 'dynamic', 'noprefixroute', 'permanent'} and token != interface:
+                raise ValueError('Unknown IPv4 address fields')
+        known.add((interface, str(value.ip)))
+    if route_rc != 0:
+        if route_rc in (1, 2) and not route.strip() and route_error.strip() in NETWORK_UNREACHABLE:
+            return {'ready': False, 'reason': 'target_route_unreachable'}
+        raise ValueError('Unknown target route failure')
+    if route_error.strip():
+        raise ValueError('Unexpected target route stderr')
+    if not route.endswith('\n'):
+        raise ValueError('Truncated target route output')
+    lines = [line.strip() for line in route.splitlines() if line.strip()]
+    if not lines or len(lines) > 2 or (len(lines) == 2 and lines[1] != 'cache'):
+        raise ValueError('Unknown target route output')
+    words = lines[0].split()
+    if words.pop(0) != NETWORK_TARGET:
+        raise ValueError('Target route output does not match fixed target')
+    fields = {}
+    while words:
+        key = words.pop(0)
+        if key not in {'via', 'dev', 'src', 'uid', 'table', 'metric'} or not words or key in fields:
+            raise ValueError('Unknown or duplicate target route fields')
+        fields[key] = words.pop(0)
+    for key in ('src', 'via'):
+        if key in fields:
+            ipaddress.IPv4Address(fields[key])
+    for key in ('uid', 'metric'):
+        if key in fields and not fields[key].isdigit():
+            raise ValueError('Invalid numeric target route field')
+    if 'dev' not in fields or not re.fullmatch(r'[A-Za-z0-9_.:-]+', fields['dev']):
+        raise ValueError('Target route has no valid interface')
+    source = fields.get('src')
+    ready = (fields['dev'] != 'lo' and source is not None
+             and not ipaddress.IPv4Address(source).is_loopback
+             and not ipaddress.IPv4Address(source).is_unspecified
+             and (fields['dev'], source) in known)
+    return {'ready': ready, 'reason': 'matched_target_route_and_address' if ready else 'no_matching_nonloopback_source',
+            'target': NETWORK_TARGET, 'interface': fields['dev'], 'source': source}
 
 
 def component(value):
@@ -142,7 +217,7 @@ def observe(processes, windows, displays, activities, home):
 
 
 class Gate:
-    def __init__(self, out, run=subprocess.run, monotonic=time.monotonic, sleep=time.sleep, environ=None):
+    def __init__(self, out, run=subprocess.run, monotonic=time.monotonic, sleep=time.sleep, environ=None, fixture_network=None):
         self.out, self.run, self.now, self.sleep = Path(out), run, monotonic, sleep
         self.env = os.environ if environ is None else environ
         self.deadline = self.now() + 120
@@ -150,6 +225,9 @@ class Gate:
                        'success': False, 'recovery_count': 0, 'commands': [], 'observations': []}
         self.adb = ['adb', '-s', SERIAL]
         self.device_authorized = False
+        if fixture_network not in (None, 'gnome'):
+            raise ValueError('Unknown fixture network preset')
+        self.fixture_network = fixture_network
 
     def command(self, args, name, *, raw=False, allowed=(0,)):
         remaining = self.deadline - self.now()
@@ -208,6 +286,62 @@ class Gate:
             except Exception as error:
                 self.report.setdefault('diagnostic_errors', []).append(str(error))
 
+    def recheck_owned_transport(self, name):
+        # Never reconnect/restart adb or any device. Observe only the same sole
+        # action-owned serial; an extra/unauthorized device remains fatal.
+        output = self.command(['adb', 'devices'], name)
+        listed = [line.split() for line in output.splitlines()[1:] if line.strip()]
+        if listed not in ([[SERIAL, 'device']], [[SERIAL, 'offline']]):
+            raise ValueError('Transport changed away from the sole owned emulator')
+
+    def await_boot_completed(self):
+        for attempt in range(1, 6):
+            name = f'boot-completed-{attempt:02d}'
+            output = self.command([*self.adb, 'shell', 'getprop', 'sys.boot_completed'],
+                                  name, allowed=(0, 1, 255))
+            row = self.report['commands'][-1]
+            error = self.out.joinpath(name + '.stderr.txt').read_text().strip()
+            if row['returncode'] == 0 and output.strip() == '1':
+                self.report['boot_completed_attempts'] = attempt
+                return
+            pending = row['returncode'] == 0 and output.strip() in ('', '0')
+            offline = row['returncode'] in (1, 255) and error in ('adb: device offline', 'error: device offline')
+            if not (pending or offline):
+                raise RuntimeError('Unknown boot-completion failure; no startup retry permitted')
+            self.report.setdefault('startup_transport_waits', []).append(
+                {'phase': 'boot-completed', 'attempt': attempt, 'reason': 'offline' if offline else 'boot-pending'})
+            if attempt == 5:
+                raise RuntimeError('Owned boot-completion did not become ready within five observations')
+            self.recheck_owned_transport(f'boot-devices-{attempt:02d}')
+            self.sleep(min(1, max(0, self.deadline - self.now())))
+
+    def prepare_logcat(self, home):
+        # Clear startup logs only after archived initial evidence and healthy
+        # pre-instrumentation snapshots. Never repeat app/tests or a timed-out
+        # mutation. Explicit observed logd/transport failures get <=3 attempts.
+        for attempt in range(1, 4):
+            if not self.snapshot(home)['healthy']:
+                raise RuntimeError('Startup health changed before logcat preparation')
+            name = f'logcat-clear-{attempt:02d}'
+            self.command([*self.adb, 'logcat', '-b', 'all', '-d'], name + '-before')
+            output = self.command([*self.adb, 'logcat', '-c'], name, allowed=(0, 1, 255))
+            row = self.report['commands'][-1]
+            error = self.out.joinpath(name + '.stderr.txt').read_text().strip()
+            if row['returncode'] == 0:
+                if not self.snapshot(home)['healthy']:
+                    raise RuntimeError('Startup health changed after logcat preparation')
+                self.report['logcat_clear_attempts'] = attempt
+                self.report['logcat_clear_verified'] = True
+                return
+            message = (output.strip() + '\n' + error).strip()
+            transient = message in ("failed to clear the 'main' log", 'adb: device offline', 'error: device offline')
+            self.report.setdefault('startup_transport_waits', []).append(
+                {'phase': 'logcat-clear', 'attempt': attempt, 'reason': message})
+            if not transient or attempt == 3:
+                raise RuntimeError('Logcat preparation failed; no instrumentation permitted')
+            self.recheck_owned_transport(f'logcat-devices-{attempt:02d}')
+            self.sleep(min(1, max(0, self.deadline - self.now())))
+
     def await_home(self):
         history = self.report.setdefault('home_resolution_observations', [])
         while self.now() < self.deadline:
@@ -232,6 +366,47 @@ class Gate:
             return home
         raise TimeoutError('Known setup HOME did not resolve to a real launcher within the startup deadline')
 
+    def await_fixture_route(self, home):
+        receipt = {'scope': 'shell-UID IPv4 route/address prerequisite only; no TCP/TLS/app-UID/GNOME proof',
+                   'target': NETWORK_TARGET, 'ready': False, 'observations': []}
+        self.report['fixture_route'] = receipt
+        for attempt in range(1, 31):
+            # No operation may begin after the same original startup deadline.
+            self.recheck_owned_transport(f'route-devices-{attempt:02d}')
+            if not self.snapshot(home)['healthy']:
+                raise RuntimeError('Startup health changed during route readiness')
+            name = f'network-{attempt:02d}'
+            addresses = self.shell(['ip', '-o', '-4', 'addr', 'show'], name + '-addresses')
+            if self.out.joinpath(name + '-addresses.stderr.txt').read_text().strip():
+                raise ValueError('Unexpected IPv4 address stderr')
+            # Policy routing: all-table dump is evidence only, never a main-table predicate.
+            self.shell(['ip', '-4', 'route', 'show', 'table', 'all'], name + '-all-routes')
+            if self.out.joinpath(name + '-all-routes.stderr.txt').read_text().strip():
+                raise ValueError('Unexpected all-table route stderr')
+            route = self.command([*self.adb, 'shell', 'ip', '-4', 'route', 'get', NETWORK_TARGET],
+                                 name + '-target-route', allowed=(0, 1, 2))
+            command = self.report['commands'][-1]
+            error = self.out.joinpath(name + '-target-route.stderr.txt').read_text()
+            row = {'attempt': attempt, 'observed_monotonic': self.now(),
+                   'address_file': name + '-addresses.stdout.txt',
+                   'route_file': name + '-target-route.stdout.txt',
+                   'route_stderr_file': name + '-target-route.stderr.txt',
+                   'route_returncode': command['returncode']}
+            receipt['observations'].append(row)
+            row.update(network_route_state(addresses, route, command['returncode'], error))
+            if row['ready']:
+                # Recheck current HOME/no-app state after the network observations.
+                if not self.snapshot(home)['healthy']:
+                    raise RuntimeError('Startup health changed after route readiness')
+                if self.now() > self.deadline:
+                    raise TimeoutError('Route readiness exceeded original startup deadline')
+                receipt['ready'] = True
+                return
+            if attempt == 30:
+                raise TimeoutError('Guest target route/address not ready after 30 observations')
+            self.sleep(min(1, max(0, self.deadline - self.now())))
+        raise AssertionError('Unreachable route loop exit')
+
     def check(self):
         if self.env.get('GITHUB_ACTIONS') != 'true' or self.env.get('RUNNER_ENVIRONMENT') != 'github-hosted':
             raise ValueError('Only disposable GitHub-hosted CI is authorized')
@@ -244,11 +419,12 @@ class Gate:
         sdk = self.shell(['getprop', 'ro.build.version.sdk'], 'sdk').strip()
         if sdk not in {'29', '35'}:
             raise ValueError('Unreviewed emulator API')
+        if self.fixture_network and sdk != '35':
+            raise ValueError('GNOME route preflight is reviewed only for API35')
         self.report['sdk'] = int(sdk)
         self.device_authorized = True
         self.evidence('initial')
-        if self.shell(['getprop', 'sys.boot_completed'], 'boot-completed').strip() != '1':
-            raise ValueError('Emulator action returned before boot completion')
+        self.await_boot_completed()
         home = self.await_home()
         package = home.split('/')[0]
         self.report['home_component'] = home
@@ -289,6 +465,11 @@ class Gate:
                         raise TimeoutError('Final health observation exceeded the startup deadline')
                     classification = ('recovered_boot' if original_pid else 'self_recovered_boot'
                                       if self.report.get('observed_active_launcher_error') else 'pristine_boot')
+                    self.prepare_logcat(home)
+                    if self.fixture_network:
+                        self.await_fixture_route(home)
+                    if self.now() > self.deadline:
+                        raise TimeoutError('Logcat preparation exceeded startup deadline')
                     self.report.update(success=True, classification=classification,
                                        healthy_observation_count=stable_count, stable_seconds=self.now() - stable_since)
                     # Startup readiness is the last health observation. Do not add
@@ -317,9 +498,10 @@ class Gate:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('out', type=Path, help='Fresh boot-health directory beneath this run evidence')
+    parser.add_argument('--fixture-network', choices=['gnome'], help='Read-only fixed guest route/address prerequisite, no connectivity claim')
     args = parser.parse_args()
     try:
-        Gate(args.out).execute()
+        Gate(args.out, fixture_network=args.fixture_network).execute()
     except Exception as error:
         print(f'BOOT_INFRASTRUCTURE_FAILURE: {error}', file=sys.stderr)
         sys.exit(4)

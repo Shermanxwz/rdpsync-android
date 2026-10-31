@@ -20,6 +20,28 @@ Only user-selected RDP connections and WebDAV operations send application data:
 
 Local render/network statistics support optional adaptive display quality; they are not uploaded to a project telemetry endpoint. Automated CI screenshots and logs use an isolated synthetic test desktop, not user servers.
 
+## Persistent Shared Space (Preview 3 development)
+
+Shared Space is a dedicated app-private, no-backup workspace. Its contents are
+**not** encrypted by the password-storage feature. The workspace is not purged after a normal
+session, revocation or app restart; clearing app data or uninstalling removes
+that app's copy. Export important work explicitly. There is no automatic cloud
+backup, original-folder synchronization or transfer from older preview packages.
+
+Remote drive sharing is off until an explicit connection-scoped grant. Read-only
+is the default. Read/write grants allow the selected remote computer to create,
+modify, rename and delete workspace files, including later imports. Nothing
+outside this workspace is redirected. The stock arbitrary-path drive plugin is
+not enabled. User-selected SAF imports/exports are copies; temporary permissions
+are not retained as a permanent phone-folder sharing grant.
+
+The app and remote server use the same confined broker and share handles. A
+selected object is pinned while a picker or mutation confirmation is open, so a
+remote replacement cannot silently change what the user selected. Stopping
+sharing withdraws future access without purging local work or undoing accepted
+writes/deletions. An accepted delete-on-close request can complete when handles
+close; already transmitted bytes cannot be recalled. The remote icon may remain listed but unavailable.
+
 ## Explicit File Transfer
 
 Preview 2 offers optional, session-scoped file clipboard transfer to the already selected RDP server. It does not watch Android's clipboard, synchronize text automatically, redirect a phone drive, or upload files to a project-operated service. Initial activation requires explicit reconnection; selecting files and publishing them are separate actions.

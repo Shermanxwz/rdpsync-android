@@ -25,12 +25,13 @@ printf '%s\n' "$SHA" >"$OUT/tested-sha.txt"
 printf '%s\n' "$TREE" >"$OUT/production-tree.txt"
 printf '%s\n' "$PACKAGE" >"$OUT/package.txt"
 sha256sum "$APP_APK" "$TEST_APK" app/src/main/jniLibs/x86_64/*.so \
-  app/src/androidTest/java/com/rdp/sync/ui/rdp/SessionFullscreenApi29ProbeTest.kt >"$OUT/input-sha256.txt"
+  app/src/androidTest/java/com/rdp/sync/ui/rdp/SessionFullscreenApi29ProbeTest.kt \
+  app/src/androidTest/java/com/rdp/sync/sharedspace/SharedSpaceStorageInstrumentedTest.kt \
+  app/src/androidTest/java/com/rdp/sync/sharedspace/SharedSpaceFixture*.java >"$OUT/input-sha256.txt"
 "${ADB[@]}" shell getprop ro.build.fingerprint >"$OUT/emulator-fingerprint.txt"
 "${ADB[@]}" shell wm size >"$OUT/wm-size.txt"
 "${ADB[@]}" shell wm density >"$OUT/wm-density.txt"
 python3 scripts/fixtures/emulator_boot_health.py "$OUT/boot-health"
-"${ADB[@]}" logcat -c
 STARTED=false
 COLLECTED=false
 REMOTE_PRIVATE="/sdcard/Android/data/$PACKAGE/files/api29-fullscreen-probe"
@@ -65,7 +66,7 @@ STARTED=true
   -Pandroid.testInstrumentationRunnerArguments.api29FullscreenProbe=true \
   -Pandroid.testInstrumentationRunnerArguments.productionCommit="$SHA" \
   -Pandroid.testInstrumentationRunnerArguments.productionTree="$TREE" \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.ui.rdp.SessionFullscreenApi29ProbeTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.ui.rdp.SessionFullscreenApi29ProbeTest,com.rdp.sync.sharedspace.SharedSpaceStorageInstrumentedTest \
   :app:connectedDebugAndroidTest
 collect
 python3 scripts/fixtures/verify_api29_layout_report.py "$OUT" app/build/outputs/androidTest-results/connected/debug

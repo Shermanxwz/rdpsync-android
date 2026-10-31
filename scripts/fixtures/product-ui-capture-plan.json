@@ -1,0 +1,132 @@
+{
+  "schema": 1,
+  "after_only": true,
+  "methods": {
+    "narrowLargeText": {
+      "locale": "en",
+      "dark": false,
+      "font_scale": 1.5,
+      "actual_width_dp": 320,
+      "suffixes": [
+        "drive-stop-confirmation",
+        "drive-write-consent",
+        "editor-validation",
+        "error",
+        "locked",
+        "plaintext-warning",
+        "previous-fingerprint",
+        "profiles",
+        "progress",
+        "save-busy-action",
+        "session-menu-open",
+        "session-menu-shortcuts",
+        "settings-options",
+        "space-busy-error",
+        "space-invalid-name",
+        "space_delete_dialog"
+      ]
+    },
+    "expandedWidth": {
+      "locale": "zh",
+      "dark": false,
+      "font_scale": 1.5,
+      "actual_width_dp": 600,
+      "suffixes": [
+        "changed",
+        "detail",
+        "drive_consent",
+        "editor",
+        "preconnect-drive-consent",
+        "profiles",
+        "session-menu-open",
+        "settings-options",
+        "space",
+        "space_name_rename",
+        "staged"
+      ]
+    },
+    "englishLight": {
+      "locale": "en",
+      "dark": false,
+      "font_scale": 1.0,
+      "actual_width_dp": 320,
+      "suffixes": [
+        "changed",
+        "delete-confirmation",
+        "detail",
+        "drive-write-consent",
+        "drive_accepted",
+        "drive_accepted_rw",
+        "drive_consent",
+        "drive_off",
+        "drive_requested",
+        "drive_revoked",
+        "drive_unsupported",
+        "editor",
+        "empty",
+        "plaintext-warning",
+        "profiles",
+        "receive",
+        "space",
+        "space_progress",
+        "staged",
+        "trust",
+        "webdav"
+      ]
+    },
+    "englishDark": {
+      "locale": "en",
+      "dark": true,
+      "font_scale": 1.0,
+      "actual_width_dp": 320,
+      "suffixes": [
+        "changed",
+        "detail",
+        "drive-write-consent",
+        "editor",
+        "profiles",
+        "session-menu-open",
+        "settings",
+        "space",
+        "staged",
+        "webdav"
+      ]
+    },
+    "chineseLight": {
+      "locale": "zh",
+      "dark": false,
+      "font_scale": 1.0,
+      "actual_width_dp": 320,
+      "suffixes": [
+        "detail",
+        "drive_accepted",
+        "drive_consent",
+        "editor",
+        "empty",
+        "profiles",
+        "receive",
+        "space",
+        "trust",
+        "webdav"
+      ]
+    },
+    "chineseDark": {
+      "locale": "zh",
+      "dark": true,
+      "font_scale": 1.0,
+      "actual_width_dp": 320,
+      "suffixes": [
+        "changed",
+        "drive-write-consent",
+        "editor",
+        "plaintext-warning",
+        "profiles",
+        "session-menu-open",
+        "settings",
+        "space",
+        "staged",
+        "webdav"
+      ]
+    }
+  }
+}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Own the two synthetic children in this disposable xrdp login session."""
+"""Own the finite synthetic children in this disposable xrdp login session."""
 import os
 from pathlib import Path
 import signal
@@ -25,7 +25,7 @@ def stop(*_):
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
 try:
-    for script, logpath in [(base / 'xrdp_transfer_peer.py', base / 'peer.log'), (home / 'rdp_desktop.py', home / 'fixture.log')]:
+    for script, logpath in [(base / 'xrdp_transfer_peer.py', base / 'peer.log'), (base / 'xrdp_drive_peer.py', base / 'drive-peer.log'), (home / 'rdp_desktop.py', home / 'fixture.log')]:
         log = logpath.open('wb'); logs.append(log)
         children.append(subprocess.Popen([sys.executable, str(script)], stdout=log, stderr=subprocess.STDOUT))
     while all(child.poll() is None for child in children): time.sleep(.25)

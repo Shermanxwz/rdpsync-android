@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 sudo cp /var/log/xrdp.log /var/log/xrdp-sesman.log "$OUT/" 2>/dev/null || true
 BASE=/home/rdpfixture/rdpsync-file-fixture
 if sudo test -d "$BASE/evidence"; then sudo cp -R "$BASE/evidence" "$OUT/peer-evidence"; fi
-sudo cp "$BASE/peer.log" /home/rdpfixture/fixture.log /home/rdpfixture/rdpsync-fixture-state.json "$OUT/" 2>/dev/null || true
+sudo cp "$BASE/peer.log" "$BASE/drive-peer.log" /home/rdpfixture/fixture.log /home/rdpfixture/rdpsync-fixture-state.json "$OUT/" 2>/dev/null || true
 while IFS= read -r logfile; do
   sudo cp "$logfile" "$OUT/xorg-${logfile##*/}"
 done < <(sudo find /home/rdpfixture -maxdepth 1 -type f -name '.xorgxrdp.*.log' 2>/dev/null)
@@ -34,5 +34,19 @@ if [[ -f build/emulator-evidence/control.pid ]]; then
   if [[ -r "/proc/$control_pid/cmdline" ]]; then
     tr '\0' ' ' <"/proc/$control_pid/cmdline" | grep -F "$ROOT/scripts/fixtures/rdp_fixture_control.py" >/dev/null
     sudo kill -TERM "$control_pid"
+  fi
+fi
+
+if [[ -f build/xrdp-file-private/drive-relay.pid ]]; then
+  relay_pid=$(cat build/xrdp-file-private/drive-relay.pid)
+  [[ "$relay_pid" =~ ^[0-9]+$ ]]
+  if [[ -r "/proc/$relay_pid/cmdline" ]]; then
+    tr '\0' ' ' <"/proc/$relay_pid/cmdline" | grep -F "$ROOT/scripts/fixtures/rdp_drive_relay.py" >/dev/null
+    kill -TERM "$relay_pid"
+    timeout 10 tail --pid="$relay_pid" -f /dev/null || true
+    if kill -0 "$relay_pid" 2>/dev/null; then
+      tr '\0' ' ' <"/proc/$relay_pid/cmdline" | grep -F "$ROOT/scripts/fixtures/rdp_drive_relay.py" >/dev/null
+      kill -KILL "$relay_pid"
+    fi
   fi
 fi

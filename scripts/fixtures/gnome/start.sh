@@ -31,7 +31,7 @@ fi
 grep -Eq 'GNOME Remote Desktop 46\.' "$OUT/gnome-version.txt"
 mutter --version >"$OUT/mutter-version.txt"
 dpkg-query -W -f='${Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
-  gnome-remote-desktop mutter pipewire wireplumber libfreerdp3-3 libwinpr3-3 libgl1-mesa-dri >"$OUT/packages.tsv"
+  gnome-remote-desktop mutter pipewire wireplumber libfreerdp3-3 libwinpr3-3 libgl1-mesa-dri libgtk-3-0t64 libwayland-client0 >"$OUT/packages.tsv"
 sha256sum /usr/libexec/gnome-remote-desktop-daemon /usr/bin/mutter >"$OUT/server-binary-sha256.txt"
 ldd /usr/libexec/gnome-remote-desktop-daemon >"$OUT/server-linked-libraries.txt"
 git rev-parse HEAD >"$OUT/tested-sha.txt"

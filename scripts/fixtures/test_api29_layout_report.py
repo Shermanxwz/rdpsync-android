@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from verify_api29_layout_report import CLASS, TEST, verify
+from verify_api29_layout_report import CLASS, TEST, STORAGE_CLASS, STORAGE_TESTS, EXPECTED_CASES, verify
 
 
 class Api29EvidenceGateTest(unittest.TestCase):
@@ -20,7 +20,9 @@ class Api29EvidenceGateTest(unittest.TestCase):
                             'tested-sha.txt': 'a' * 40, 'production-tree.txt': 'b' * 40}.items():
             (self.out / name).write_text(value)
         self.xml = self.reports / 'TEST-probe.xml'
-        self.xml.write_text(f'<testsuite tests="1" failures="0" errors="0" skipped="0"><testcase classname="{CLASS}" name="{TEST}"/></testsuite>')
+        self.complete_xml = '<testsuite tests="9" failures="0" errors="0" skipped="0">' + ''.join(
+            f'<testcase classname="{class_name}" name="{name}"/>' for class_name, name in EXPECTED_CASES) + '</testsuite>'
+        self.xml.write_text(self.complete_xml)
         self.folder = self.out / 'api29-fullscreen-probe'; self.folder.mkdir()
         self.report = dict(success=True, sdk=29, production_commit='a' * 40, production_tree='b' * 40,
                            samples=[dict(elapsed_ms=10001)], logical_callbacks=[dict(elapsed_ms=10002)],
@@ -39,7 +41,33 @@ class Api29EvidenceGateTest(unittest.TestCase):
         return verify(self.out, self.reports)
 
     def test_complete_synthetic_metadata_is_accepted(self):
-        self.assertEqual(1, self.validate()['tests'])
+        self.assertEqual(9, self.validate()['tests'])
+        self.assertEqual({CLASS: 1, STORAGE_CLASS: 8}, self.validate()['classes'])
+
+    def test_missing_storage_case_rejected(self):
+        self.xml.write_text(self.complete_xml.replace(f'<testcase classname="{STORAGE_CLASS}" name="{STORAGE_TESTS[0]}"/>', ''))
+        with self.assertRaises(AssertionError): self.validate()
+
+    def test_duplicate_storage_case_rejected(self):
+        case = f'<testcase classname="{STORAGE_CLASS}" name="{STORAGE_TESTS[0]}"/>'
+        self.xml.write_text(self.complete_xml.replace('</testsuite>', case + '</testsuite>'))
+        with self.assertRaises(AssertionError): self.validate()
+
+    def test_unknown_storage_name_rejected(self):
+        self.xml.write_text(self.complete_xml.replace(STORAGE_TESTS[0], 'unexecutedSubstitute'))
+        with self.assertRaises(AssertionError): self.validate()
+
+    def test_skipped_storage_case_rejected(self):
+        case = f'<testcase classname="{STORAGE_CLASS}" name="{STORAGE_TESTS[0]}"/>'
+        skipped = f'<testcase classname="{STORAGE_CLASS}" name="{STORAGE_TESTS[0]}"><skipped/></testcase>'
+        self.xml.write_text(self.complete_xml.replace(case, skipped))
+        with self.assertRaises(AssertionError): self.validate()
+
+    def test_storage_failure_rejected(self):
+        case = f'<testcase classname="{STORAGE_CLASS}" name="{STORAGE_TESTS[0]}"/>'
+        failed = f'<testcase classname="{STORAGE_CLASS}" name="{STORAGE_TESTS[0]}"><failure>synthetic</failure></testcase>'
+        self.xml.write_text(self.complete_xml.replace(case, failed))
+        with self.assertRaises(AssertionError): self.validate()
 
     def test_wrong_source_rejected(self):
         self.report['production_tree'] = 'c' * 40

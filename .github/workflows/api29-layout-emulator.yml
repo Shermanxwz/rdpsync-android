@@ -42,7 +42,7 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
           restore-keys: |
             rdp-native-x86_64-${{ runner.os }}-
       - name: Build genuine Android native runtime and instrumentation
@@ -59,13 +59,13 @@ jobs:
           path: |
             build/freerdp-android
             app/src/main/jniLibs/x86_64
-          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
+          key: rdp-native-x86_64-${{ runner.os }}-${{ hashFiles('scripts/build-native.sh', 'scripts/build-freerdp-android.sh', 'scripts/patch-freerdp-flow-control.py', 'scripts/build-openssl-android.sh', 'scripts/native-env.sh') }}
       - name: Enable KVM on disposable standard hosted runner
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Actual pre30 fullscreen geometry and real IME
+      - name: Actual pre30 fullscreen, real IME and eight Shared Space storage cases
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 29
@@ -87,3 +87,4 @@ jobs:
             app/build/reports/androidTests/
             app/build/outputs/androidTest-results/
             native-build.log
+            build/freerdp-android/rdpsync-native-provenance-x86_64.json
