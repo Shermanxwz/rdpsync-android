@@ -90,6 +90,32 @@ def validate_ledger(directory, value):
                 assert value.get(key) is True, f'Incomplete diagnostic: {key}'
 
 
+def validate_ime_setting(value):
+    assert value.get('verified_before_activity') is True and value.get('restored') is True
+    assert not any('failure' in key for key in value), 'IME prerequisite or restoration failure'
+    original = value.get('original')
+    assert original in ('null', '0') and value.get('requested') == '1'
+    assert value.get('wrote_setting') is True
+    initial = value['initial_service']
+    ime = 'com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME'
+    assert value.get('ime') == ime
+    assert initial['selected_ime'] == initial['bound_ime'] == [ime]
+    assert initial['observer_cache'] == ['1']
+    assert initial['dump_complete'] is True
+    for key in ('service_instance', 'method_identity'):
+        assert len(initial[key]) == 1 and re.fullmatch(r'[A-Za-z0-9_.$]+@[0-9a-fA-F]+', initial[key][0])
+    samples = value['consumption_samples']
+    assert 1 <= len(samples) <= 80 and samples[-1]['consumed'] is True
+    assert samples[-1]['observer_cache'] == ['2']
+    for sample in samples:
+        assert sample['dump_complete'] is True
+        for key in ('selected_ime', 'bound_ime', 'service_instance', 'method_identity'):
+            assert sample[key] == initial[key], 'IME identity changed during consumption proof'
+        assert sample['observer_cache'] in (['1'], ['2'])
+    assert value['setup_elapsed_ms'] <= value['ready_elapsed_ms'] <= value['consumption_deadline_elapsed_ms']
+    assert value['ready_elapsed_ms'] <= value['restore_elapsed_ms']
+
+
 class Collector:
     def __init__(self, out, started, best_effort=False, run=subprocess.run):
         self.out = Path(out)
@@ -140,7 +166,10 @@ class Collector:
             if filename.endswith('.json'):
                 value = json.loads(data)
                 if not self.best_effort:
-                    validate_ledger(directory, value)
+                    if filename == 'ime-setting-receipt.json':
+                        validate_ime_setting(value)
+                    else:
+                        validate_ledger(directory, value)
             elif filename.endswith('.png'):
                 assert data.startswith(b'\x89PNG\r\n\x1a\n'), f'Invalid screenshot: {remote}'
             temporary.replace(destination)
@@ -160,6 +189,17 @@ class Collector:
                     values[directory] = json.loads(self.pull(directory, 'measurements.json'))
                 except Exception as error:
                     errors.append(str(error))
+                    if not self.best_effort:
+                        raise
+            if kind == 'classic':
+                try:
+                    prerequisite = json.loads(self.pull('rdpsync-evidence', 'ime-setting-receipt.json'))
+                    for name in ('ime-setting-initial-dump.txt', 'ime-setting-latest-dump.txt'):
+                        data = self.pull('rdpsync-evidence', name)
+                        expected = prerequisite['dump_files'][name]
+                        assert len(data) == expected['bytes'] and hashlib.sha256(data).hexdigest() == expected['sha256']
+                except Exception as error:
+                    errors.append(f'IME prerequisite evidence: {error}')
                     if not self.best_effort:
                         raise
             for directory in directories(kind):

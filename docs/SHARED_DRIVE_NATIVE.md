@@ -221,3 +221,30 @@ Bounded numeric `nativeGetDiag` fields additionally report current/peak reserved
 response bytes, ready responses, remaining control ingress and error-output
 reserves. They contain no file names, paths or content. The 13-slot state schema
 is unchanged.
+
+### Disposable peer pressure configuration
+
+The real xrdp fixture's finite read batch uses 32 workers, each reading one
+256 KiB range at offsets 0 through 31 MiB. During each pre-pause descriptor preparation,
+the non-root fixture owner identifies its one actual xrdp FUSE connection from
+mountinfo and the mounted directory device. It opens the matching fusectl
+connection and only its `max_background` / `congestion_threshold` attributes
+with no-follow descriptors, validates ownership/device identity, snapshots both
+values, and binds them to the payload descriptor's device and fdinfo mount ID.
+The paused batch then checks only proc mountinfo and fusectl metadata (no FUSE
+getattr/stat), and sets both to 32 with readback. Each attribute I/O opens a new
+no-follow description at position zero and checks the pinned inode identity:
+fusectl attributes are nonseekable, so no seek/pread/pwrite is used.
+A partial failure rolls back; policy
+or permission refusal fails the fixture, never changes a global limit.
+
+Each batch's finally path restores the original values through held descriptors
+only after revalidating the same mount/connection identity. A destroyed or
+replaced connection is recorded without touching a new one; normal connected
+acceptance requires successful same-connection restoration. Receipts retain
+before/after/restored values and exact connection identity. No user kernel,
+application socket buffer, production native slot limit, 256 KiB watermark,
+7-second real-plateau deadline, 30-second resume deadline or 3-second revoke
+budget changes. More threads alone could not overcome the observed 12-request
+FUSE background window; a successful kernel write is not proof of a plateau.
+The unchanged real buffered-response assertions must still pass.

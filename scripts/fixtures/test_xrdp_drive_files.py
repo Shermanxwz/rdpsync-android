@@ -37,6 +37,13 @@ class DriveFilesTest(unittest.TestCase):
         value=read_stall_range(1,3,read=lambda fd,size,offset: BLOCK*4)
         self.assertEqual(value['offset'],3*1024*1024);self.assertEqual(value['size'],256*1024)
 
+    def test_stall_last_of_32_ranges_is_exact(self):
+        value=read_stall_range(1,31,read=lambda fd,size,offset: BLOCK*4)
+        self.assertEqual(value['offset'],31*1024*1024)
+        self.assertEqual(value['size'],256*1024)
+        for index in (-1,32):
+            with self.assertRaises(ValueError):read_stall_range(1,index)
+
     def test_stall_short_or_corrupt_never_counts_as_cancel(self):
         for data in (b'',BLOCK+b'x',BLOCK*4+b'x',b'x'*(256*1024)):
             with self.assertRaises(AssertionError):read_stall_range(1,0,True,lambda *args:data)
@@ -55,7 +62,7 @@ class DriveFilesTest(unittest.TestCase):
     def test_stall_invalid_descriptor_is_not_cancel_success(self):
         def bad(*args):raise OSError(errno.EBADF,'synthetic')
         with self.assertRaises(OSError):read_stall_range(1,0,True,bad)
-        with self.assertRaises(ValueError):read_stall_range(1,16,True,bad)
+        with self.assertRaises(ValueError):read_stall_range(1,32,True,bad)
 
     def test_synthetic_mount_is_never_reported_actual(self):
         path, evidence = owned_drive(self.home, test_mountinfo=self.info)

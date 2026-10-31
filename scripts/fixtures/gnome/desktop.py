@@ -11,13 +11,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gi
 gi.require_version('Gtk', '3.0')
+gi.require_version('Gdk', '3.0')
 gi.require_foreign('cairo')
 from gi.repository import Gdk, GLib, Gtk
+from presentation import Presentation
 
 OUT = Path(os.environ['GNOME_FIXTURE_EVIDENCE'])
 state = dict(session_id=str(uuid.uuid4()), desktop_pid=os.getpid(), ready=False,
              backend='GdkWaylandDisplay', width=0, height=0, monitor_width=0, monitor_height=0,
              mapped=False, visible=False, paint_count=0,
+             presentation_generation=0, painted_generation=0, after_paint_generation=0,
+             monitor_count=0, monitor_geometry=None, fullscreen=False, presentation_events=[],
              clicks=0, presses=0, releases=0, last_press=None, last_release=None, text='', keys=[],
              resizes=[], button_events=[], started_monotonic=time.monotonic())
 lock = threading.Lock()
@@ -75,9 +79,28 @@ area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_M
 window.add(area)
 
 
+def record_presentation(event, **details):
+    with lock:
+        state['presentation_events'] = (state['presentation_events'] + [dict(
+            event=event, observed_monotonic=time.monotonic(), **details)])[-128:]
+        if event == 'output-present':
+            state.update(presentation_generation=details['generation'], painted_generation=0,
+                         after_paint_generation=0, ready=False)
+    save()
+
+
+presentation = Presentation(window, area, record_presentation)
+
+
 def paint(_, cr):
     with lock:
         state['paint_count'] += 1
+    allocation = area.get_allocation()
+    with lock:
+        expected = state['monitor_geometry']
+        if expected and (allocation.width, allocation.height) == tuple(expected[2:]):
+            state['painted_generation'] = presentation.generation
+    record_presentation('draw', generation=presentation.generation, width=allocation.width, height=allocation.height)
     cr.set_source_rgb(17 / 255, 34 / 255, 51 / 255)
     cr.paint()
     for x, rgb in [(16, (1, 0, 0)), (112, (0, 1, 0)), (208, (0, 0, 1))]:
@@ -104,7 +127,9 @@ def resized(_, allocation):
         state.update(width=allocation.width, height=allocation.height,
                      monitor_width=geo.width if geo else 0, monitor_height=geo.height if geo else 0,
                      mapped=window.get_mapped(), visible=window.get_visible(),
-                     ready=bool(geo and window.get_mapped() and allocation.width == geo.width and allocation.height == geo.height))
+                     ready=bool(geo and window.get_mapped() and allocation.width == geo.width and allocation.height == geo.height
+                                and presentation.monitor == monitor and presentation.generation > 0
+                                and state['after_paint_generation'] == presentation.generation))
     save()
 
 
@@ -144,6 +169,8 @@ def save():
 
 area.connect('draw', paint)
 area.connect('size-allocate', resized)
+area.connect('size-allocate', lambda _, a: record_presentation('size-allocate',
+    generation=presentation.generation, width=a.width, height=a.height))
 area.connect('button-press-event', event)
 area.connect('button-release-event', event)
 window.connect('key-press-event', event)
@@ -151,28 +178,68 @@ window.connect('destroy', Gtk.main_quit)
 
 
 def reconcile_monitor(*_):
-    # Per-user headless GRD has NO monitor until a real client creates one.
-    # Mapping/fullscreen before that output exists can leave GTK allocated but
-    # absent from Mutter's captured desktop. Keep the same Window/process/state,
-    # and remap only on a real zero->nonzero monitor transition.
-    if Gdk.Display.get_default().get_n_monitors() == 0:
-        if window.get_visible():
-            window.hide()
+    # A reported monitor is not sufficient: defer the single initial map until
+    # that output has a real geometry. Never remap because oracle pixels fail.
+    display = Gdk.Display.get_default()
+    count = display.get_n_monitors()
+    monitor = display.get_monitor(0) if count else None
+    geo = monitor.get_geometry() if monitor else None
+    geometry = (geo.x, geo.y, geo.width, geo.height) if geo else None
+    with lock:
+        state.update(monitor_count=count, monitor_geometry=geometry)
+    usable = presentation.observe(monitor, geometry)
+    if not usable:
         with lock:
-            state.update(ready=False, mapped=False, visible=False, monitor_width=0, monitor_height=0)
+            state.update(ready=False, monitor_width=0, monitor_height=0,
+                         mapped=window.get_mapped(), visible=window.get_visible())
         save()
-    elif not window.get_visible():
-        window.show_all()
-        window.fullscreen()
-        window.present()
-        area.grab_focus()
-        area.queue_draw()
     return False
 
 
+def after_paint(clock):
+    with lock:
+        if state['painted_generation'] == presentation.generation and presentation.monitor is not None:
+            state['after_paint_generation'] = presentation.generation
+    record_presentation('after-paint', generation=presentation.generation,
+                        frame_counter=clock.get_frame_counter())
+
+
+def realized(*_):
+    clock = window.get_frame_clock()
+    record_presentation('realize', generation=presentation.generation, frame_clock_present=clock is not None)
+    if clock is not None:
+        clock.connect('after-paint', after_paint)
+
+
+def window_state(_, event):
+    with lock:
+        state['fullscreen'] = bool(event.new_window_state & Gdk.WindowState.FULLSCREEN)
+    record_presentation('window-state', generation=presentation.generation,
+                        new_window_state=int(event.new_window_state))
+    return False
+
+
+def configure(_, event):
+    record_presentation('configure', generation=presentation.generation,
+                        x=event.x, y=event.y, width=event.width, height=event.height)
+    return False
+
+
+window.connect('realize', realized)
+window.connect('map', lambda *_: record_presentation('map', generation=presentation.generation))
+window.connect('unmap', lambda *_: record_presentation('unmap', generation=presentation.generation))
+window.connect('configure-event', configure)
+window.connect('window-state-event', window_state)
 display = Gdk.Display.get_default()
-display.connect('monitor-added', lambda *_: GLib.idle_add(reconcile_monitor))
-display.connect('monitor-removed', lambda *_: GLib.idle_add(reconcile_monitor))
+
+def monitor_changed(_, monitor, event):
+    geo = monitor.get_geometry()
+    record_presentation(event, generation=presentation.generation,
+                        geometry=[geo.x, geo.y, geo.width, geo.height])
+    GLib.idle_add(reconcile_monitor)
+
+display.connect('monitor-added', lambda d,m: monitor_changed(d,m,'monitor-added'))
+display.connect('monitor-removed', lambda d,m: monitor_changed(d,m,'monitor-removed'))
 reconcile_monitor()
 GLib.timeout_add(250, lambda: (reconcile_monitor(), resized(area, area.get_allocation()), True)[2])
 Gtk.main()

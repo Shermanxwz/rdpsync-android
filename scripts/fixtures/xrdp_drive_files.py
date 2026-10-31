@@ -7,6 +7,7 @@ import re
 import stat
 
 DRIVE_NAME = 'RdpSync'
+STALL_READERS = 32
 LARGE_SIZE = 40 * 1024 * 1024 + 19
 BLOCK = bytes((i * 37 + 11) % 256 for i in range(65536))
 SMALL = {
@@ -114,7 +115,7 @@ def expect_denied(operation):
 
 
 def read_stall_range(descriptor, index, cancel_expected=False, read=os.pread):
-    if index not in range(16):
+    if index not in range(STALL_READERS):
         raise ValueError('Fixed finite read batch only')
     offset = index * 1024 * 1024
     try:

@@ -13,7 +13,7 @@ sha256sum "$PRIVATE/clipboard-provider.so" >"$OUT/clipboard-provider-sha256.txt"
 BASE=/home/rdpfixture/rdpsync-file-fixture
 sudo install -d -m 700 -o rdpfixture -g rdpfixture "$BASE" "$BASE/gnome" "$BASE/evidence"
 sudo install -m 600 -o rdpfixture -g rdpfixture "$PRIVATE/clipboard-provider.so" "$BASE/clipboard-provider.so"
-for source in xrdp_transfer_files.py xrdp_transfer_peer.py xrdp_file_session.py xrdp_drive_files.py xrdp_drive_peer.py; do
+for source in xrdp_transfer_files.py xrdp_transfer_peer.py xrdp_file_session.py xrdp_drive_files.py xrdp_drive_peer.py xrdp_drive_pressure.py; do
   sudo install -m 600 -o rdpfixture -g rdpfixture "scripts/fixtures/$source" "$BASE/$source"
 done
 sudo install -m 600 -o rdpfixture -g rdpfixture scripts/fixtures/gnome/transfer-fixture.py "$BASE/gnome/transfer-fixture.py"
@@ -30,7 +30,7 @@ sudo sha256sum /usr/sbin/xrdp-chansrv >"$OUT/chansrv-sha256.txt"
 git rev-parse HEAD >"$OUT/tested-sha.txt"
 printf '%s\n' 'Pinned xrdp native CLIPRDR/FUSE peer; classic graphics; separate actual RDPDR mapped-drive scenario; no Windows OS/NLA claim. Separate from the original fourteen-test scenario.' >"$OUT/scope.txt"
 
-sha256sum scripts/fixtures/xrdp_drive_files.py scripts/fixtures/xrdp_drive_peer.py scripts/fixtures/rdp_drive_relay.py >"$OUT/drive-fixture-source.sha256"
+sha256sum scripts/fixtures/xrdp_drive_files.py scripts/fixtures/xrdp_drive_peer.py scripts/fixtures/xrdp_drive_pressure.py scripts/fixtures/rdp_drive_relay.py >"$OUT/drive-fixture-source.sha256"
 nohup python3 -u "$ROOT/scripts/fixtures/rdp_drive_relay.py" >"$OUT/drive-relay.log" 2>&1 &
 printf '%s\n' "$!" >"$PRIVATE/drive-relay.pid"
 for unused in $(seq 1 50); do

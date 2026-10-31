@@ -647,21 +647,44 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         tapDocumentLabel(child)
     }
     private fun documentBreadcrumbs(): List<String> {
-        // AOSP15 HorizontalBreadcrumb enables only the last title for styling.
-        // Read visible disabled ancestors too; all gesture lookups still demand
-        // enabled targets. The exact owned parent+destination guard is unchanged.
-        val nodes = documentNodes(requireEnabled = false) { it.viewIdResourceName?.endsWith("/breadcrumb_text") == true }
+        // This API35 fixture must observe the current external picker, not a
+        // cached tree. Public API34+ clearCache changes observations only: no
+        // navigation, gesture, grant, or fallback to an earlier accepted path.
+        check(Build.VERSION.SDK_INT >= 34) { "Fresh breadcrumb observation requires public API34+ cache clearing" }
+        val observations = measurements.optJSONArray("tree_breadcrumb_observations") ?: JSONArray().also {
+            measurements.put("tree_breadcrumb_observations", it)
+        }
+        val observation = JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime())
+        // Keep the last64 observations, including the failing boundary, rather
+        // than silently stop recording after the first64 polling snapshots.
+        if (observations.length() == 64) observations.remove(0)
+        observations.put(observation)
+        fun candidates() = documentNodes(requireEnabled = false, requireVisible = false) {
+            it.viewIdResourceName?.endsWith("/breadcrumb_text") == true
+        }
+        fun describe(nodes: List<AccessibilityNodeInfo>) = JSONArray().also { values ->
+            nodes.forEach { node ->
+                values.put(JSONObject().put("text", node.text).put("enabled", node.isEnabled)
+                    .put("visible", node.isVisibleToUser).put("resource_id", node.viewIdResourceName)
+                    .put("window_id", node.windowId).put("node_identity_hash", node.hashCode())
+                    .put("bounds", Rect().also(node::getBoundsInScreen).toShortString()))
+            }
+        }
+        val cached = candidates()
+        try { observation.put("cached_candidates", describe(cached)) }
+        finally { cached.forEach { it.recycle() } }
+        val cleared = automation.clearCache()
+        observation.put("cache_clear_succeeded", cleared).put("cache_cleared_elapsed_ms", SystemClock.elapsedRealtime())
+        assertTrue("Fresh external picker observation requires successful accessibility cache clearing", cleared)
+        val fresh = candidates()
         return try {
-            val ordered = nodes.sortedBy { Rect().also(it::getBoundsInScreen).left }
-            val observations = measurements.optJSONArray("tree_breadcrumb_observations") ?: JSONArray().also { measurements.put("tree_breadcrumb_observations", it) }
-            if (observations.length() < 64) observations.put(JSONObject().put("elapsed_ms", SystemClock.elapsedRealtime())
-                .put("nodes", JSONArray().also { values -> ordered.forEach { node ->
-                    values.put(JSONObject().put("text", node.text).put("enabled", node.isEnabled)
-                        .put("window_id", node.windowId).put("node_identity_hash", node.hashCode())
-                        .put("bounds", Rect().also(node::getBoundsInScreen).toShortString()))
-                } }))
+            observation.put("fresh_candidates", describe(fresh))
+            // Disabled ancestors remain readable, but invisible nodes NEVER
+            // establish path readiness. Gesture helpers remain enabled+visible.
+            val ordered = fresh.filter { it.isVisibleToUser }.sortedBy { Rect().also(it::getBoundsInScreen).left }
+            observation.put("nodes", describe(ordered)).put("completed_elapsed_ms", SystemClock.elapsedRealtime())
             ordered.map { requireNotNull(it.text).toString() }
-        } finally { nodes.forEach { it.recycle() } }
+        } finally { fresh.forEach { it.recycle() } }
     }
 
     private fun navigateObservedTreeDestination() {
@@ -779,10 +802,10 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             screenshot("picker-${pickerEvents.length()}-after-single-gesture")
         } finally { node.recycle() }
     }
-    private fun documentNodes(requireEnabled: Boolean = true, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
+    private fun documentNodes(requireEnabled: Boolean = true, requireVisible: Boolean = true, predicate: (AccessibilityNodeInfo) -> Boolean): List<AccessibilityNodeInfo> {
         val found = mutableListOf<AccessibilityNodeInfo>()
         fun visit(node: AccessibilityNodeInfo) {
-            if (node.isVisibleToUser && (!requireEnabled || node.isEnabled) && predicate(node) && found.none { it == node }) found += AccessibilityNodeInfo.obtain(node)
+            if ((!requireVisible || node.isVisibleToUser) && (!requireEnabled || node.isEnabled) && predicate(node) && found.none { it == node }) found += AccessibilityNodeInfo.obtain(node)
             for (i in 0 until node.childCount) node.getChild(i)?.let { child -> try { visit(child) } finally { child.recycle() } }
         }
         automation.windows.forEach { window ->

@@ -358,7 +358,21 @@ class XrdpSharedDriveInstrumentedTest {
         val s=requireNotNull(completed); val mount=s.getJSONObject("mount")
         assertTrue(mount.getBoolean("via_actual_rdpdr_fuse")); assertFalse(mount.getBoolean("clipboard_path_used")); assertEquals("RdpSync",mount.getString("drive_name")); assertEquals("actual /proc/self/mountinfo",mount.getString("mount_metadata_origin"))
         record.put("completed_elapsed_ms",SystemClock.elapsedRealtime()).put("completed",s)
-        return s.getJSONObject("result")
+        val result = s.getJSONObject("result")
+        if (record.getString("action") in setOf("read-stall-batch", "read-cancel-batch")) {
+            assertEquals(32, result.getInt("concurrent_readers"))
+            assertEquals(32, result.getJSONArray("resumed_ranges").length())
+            val pressure = result.getJSONObject("pressure")
+            assertTrue(pressure.getBoolean("configured"))
+            assertFalse(pressure.getBoolean("global_settings_changed"))
+            assertEquals(32, pressure.getInt("readers"))
+            assertEquals("restored_same_connection", pressure.getString("restoration"))
+            for (name in listOf("max_background", "congestion_threshold")) {
+                assertEquals(32, pressure.getJSONObject("after").getInt(name))
+                assertEquals(pressure.getJSONObject("before").getInt(name), pressure.getJSONObject("restored").getInt(name))
+            }
+        }
+        return result
     }
     private fun perform(action: String, timeout: Long=30_000)=finish(begin(action),timeout)
     private fun pauseRelay(ordinal: Int) {
@@ -402,7 +416,7 @@ class XrdpSharedDriveInstrumentedTest {
         observePlateau("resume",generation)
         resumeRelay(1)
         val result=finish(action,30_000)
-        assertEquals(16,result.getJSONArray("resumed_ranges").length()); assertEquals(0,result.getInt("denied_readers")); assertEquals(0,result.getInt("incomplete_readers"))
+        assertEquals(32,result.getJSONArray("resumed_ranges").length()); assertEquals(0,result.getInt("denied_readers")); assertEquals(0,result.getInt("incomplete_readers"))
         measurements.put("stalled_read_resumed_hashes",result)
     }
     private fun assertResumedInput(generation: Long) {

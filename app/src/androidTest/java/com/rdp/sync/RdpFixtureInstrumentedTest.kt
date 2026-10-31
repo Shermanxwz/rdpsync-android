@@ -48,7 +48,8 @@ import kotlin.math.max
 @RunWith(AndroidJUnit4::class)
 class RdpFixtureInstrumentedTest {
     @get:Rule(order = 0) val appLocale = FixtureAppLocaleRule("rdpFixture")
-    @get:Rule(order = 1) val compose = createAndroidComposeRule<MainActivity>()
+    @get:Rule(order = 1) val imeSetting = FixtureImeSettingRule()
+    @get:Rule(order = 2) val compose = createAndroidComposeRule<MainActivity>()
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val evidence by lazy { File(instrumentation.targetContext.getExternalFilesDir(null), "rdp-evidence").apply { mkdirs() } }
     private val measurements = JSONObject()
@@ -57,6 +58,7 @@ class RdpFixtureInstrumentedTest {
 
     @Test fun realDesktopDisplayInputResizeAndWeakLink() {
         measurements.put("fixture_app_locale", appLocale.receipt)
+        measurements.put("fixture_ime_setting", imeSetting.receipt)
         assertEquals("Explicit legacy fixture app language", "zh", compose.activity.resources.configuration.locales[0].language)
         measurements.put("fixture_activity_locales", compose.activity.resources.configuration.locales.toLanguageTags())
         val enabled = InstrumentationRegistry.getArguments().getString("rdpFixture")
@@ -784,15 +786,12 @@ class RdpFixtureInstrumentedTest {
                                                    sessionId: String, desktopPid: Int, fullViewHeight: Int) {
         // This class runs only with the explicit disposable-fixture argument.
         // Emulators report a hardware keyboard; still exercise a real software IME.
-        val previousImeSetting = shellOutput("settings get secure show_ime_with_hard_keyboard").trim()
-        require(previousImeSetting in setOf("0", "1", "null"))
         try {
             // Establish a real recent input target near the probes before local IME cropping.
             tapAndObserve(remoteX = 400f, remoteY = 40f)
             val beforeViewport = viewportSnapshot()
             val beforePatchSpan = observedPatchSpan(40, 40, Color.RED)
             measurements.put("ime_pre_scale", beforeViewport.scale).put("ime_pre_red_patch_span_px", beforePatchSpan)
-            shellOutput("settings put secure show_ime_with_hard_keyboard 1")
             tapSessionKeyboard()
             waitFor("software IME visible and local desktop viewport reduced") {
                 imeVisible() && desktopBounds().getInt("height") < fullViewHeight
@@ -921,8 +920,6 @@ class RdpFixtureInstrumentedTest {
             screenshot("04e-landscape-ime-restored")
         } finally {
             runCatching { compose.runOnUiThread { desktop().hideKeyboard() } }
-            shellOutput(if (previousImeSetting == "null") "settings delete secure show_ime_with_hard_keyboard"
-                else "settings put secure show_ime_with_hard_keyboard $previousImeSetting")
         }
     }
 

@@ -5,13 +5,16 @@ import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+import re
+import stat
 from pathlib import Path
 import threading
 import time
 import uuid
 import traceback
 
-from xrdp_drive_files import (BLOCK, LARGE_SIZE, original_manifest, owned_drive,
+from xrdp_drive_pressure import FusePressure
+from xrdp_drive_files import (STALL_READERS, BLOCK, LARGE_SIZE, original_manifest, owned_drive,
                              inspect_imports, readonly_check, exercise_rw, expect_denied, read_stall_range)
 
 HOME = Path.home().resolve()
@@ -28,6 +31,7 @@ state = {'peer': 'xrdp-rdpdr', 'pid': os.getpid(), 'uuid': PEER_UUID, 'operation
 lock = threading.Lock()
 held_fd = None
 stall_fd = None
+stall_pressure = None
 
 
 def snapshot():
@@ -51,7 +55,7 @@ def unchanged_sentinel():
 
 
 def perform(action, operation):
-    global held_fd, stall_fd
+    global held_fd, stall_fd, stall_pressure
     started = time.monotonic()
     try:
         if action in ('read-revoked-handle', 'read-stall-batch', 'read-cancel-batch'):
@@ -87,7 +91,20 @@ def perform(action, operation):
                 raise ValueError('One prepared stall descriptor only')
             stall_fd = os.open(drive / 'android-large.bin', os.O_RDONLY | os.O_CLOEXEC)
             os.posix_fadvise(stall_fd, 0, 0, os.POSIX_FADV_DONTNEED)
-            result = {'prepared_before_pause': True, 'fadvise_dontneed_completed': True}
+            try:
+                payload = os.fstat(stall_fd)  # prepare only: transport is unpaused
+                if not stat.S_ISREG(payload.st_mode) or payload.st_size != LARGE_SIZE:
+                    raise ValueError('Prepared payload identity/size mismatch')
+                info = Path(f'/proc/self/fdinfo/{stall_fd}').read_text()
+                match = re.search(r'^mnt_id:\s*([0-9]+)$', info, re.MULTILINE)
+                if not match:
+                    raise ValueError('Prepared payload mount ID unavailable')
+                stall_pressure = FusePressure(HOME, payload.st_dev, match.group(1))
+            except BaseException:
+                os.close(stall_fd); stall_fd = None
+                raise
+            result = {'prepared_before_pause': True, 'fadvise_dontneed_completed': True,
+                      'pressure_preparation': stall_pressure.receipt}
         elif action in ('read-stall-batch', 'read-cancel-batch'):
             # Independent uncached ranges. The transport relay is paused by the Android
             # test BEFORE this action; no native or server protocol calls are faked.
@@ -95,21 +112,37 @@ def perform(action, operation):
                 raise ValueError('Payload read descriptor must be prepared before the relay pause')
             descriptor = stall_fd
             stall_fd = None
+            pressure = stall_pressure
+            stall_pressure = None
             try:
-                gate = threading.Barrier(16)
+                if pressure is None:
+                    raise ValueError('No pre-pause FUSE identity')
+                # Only proc mountinfo and fusectl are touched while paused;
+                # the payload/root filesystem stats happened during prepare.
+                pressure.configure()
+                update(pressure=pressure.receipt)
+                gate = threading.Barrier(STALL_READERS)
                 def read_one(index):
                     gate.wait(timeout=5)
                     return read_stall_range(descriptor, index, action == 'read-cancel-batch')
-                with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-                    results = list(pool.map(read_one, range(16)))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=STALL_READERS) as pool:
+                    results = list(pool.map(read_one, range(STALL_READERS)))
                 denied = sum('denied' in item for item in results)
                 incomplete = sum(item.get('incomplete_prefix') is True for item in results)
                 if action == 'read-cancel-batch' and denied + incomplete == 0:
                     raise AssertionError('Revoke did not deny any actually pending mounted read')
-                result = {'concurrent_readers': 16, 'denied_readers': denied, 'incomplete_readers': incomplete, 'range_size': 256 * 1024,
-                          'fadvise_dontneed_completed': True, 'resumed_ranges': results}
+                result = {'concurrent_readers': STALL_READERS, 'denied_readers': denied, 'incomplete_readers': incomplete, 'range_size': 256 * 1024,
+                          'fadvise_dontneed_completed': True, 'resumed_ranges': results,
+                          'pressure': pressure.receipt}
             finally:
-                os.close(descriptor)
+                try:
+                    os.close(descriptor)
+                finally:
+                    if pressure is not None:
+                        try:
+                            pressure.restore()
+                        finally:
+                            update(pressure=pressure.receipt)
         elif action == 'verify-persistence':
             result = inspect_imports(drive)
             from xrdp_drive_files import REMOTE, hash_file
@@ -125,6 +158,8 @@ def perform(action, operation):
                duration_seconds=time.monotonic() - started)
         (OUT / f'operation-{operation}.json').write_text(json.dumps(snapshot(), indent=2))
     except Exception as error:
+        if hasattr(error, 'pressure_receipt'):
+            update(pressure=error.pressure_receipt)
         update(phase='failed', error=type(error).__name__ + ': ' + str(error),
                traceback=traceback.format_exc(),
                completed_monotonic=time.monotonic(), duration_seconds=time.monotonic() - started)
@@ -166,3 +201,5 @@ if __name__ == '__main__':
             os.close(held_fd)
         if stall_fd is not None:
             os.close(stall_fd)
+        if stall_pressure is not None:
+            stall_pressure.restore()

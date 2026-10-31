@@ -24,6 +24,7 @@ XPID=$!
 trap 'kill "$XPID" 2>/dev/null || true; wait "$XPID" 2>/dev/null || true' EXIT
 for i in $(seq 1 50); do xdpyinfo >/dev/null 2>&1 && break; sleep .1; done
 xdpyinfo >/dev/null
+python3 scripts/fixtures/gnome/test_presentation.py
 python3 scripts/fixtures/gnome/test_calibrate_pixels.py
 python3 scripts/fixtures/gnome/gfx-oracle.py
 python3 scripts/fixtures/gnome/calibrate_pixels.py build/gnome-evidence/gfx-reference
