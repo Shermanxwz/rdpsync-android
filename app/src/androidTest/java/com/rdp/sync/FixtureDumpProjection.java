@@ -18,6 +18,10 @@ public final class FixtureDumpProjection {
     private final Map<String, Object> evidence = new LinkedHashMap<>();
     private long sourceBytes, lines;
     private boolean longLine, inService, inSecure, closed;
+    private int managerHeaders, clientHeaders, managerObservers, clientMethods;
+    private String imeScope = "none";
+    private int methodsInClient;
+    private final java.util.Set<String> clientIdentities = new java.util.HashSet<>();
     private int headers, caches, navigation, selectedIds, boundIds, methodIds, secureSections, systemSections, rows, trailers;
     private String failure = "", rolling = "", lastLine = "", sourceHash = "";
     private int exitStatus = -1;
@@ -86,19 +90,39 @@ public final class FixtureDumpProjection {
         }
         if (scope.equals("ime")) {
             boolean relevant = false;
-            if (text.startsWith("mCurMethodId=")) { selectedIds++; relevant = true; }
-            if (text.startsWith("mCurId=")) { boundIds++; relevant = true; }
-            if (text.startsWith("mCurMethod=")) { methodIds++; relevant = true; }
-            if (text.startsWith("Input method service state for ")) {
+            if (text.equals("Current Input Method Manager state:")) {
+                if (!imeScope.equals("none")) fail("late-or-duplicate-manager-header");
+                managerHeaders++; imeScope = "manager"; relevant = true;
+            } else if (text.startsWith("Input method client state for ")) {
+                if (managerHeaders != 1 || headers != 0 || inService) fail("client-header-out-of-order");
+                if (imeScope.equals("client") && methodsInClient != 1) fail("incomplete-client-block");
+                if (!clientIdentities.add(text)) fail("duplicate-client-header");
+                clientHeaders++; methodsInClient = 0; imeScope = "client"; relevant = true;
+            } else if (text.startsWith("Input method service state for ")) {
+                if (managerHeaders != 1) fail("service-before-manager");
+                if (imeScope.equals("client") && methodsInClient != 1) fail("incomplete-client-block");
                 if (inService) fail("nested-service");
-                headers++; inService = true; relevant = true;
-            }
-            if (text.startsWith("mSettingsObserver=SettingsObserver{")) {
-                if (!inService) fail("observer-outside-service");
-                caches++; relevant = true;
-            }
-            if (text.startsWith("mNavigationBarController=")) {
-                if (!inService) fail("completion-outside-service");
+                headers++; inService = true; imeScope = "service"; relevant = true;
+            } else if (text.startsWith("mCurMethodId=") || text.startsWith("mCurId=") || text.startsWith("mCurMethod=")) {
+                if (imeScope.equals("manager")) {
+                    if (text.startsWith("mCurMethodId=")) selectedIds++;
+                    if (text.startsWith("mCurId=")) boundIds++;
+                    if (text.startsWith("mCurMethod=")) methodIds++;
+                    relevant = true;
+                } else if (imeScope.equals("client") && text.startsWith("mCurMethod=")) {
+                    // InputMethodManager client session proxy is not IMMS's bound method invoker.
+                    clientMethods++; methodsInClient++;
+                    if (methodsInClient > 1) fail("duplicate-client-method");
+                } else fail("manager-identity-outside-manager");
+            } else if (text.startsWith("mSettingsObserver=SettingsObserver{")) {
+                if (imeScope.equals("manager") && text.startsWith("mSettingsObserver=SettingsObserver{mUserId=")) {
+                    // IMMS settings observer is not InputMethodService's hardware-keyboard cache.
+                    managerObservers++;
+                } else if (imeScope.equals("service") && inService && text.startsWith("mSettingsObserver=SettingsObserver{mShowImeWithHardKeyboard=")) {
+                    caches++; relevant = true;
+                } else fail("observer-outside-service");
+            } else if (text.startsWith("mNavigationBarController=")) {
+                if (!inService || !imeScope.equals("service")) fail("completion-outside-service");
                 navigation++; inService = false; relevant = true;
             }
             if (relevant) { if (longLine) fail("relevant-line-limit"); else keep(raw); }
@@ -123,7 +147,7 @@ public final class FixtureDumpProjection {
             sourceHash = hex.toString();
             if (!eof) fail("incomplete-producer");
             if (trailers != 1 || !lastLine.equals("RDP_FIXTURE_DUMP_EXIT=0") || exitStatus != 0) fail("missing-or-failed-exit-trailer");
-            if (scope.equals("ime") && (headers != 1 || caches != 1 || navigation != 1 || selectedIds != 1 || boundIds != 1 || methodIds != 1 || inService)) fail("nonunique-or-incomplete-ime");
+            if (scope.equals("ime") && (managerHeaders != 1 || clientHeaders > 2 || managerObservers > 1 || clientMethods != clientHeaders || headers != 1 || caches != 1 || navigation != 1 || selectedIds != 1 || boundIds != 1 || methodIds != 1 || inService)) fail("nonunique-or-incomplete-ime");
             if (scope.equals("settings") && (secureSections != 1 || systemSections != 1 || rows != 1)) fail("nonunique-or-incomplete-settings");
             evidence.put("producer_eof", eof);
         }
@@ -138,6 +162,8 @@ public final class FixtureDumpProjection {
         result.put("selected_bytes", selected.size()); result.put("lines", lines); result.put("exit_status", exitStatus);
         result.put("exit_trailers", trailers); result.put("source_limit", MAX_SOURCE_BYTES); result.put("line_prefix_limit", MAX_LINE_PREFIX);
         result.put("selected_limit", MAX_SELECTED_BYTES); result.put("service_headers", headers); result.put("observer_rows", caches);
+        result.put("manager_headers", managerHeaders); result.put("client_headers", clientHeaders);
+        result.put("manager_observer_rows", managerObservers); result.put("client_method_rows", clientMethods);
         result.put("service_completions", navigation); result.put("selected_ids", selectedIds); result.put("bound_ids", boundIds); result.put("method_ids", methodIds);
         result.put("secure_sections", secureSections); result.put("system_sections", systemSections); result.put("setting_rows", rows);
         result.put("complete", closed && failure.isEmpty()); result.put("failure", failure);

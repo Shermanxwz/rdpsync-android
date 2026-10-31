@@ -34,6 +34,7 @@ def stream_receipt(scope='ime', size=100):
                   command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
     for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
         result[key]=1
+    result.update(manager_headers=1, client_headers=0, client_method_rows=0, manager_observer_rows=0)
     return result
 
 class ReadinessContract(unittest.TestCase):
@@ -137,7 +138,7 @@ class ReadinessContract(unittest.TestCase):
                 latest=stream_receipt(size=len(dumps[collector.IME_DUMPS[1]].encode())),
                 provider=stream_receipt('settings',len(dumps[collector.IME_DUMPS[2]].encode())))
             collector.validate_ime_setting(good);collector.validate_ime_raw(good,dumps,out)
-            for field, badvalue in [('producer_eof',False),('complete',False),('exit_trailers',2),('exit_status',1),('source_bytes',17*1024*1024),('service_headers',2),('source_sha256',''),('failure','late error')]:
+            for field, badvalue in [('producer_eof',False),('complete',False),('exit_trailers',2),('exit_status',1),('source_bytes',17*1024*1024),('service_headers',2),('source_sha256',''),('failure','late error'),('manager_headers',2),('client_headers',3),('client_method_rows',1),('manager_observer_rows',2)]:
                 bad=copy.deepcopy(good);bad['stream_projections']['initial'][field]=badvalue
                 with self.assertRaises(AssertionError,msg=field):collector.validate_ime_setting(bad)
             for key,badvalue in [('success',False),('fresh_avd_absence_verified',False),('no_snapshot',False),('enable_hw_keyboard',True),('device_sdk','34'),('avd_config_mtime',0),('action_sha','b'*40),('avd_metadata_mtime',0),('avd_metadata_path','/other/test.ini'),('avd_identity_proof','placeholder')]:

@@ -57,6 +57,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     private val automation get() = instrumentation.uiAutomation
     private val evidence by lazy { File(context.getExternalFilesDir(null), peer.evidenceName).apply { mkdirs() } }
     private val measurements = JSONObject()
+    private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
     private val seededMediaUris = linkedMapOf<String, Pair<String, String>>()
     private val pickerEvents = JSONArray()
     private val routeBackCallbacks = AtomicInteger()
@@ -88,6 +89,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768)
         compose.runOnUiThread { compose.activity.setContent {
             MaterialTheme {
+                boundedScroll.Bind()
                 BackHandler(enabled = showing.value) {
                     routeBackCallbacks.incrementAndGet()
                     routeBackCallbackElapsed.set(SystemClock.elapsedRealtime())
@@ -164,9 +166,9 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 }, allowAcknowledgement = !coachmarkAcknowledged)
             coachmarkAcknowledged = coachmarkAcknowledged || beforeTrust.getBoolean("acknowledged")
             assertEquals("No remote frame before explicit certificate trust", 0L, RdpConnector.nativeGetFrameId())
-            compose.onNodeWithText(fingerprint).performScrollTo().assertIsDisplayed()
+            boundedScroll.to(compose.onNodeWithText(fingerprint)).assertIsDisplayed()
             compose.onNodeWithText("保存指纹并重连").assertIsNotEnabled()
-            compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("我已通过独立渠道核对 SHA-256 指纹")).performClick()
             compose.onNodeWithText("保存指纹并重连").performClick()
             waitFor("actual ${peer.name} frame before transfer") { RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 }
             waitFor("actual expected peer graphics path before transfer") {
@@ -203,7 +205,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             measurements.put("opt_in_reconnected", true).put("streaming_generation", RdpConnector.sessionGeneration())
             waitFor("file dialog after confirmed reconnect") { compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().isNotEmpty() }
             seedOwnedDocuments()
-            compose.onNodeWithText("选择文件").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("选择文件")).performClick()
             navigateDocumentsFolder("source")
             val originals = samples("android")
             originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
@@ -213,8 +215,8 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                     node.text?.toString() in setOf("Open", "OPEN", "Select", "SELECT") || node.contentDescription?.toString() in setOf("Open", "Select")
             }
             waitFor("selected files privately staged") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
-            originals.keys.forEach { name -> compose.onNodeWithText("$name · ${originals.getValue(name).size} 字节").performScrollTo().assertExists() }
-            compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+            originals.keys.forEach { name -> boundedScroll.to(compose.onNodeWithText("$name · ${originals.getValue(name).size} 字节")).assertExists() }
+            boundedScroll.to(compose.onNodeWithText("提供给远程剪贴板")).performClick()
             waitFor("explicit outbound offer retained") { RdpConnector.nativeFileTransferState()[2] > 0 }
             val offer = RdpConnector.nativeFileTransferState()[2]
             assertTrue(RdpConnector.nativeFileTransferOfferRetained(offer))
@@ -242,7 +244,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             assertTrue(RdpConnector.nativeFileTransferOfferRetained(offer))
             screenshot("02-remote-read-completed")
             openFiles("发送文件")
-            compose.onNodeWithText("停止共享").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("停止共享")).performClick()
             waitFor("explicit stop-sharing revokes offer") { !RdpConnector.nativeFileTransferOfferRetained(offer) }
             assertEquals("Cancel must not reset sending budget", budgetAfterRead, RdpConnector.nativeFileTransferState()[9])
             assertTrue("Cancel must preserve desktop session", RdpConnector.isConnected())
@@ -251,16 +253,16 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             action("offer-server-files")
             waitFor("GTK publishes synthetic server URI list") { transferState().optString("phase") == "offered" }
             openFiles("接收文件")
-            compose.onNodeWithText("读取远程文件列表").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("读取远程文件列表")).performClick()
             waitFor("metadata awaits explicit receive confirmation") { compose.onAllNodesWithText("等待你确认接收").fetchSemanticsNodes().isNotEmpty() }
             val remote = samples("server")
-            remote.keys.forEach { name -> compose.onNodeWithText("$name · ${remote.getValue(name).size} 字节").performScrollTo().assertExists() }
+            remote.keys.forEach { name -> boundedScroll.to(compose.onNodeWithText("$name · ${remote.getValue(name).size} 字节")).assertExists() }
             screenshot("03-remote-metadata-before-consent")
-            compose.onNodeWithText("确认接收这些文件").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("确认接收这些文件")).performClick()
             waitFor("real streamed files received", 45_000) { compose.onAllNodesWithText("文件已接收，请选择目录导出").fetchSemanticsNodes().isNotEmpty() }
             for (name in remote.keys) {
                 val beforeExportCount = directoryHashes("destination").size
-                compose.onNodeWithContentDescription("导出文件：$name").performScrollTo().performClick()
+                boundedScroll.to(compose.onNodeWithContentDescription("导出文件：$name")).performClick()
                 navigateDocumentsFolder("destination")
                 screenshot("04-destination-${remote.keys.indexOf(name)}")
                 tapDocumentAction("grant-owned-subfolder") { node -> node.text?.toString()?.uppercase() == "USE THIS FOLDER" }
@@ -285,7 +287,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             // ordinary remote files; this does not claim retroactive deletion.
             val sendChip = compose.onNode(hasText("发送文件") and hasClickAction())
             val sendStarted = SystemClock.elapsedRealtime()
-            sendChip.performScrollTo().assertIsDisplayed().assertIsEnabled()
+            boundedScroll.to(sendChip).assertIsDisplayed().assertIsEnabled()
             measurements.put("reoffer_send_chip", JSONObject().put("started_elapsed_ms", sendStarted)
                 .put("visible_bounds", sendChip.fetchSemanticsNode().boundsInRoot.toString()))
             sendChip.performClick()
@@ -295,13 +297,13 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                     compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().size == 1
             }
             measurements.getJSONObject("reoffer_send_chip").put("selected_elapsed_ms", SystemClock.elapsedRealtime())
-            compose.onNodeWithText("选择文件").performScrollTo().assertIsDisplayed().assertIsEnabled().performClick()
+            boundedScroll.to(compose.onNodeWithText("选择文件")).assertIsDisplayed().assertIsEnabled().performClick()
             navigateDocumentsFolder("source")
             originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
             tapDocumentAction("confirm-reoffer-selection") { node -> node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT") }
             waitFor("restaged explicit selection") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
             val beforeReofferGeneration = RdpConnector.sessionGeneration()
-            compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+            boundedScroll.to(compose.onNodeWithText("提供给远程剪贴板")).performClick()
             var expectedRouteOfferBudget = budgetAfterRead
             if (peer == ClipboardFixturePeer.XRDP) {
                 // This pinned peer does not negotiate snapshot locking. A second
@@ -310,7 +312,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 waitFor("actual no-lock peer reports explicit reconnect-required") {
                     compose.onAllNodesWithText(reason).fetchSemanticsNodes().size == 1
                 }
-                compose.onNodeWithText(reason).performScrollTo().assertIsDisplayed()
+                boundedScroll.to(compose.onNodeWithText(reason)).assertIsDisplayed()
                 val previousPoll = RdpConnector.pollDisplayStatus()
                 waitFor("live session remains stable after rejected reoffer") { RdpConnector.pollDisplayStatus() !== previousPoll }
                 assertTrue(RdpConnector.isConnected())
@@ -321,7 +323,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 assertEquals("Rejected replacement must preserve the destination sentinel", sha256(sentinel), directoryHashes("destination").getValue("server-binary.bin"))
                 measurements.put("no_lock_reoffer_rejected_without_reconnect_or_budget_reset", true)
                     .put("no_lock_reoffer_message", reason)
-                compose.onNodeWithText("重新连接以开始新的发送会话").performScrollTo().performTouchInput { click() }
+                boundedScroll.to(compose.onNodeWithText("重新连接以开始新的发送会话")).performTouchInput { click() }
                 compose.onNodeWithText("重新连接远程桌面？").assertIsDisplayed()
                 assertEquals("Confirmation must precede reconnect", beforeReofferGeneration, RdpConnector.sessionGeneration())
                 compose.onNodeWithText("重新连接").performTouchInput { click() }
@@ -338,14 +340,14 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
                 measurements.put("no_lock_manual_reconnect_generation", RdpConnector.sessionGeneration())
                 openFiles("发送文件")
                 waitFor("fresh file controller requires fresh explicit selection") { compose.onAllNodesWithText("选择文件").fetchSemanticsNodes().size == 1 }
-                compose.onNodeWithText("选择文件").performScrollTo().performClick()
+                boundedScroll.to(compose.onNodeWithText("选择文件")).performClick()
                 navigateDocumentsFolder("source")
                 originals.keys.forEachIndexed { index, name -> tapDocumentLabel(name, longPress = index == 0) }
                 tapDocumentAction("confirm-fresh-connection-selection") { node ->
                     node.viewIdResourceName?.endsWith("/action_menu_select") == true || node.text?.toString()?.uppercase() in setOf("OPEN", "SELECT")
                 }
                 waitFor("new connection stages only the new SAF selection") { compose.onAllNodesWithText("已暂存，尚未提供给远程").fetchSemanticsNodes().isNotEmpty() }
-                compose.onNodeWithText("提供给远程剪贴板").performScrollTo().performClick()
+                boundedScroll.to(compose.onNodeWithText("提供给远程剪贴板")).performClick()
             }
             waitFor("fresh offer") { RdpConnector.nativeFileTransferState()[2] > 0 }
             val routeOffer = RdpConnector.nativeFileTransferState()[2]
@@ -612,7 +614,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             observation.put("node_count", nodes.size).put("enabled", enabled)
             nodes.size == 1 && enabled
         }
-        compose.onNodeWithText(label).performScrollTo()
+        boundedScroll.to(compose.onNodeWithText(label), deadline)
         waitFor("visible enabled file menu target", (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
             val nodes = compose.onAllNodesWithText(label).fetchSemanticsNodes()
             nodes.size == 1 && isEnabled().matches(nodes.single()) && compose.onNodeWithText(label).isDisplayed()

@@ -106,6 +106,9 @@ def validate_ime_setting(value):
         assert re.fullmatch(r'[0-9a-f]{64}', stream['source_sha256']) and stream['lines'] > 0
         required = ('secure_sections', 'system_sections', 'setting_rows') if scope == 'settings' else ('service_headers', 'observer_rows', 'service_completions', 'selected_ids', 'bound_ids', 'method_ids')
         assert all(stream[k] == 1 for k in required)
+        if scope == 'ime':
+            assert stream['manager_headers'] == 1 and 0 <= stream['client_headers'] <= 2
+            assert stream['client_method_rows'] == stream['client_headers'] and 0 <= stream['manager_observer_rows'] <= 1
     original = value.get('original')
     assert original in ('null', '0', '1') and value.get('requested') == '1'
     factory = original == '1'

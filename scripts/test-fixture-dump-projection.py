@@ -27,7 +27,7 @@ import java.util.Map;
 
 public class ProjectionHostTest {
   static int count;
-  static final String IME = "mCurMethodId=gboard/IME\nmCurId=gboard/IME mHaveConnection=true mBoundToMethod=true\nmCurMethod=Invoker@1\nInput method service state for Gboard@1:\n mSettingsObserver=SettingsObserver{mShowImeWithHardKeyboard=2}\n mNavigationBarController=ImeNavigationBarController\n";
+  static final String IME = "Current Input Method Manager state:\nmCurMethodId=gboard/IME\nmCurId=gboard/IME mHaveConnection=true mBoundToMethod=true\nmCurMethod=Invoker@1\nInput method service state for Gboard@1:\n mSettingsObserver=SettingsObserver{mShowImeWithHardKeyboard=2}\n mNavigationBarController=ImeNavigationBarController\n";
   static final String ROW = "_id:1 name:show_ime_with_hard_keyboard value:1 package:android default:1 defaultSystemSet:true\n";
   static final String SETTINGS = "SECURE SETTINGS (user 0)\n" + ROW + "SYSTEM SETTINGS (user 0)\n";
   static final String END = "RDP_FIXTURE_DUMP_EXIT=0\n";
@@ -134,8 +134,8 @@ public class ProjectionHostTest {
     }
     bad("hidden indented manager","ime",IME+" ".repeat(9000)+"mCurMethodId=other/IME\n"+END,17,true,"ambiguous-long-whitespace-line");
     bad("long target row","settings",SETTINGS.replace(ROW,"_id:1 "+"x".repeat(9000)+" name:show_ime_with_hard_keyboard value:1\n")+END,23,true,"relevant-line-limit");
-    bad("duplicate manager","ime",IME+"mCurMethodId=other/IME\n"+END,13,true,"nonunique");
-    bad("multiple service blocks","ime",IME+IME+END,31,true,"nonunique");
+    bad("duplicate manager","ime",IME.replace("mCurMethodId=gboard/IME", "mCurMethodId=gboard/IME\nmCurMethodId=other/IME")+END,13,true,"nonunique");
+    bad("multiple service blocks","ime",IME+IME+END,31,true,null);
     bad("nested service","ime",IME.replace(" mSettingsObserver=", "Input method service state for Other:\n mSettingsObserver=")+END,7,true,"nested-service");
     bad("duplicate observer","ime",IME+"mSettingsObserver=SettingsObserver{mShowImeWithHardKeyboard=2}\n"+END,19,true,null);
     bad("long relevant row","ime",IME.replace("mCurMethodId=gboard/IME","mCurMethodId="+"x".repeat(9000))+END,17,true,"relevant-line-limit");
@@ -151,9 +151,44 @@ public class ProjectionHostTest {
     bad("trailing output","ime",IME+END+"unexpected\n",11,true,"missing-or-failed-exit");
     bad("malformed exit","ime",IME+"RDP_FIXTURE_DUMP_EXIT=oops\n",10,true,"malformed-exit");
     bad("source bound","ime",IME+"x".repeat(FixtureDumpProjection.MAX_SOURCE_BYTES)+"\n"+END,4096,true,"total-source-limit");
-    bad("selected bound","ime",("mCurMethodId="+"x".repeat(8000)+"\n").repeat(10)+IME+END,2048,true,"selected-output-limit");
+    bad("selected bound","ime","Current Input Method Manager state:\n"+("mCurMethodId="+"x".repeat(8000)+"\n").repeat(10)+IME.substring(IME.indexOf("mCurMethodId="))+END,2048,true,"selected-output-limit");
     FixtureDumpProjection closed=feed("ime",IME+END,32);closed.finish(true);boolean denied=false;
     try {closed.accept(new byte[]{1},1);} catch(IllegalStateException expected){denied=true;}check(denied,"write after finish");count++;
+
+    String service="Input method service state for Gboard@1:\n";
+    String managerObserver="mSettingsObserver=SettingsObserver{mUserId=0 mRegistered=true mLastEnabled=com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME;1594443099:com.google.android.tts/com.google.android.apps.speech.tts.googletts.settings.asr.voiceime.VoiceInputMethodService}\n";
+    String clientHeader="Input method client state for Client@1:\n";
+    String clientMethod="mCurMethod=com.android.internal.inputmethod.IInputMethodSession$Stub$Proxy@aab2593\n";
+    // Source-shaped synthesis: 2d6eb safe projection omitted root/client headers; these headers come from the reviewed AOSP dump contract, not a claim of full-raw replay.
+    String observed=IME.replace(service,managerObserver+clientHeader+clientMethod+service);
+    String projected=IME.replace(service,clientHeader+service);
+    good("ime",observed+END,1,projected,1);
+    good("ime",observed.replace(clientMethod,"mCurMethod=null\n")+END,3,projected,1);
+    FixtureDumpProjection actual=feed("ime",observed+END,19);actual.finish(true);
+    check(actual.receipt().get("manager_headers").equals(1),"root manager count");
+    check(actual.receipt().get("manager_observer_rows").equals(1),"manager observer separate count");
+    check(actual.receipt().get("client_headers").equals(1),"client header count");
+    check(actual.receipt().get("client_method_rows").equals(1),"client method separate count");
+    check(!actual.projection().contains("mUserId="),"manager observer excluded");
+    check(!actual.projection().contains("IInputMethodSession$Stub$Proxy"),"client session excluded");count++;
+    String secondHeader="Input method client state for Client@2:\n";
+    good("ime",observed.replace(service,secondHeader+clientMethod+service)+END,7,projected.replace(service,secondHeader+service),1);
+    bad("client duplicate compensated by missing next","ime",observed.replace(clientMethod,clientMethod+clientMethod).replace(service,secondHeader+service)+END,17,true,null);
+    bad("missing root manager","ime",IME.replace("Current Input Method Manager state:\n","")+END,11,true,null);
+    bad("late root manager","ime",IME+"Current Input Method Manager state:\n"+END,13,true,null);
+    bad("service before root","ime",service+IME+END,31,true,null);
+    bad("client after service","ime",IME+clientHeader+clientMethod+END,7,true,null);
+    bad("duplicate manager observer","ime",observed.replace(managerObserver,managerObserver+managerObserver)+END,19,true,null);
+    bad("service cache in manager","ime",IME.replace("mCurMethodId=", "mSettingsObserver=SettingsObserver{mShowImeWithHardKeyboard=2}\nmCurMethodId=")+END,23,true,null);
+    bad("manager observer in service","ime",IME.replace(service,service+managerObserver)+END,17,true,null);
+    bad("manager id in client","ime",observed.replace(clientMethod,"mCurMethodId=gboard/IME\n"+clientMethod)+END,31,true,null);
+    bad("manager id in service","ime",IME.replace(service,service+"mCurId=gboard/IME\n")+END,29,true,null);
+    bad("missing client method","ime",observed.replace(clientMethod,"")+END,43,true,null);
+    bad("duplicate client method","ime",observed.replace(clientMethod,clientMethod+clientMethod)+END,29,true,null);
+    bad("duplicate client header identity","ime",observed.replace(service,clientHeader+clientMethod+service)+END,19,true,"duplicate-client-header");
+    bad("three client blocks","ime",observed.replace(service,secondHeader+clientMethod+"Input method client state for Client@3:\n"+clientMethod+service)+END,19,true,null);
+    bad("duplicate service cache","ime",IME.replace(" mNavigationBarController=", "mSettingsObserver=SettingsObserver{mShowImeWithHardKeyboard=2}\n mNavigationBarController=")+END,17,true,null);
+
     shellExecution("ime","",0);
     shellExecution("settings","",0);
     shellExecution("ime","DUMP TIMEOUT late stderr",0);

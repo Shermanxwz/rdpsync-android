@@ -38,3 +38,8 @@ else:
     raise SystemExit('Owned GNOME supervisor did not terminate')
 print('Owned per-user GNOME session and relays terminated; private keys were never artifact inputs.')
 PY
+# Validation runs after the supervisor has waited for the owned process/reader.
+# Preserve a missing/incomplete trace as an evidence failure, never an oracle pass.
+if [[ -f "$OUT/runtime.json" || -f "$OUT/desktop.log" ]]; then
+  python3 "$ROOT/scripts/fixtures/gnome/bounded_trace.py" --verify "$OUT/desktop.log"
+fi

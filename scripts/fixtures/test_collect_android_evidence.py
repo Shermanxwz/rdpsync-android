@@ -20,6 +20,7 @@ def stream_receipt(scope='ime', size=100):
                   command_source='dumpsys -t 2 settings' if scope=='settings' else 'dumpsys -t 2 input_method')
     for key in ('secure_sections','system_sections','setting_rows') if scope=='settings' else ('service_headers','observer_rows','service_completions','selected_ids','bound_ids','method_ids'):
         result[key]=1
+    result.update(manager_headers=1, client_headers=0, client_method_rows=0, manager_observer_rows=0)
     return result
 
 class CompositionPlanTests(unittest.TestCase):
