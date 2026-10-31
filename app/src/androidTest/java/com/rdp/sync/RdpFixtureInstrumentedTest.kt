@@ -855,44 +855,80 @@ class RdpFixtureInstrumentedTest {
         }
         val receipt = JSONObject().put("target_landscape", landscape).put("fullscreen", fullscreen)
             .put("ime_open", requireIme).put("before_frame", frame).put("native_generation", generation)
+            .put("before_viewport", rotationViewportEvidence()).put("before_desktop_bounds", desktopBounds())
+            .put("before_server_last_press", before.getJSONArray("last_press"))
         rotations.put(receipt)
-        tapAccessibleControl(if (fullscreen) "会话菜单" else "会话工具")
-        boundedScroll.to(compose.onNodeWithText("旋转屏幕")).assertIsDisplayed()
-        tapObservedAppPopupItem("旋转屏幕")
-        waitFor("menu rotates actual phone and live framebuffer", 25_000) {
-            val configuration = activity.resources.configuration
-            configuration.orientation == (if (landscape) Configuration.ORIENTATION_LANDSCAPE else Configuration.ORIENTATION_PORTRAIT) &&
-                RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > frame &&
-                (RdpConnector.getWidth() > RdpConnector.getHeight()) == landscape &&
-                fixtureSize(RdpConnector.getWidth(), RdpConnector.getHeight()) && desktopHasWindowFocus() &&
-                (!requireIme || imeVisible())
+        try {
+            tapAccessibleControl(if (fullscreen) "会话菜单" else "会话工具")
+            boundedScroll.to(compose.onNodeWithText("旋转屏幕")).assertIsDisplayed()
+            tapObservedAppPopupItem("旋转屏幕")
+            waitFor("menu rotates actual phone and live framebuffer", 25_000) {
+                val configuration = activity.resources.configuration
+                configuration.orientation == (if (landscape) Configuration.ORIENTATION_LANDSCAPE else Configuration.ORIENTATION_PORTRAIT) &&
+                    RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > frame &&
+                    (RdpConnector.getWidth() > RdpConnector.getHeight()) == landscape &&
+                    fixtureSize(RdpConnector.getWidth(), RdpConnector.getHeight()) && desktopHasWindowFocus() &&
+                    (!requireIme || imeVisible())
+            }
+            receipt.put("after_viewport", rotationViewportEvidence()).put("after_desktop_bounds", desktopBounds())
+            assertSame("Phone rotation retains MainActivity", activity, compose.activity)
+            compose.runOnUiThread { assertSame("Phone rotation retains desktop editor owner", originalView, desktop()) }
+            assertEquals("Phone rotation retains RDP generation", generation, RdpConnector.nativeGetTelemetry()[11])
+            val after = fixtureState()
+            assertEquals(before.getString("session_id"), after.getString("session_id"))
+            assertEquals(before.getInt("desktop_pid"), after.getInt("desktop_pid"))
+            assertEquals("Rotation menu must not leak remote clicks", before.getInt("clicks"), after.getInt("clicks"))
+            assertEquals(if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
+                activity.requestedOrientation)
+            if (fullscreen && !requireIme) assertFullscreenDefault("rotation_${rotations.length()}_fullscreen")
+            if (fullscreen && requireIme) {
+                compose.onNodeWithContentDescription("会话菜单").assertIsDisplayed()
+                compose.onNodeWithContentDescription("进入全屏").assertDoesNotExist()
+                val bounds = desktopBounds()
+                val unobscuredHeight = bounds.getInt("window_height") - bounds.getInt("safe_top") -
+                    max(bounds.getInt("safe_bottom"), bounds.getInt("ime_bottom"))
+                assertTrue("Rotated IME leaves usable desktop", unobscuredHeight > 0)
+                assertTrue("No bordered toolbar consumes rotated IME viewport", bounds.getInt("height").toDouble() / unobscuredHeight >= 0.90)
+            }
+            assertColor(40, 40, Color.RED)
+            tapAndObserve(remoteX = 400f, remoteY = 40f)
+            if (requireIme) assertTrue("Touch after phone rotation retains visible IME", imeVisible())
+            receipt.put("after_frame", RdpConnector.nativeGetFrameId()).put("width", RdpConnector.getWidth())
+                .put("height", RdpConnector.getHeight()).put("desktop_view_identity", System.identityHashCode(originalView))
+                .put("actual_pixels_and_touch_passed", true)
+                .put("verified_viewport", rotationViewportEvidence()).put("verified_desktop_bounds", desktopBounds())
+            screenshot("rotation-${rotations.length()}-${if (landscape) "landscape" else "portrait"}${if (requireIme) "-ime" else ""}")
+        } catch (failure: Throwable) {
+            receipt.put("failure", failure.stackTraceToString())
+            // Capture the still-open IME and actual crop before the caller hides
+            // it in finally. Diagnostic failures must not replace the assertion.
+            runCatching { receipt.put("failure_viewport", rotationViewportEvidence()) }
+            runCatching { receipt.put("failure_desktop_bounds", desktopBounds()) }
+            runCatching { receipt.put("failure_server_state", fixtureState()) }
+            runCatching {
+                val name = "rotation-${rotations.length()}-failure"
+                screenshot(name)
+                receipt.put("failure_screenshot", "$name.png")
+            }
+            throw failure
         }
-        assertSame("Phone rotation retains MainActivity", activity, compose.activity)
-        compose.runOnUiThread { assertSame("Phone rotation retains desktop editor owner", originalView, desktop()) }
-        assertEquals("Phone rotation retains RDP generation", generation, RdpConnector.nativeGetTelemetry()[11])
-        val after = fixtureState()
-        assertEquals(before.getString("session_id"), after.getString("session_id"))
-        assertEquals(before.getInt("desktop_pid"), after.getInt("desktop_pid"))
-        assertEquals("Rotation menu must not leak remote clicks", before.getInt("clicks"), after.getInt("clicks"))
-        assertEquals(if (landscape) ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE else ActivityInfo.SCREEN_ORIENTATION_PORTRAIT,
-            activity.requestedOrientation)
-        if (fullscreen && !requireIme) assertFullscreenDefault("rotation_${rotations.length()}_fullscreen")
-        if (fullscreen && requireIme) {
-            compose.onNodeWithContentDescription("会话菜单").assertIsDisplayed()
-            compose.onNodeWithContentDescription("进入全屏").assertDoesNotExist()
-            val bounds = desktopBounds()
-            val unobscuredHeight = bounds.getInt("window_height") - bounds.getInt("safe_top") -
-                max(bounds.getInt("safe_bottom"), bounds.getInt("ime_bottom"))
-            assertTrue("Rotated IME leaves usable desktop", unobscuredHeight > 0)
-            assertTrue("No bordered toolbar consumes rotated IME viewport", bounds.getInt("height").toDouble() / unobscuredHeight >= 0.90)
+    }
+
+    private fun rotationViewportEvidence(): JSONObject {
+        val snapshot = viewportSnapshot()
+        fun point(x: Float, y: Float): JSONObject {
+            val local = snapshot.toScreen(x, y)
+            return JSONObject().put("remote_x", x).put("remote_y", y)
+                .put("local_x", local.x).put("local_y", local.y)
+                .put("inside_actual_view", local.x >= 0 && local.x < snapshot.viewWidth &&
+                    local.y >= 0 && local.y < snapshot.viewHeight)
         }
-        assertColor(40, 40, Color.RED)
-        tapAndObserve(remoteX = 400f, remoteY = 40f)
-        if (requireIme) assertTrue("Touch after phone rotation retains visible IME", imeVisible())
-        receipt.put("after_frame", RdpConnector.nativeGetFrameId()).put("width", RdpConnector.getWidth())
-            .put("height", RdpConnector.getHeight()).put("desktop_view_identity", System.identityHashCode(originalView))
-            .put("actual_pixels_and_touch_passed", true)
-        screenshot("rotation-${rotations.length()}-${if (landscape) "landscape" else "portrait"}${if (requireIme) "-ime" else ""}")
+        return JSONObject().put("view_width", snapshot.viewWidth).put("view_height", snapshot.viewHeight)
+            .put("remote_width", snapshot.remoteWidth).put("remote_height", snapshot.remoteHeight)
+            .put("fit_width", snapshot.fitWidth).put("fit_height", snapshot.fitHeight)
+            .put("scale", snapshot.scale).put("left", snapshot.left).put("top", snapshot.top)
+            .put("zoom", snapshot.zoom).put("pan_x", snapshot.panX).put("pan_y", snapshot.panY)
+            .put("red_probe", point(40f, 40f)).put("touch_probe", point(400f, 40f))
     }
 
     private fun tapSessionKeyboard() {

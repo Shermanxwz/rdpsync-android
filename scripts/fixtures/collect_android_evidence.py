@@ -64,6 +64,11 @@ def rotation_frames(value):
         assert row['width'] > 0 and row['height'] > 0 and row['width'] != row['height']
         assert (row['width'] > row['height']) is target
         assert row['native_generation'] > 0 and row['desktop_view_identity'] != 0
+        view = row['verified_viewport']
+        assert (view['remote_width'], view['remote_height']) == (row['width'], row['height'])
+        assert view['view_width'] > 0 and view['view_height'] > 0
+        assert view['red_probe']['inside_actual_view'] is True
+        assert view['touch_probe']['inside_actual_view'] is True
         frames.append(f"rotation-{index}-{'landscape' if target else 'portrait'}{'-ime' if index >= 6 else ''}.png")
     assert len({row['native_generation'] for row in rotations}) == 1
     assert len({row['desktop_view_identity'] for row in rotations}) == 1
@@ -361,6 +366,11 @@ class Collector:
                     frames += ['diagnostics.txt', 'navigation-rotation-before-back.png', 'navigation-rotation-back-restored.png']
                     if navigation.get('system_immersive_coachmark', {}).get('acknowledged'):
                         frames.append('navigation-system-immersive-coachmark.png')
+                    if self.best_effort:
+                        for index, row in enumerate(values.get(directory, {}).get('phone_screen_rotations', []), 1):
+                            filename = f'rotation-{index}-failure.png'
+                            if row.get('failure') and row.get('failure_screenshot') == filename:
+                                frames.append(filename)
                     try:
                         frames += rotation_frames(values.get(directory, {}))
                     except (AssertionError, KeyError) as error:

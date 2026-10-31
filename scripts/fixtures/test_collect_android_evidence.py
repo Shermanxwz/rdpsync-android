@@ -64,8 +64,11 @@ def rotation_ledger():
     for index, landscape in enumerate([True, False, True, False, True, False, True], 1):
         rows.append(dict(target_landscape=landscape, fullscreen=True, ime_open=index >= 6,
                          actual_pixels_and_touch_passed=True, before_frame=index*10, after_frame=index*10+1,
-                         width=800 if landscape else 400, height=400 if landscape else 800,
-                         native_generation=5, desktop_view_identity=1234))
+                         width=1600 if landscape else 800, height=800 if landscape else 1600,
+                         native_generation=5, desktop_view_identity=1234,
+                         verified_viewport=dict(remote_width=1600 if landscape else 800,
+                            remote_height=800 if landscape else 1600, view_width=800, view_height=400,
+                            red_probe=dict(inside_actual_view=True), touch_probe=dict(inside_actual_view=True))))
     runs = []
     before = 'ab\n'
     for _ in range(2):
@@ -99,6 +102,13 @@ class PhoneRotationTests(unittest.TestCase):
     def test_recreated_view_or_session_fails(self):
         for key in ('native_generation', 'desktop_view_identity'):
             value = rotation_ledger(); value['phone_screen_rotations'][3][key] += 1
+            with self.assertRaises(AssertionError): m.rotation_frames(value)
+
+    def test_hidden_input_region_or_old_frame_geometry_fails(self):
+        for key in ('red_probe', 'touch_probe', 'remote_width'):
+            value = rotation_ledger(); view = value['phone_screen_rotations'][5]['verified_viewport']
+            if key == 'remote_width': view[key] += 1
+            else: view[key]['inside_actual_view'] = False
             with self.assertRaises(AssertionError): m.rotation_frames(value)
 
     def test_no_new_frame_fails(self):
