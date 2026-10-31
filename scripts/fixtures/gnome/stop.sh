@@ -10,9 +10,15 @@ import urllib.request
 print(urllib.request.urlopen('http://127.0.0.1:8768/state', timeout=2).read().decode())
 PY
 # Verify each stored PID still denotes this fixture before sending any signal.
-python3 - "$PRIVATE" <<'PY'
+python3 - "$PRIVATE" "$OUT" "$ROOT/scripts/fixtures/gnome" <<'PY'
 import os, pathlib, signal, sys, time
 private = pathlib.Path(sys.argv[1])
+out = pathlib.Path(sys.argv[2])
+sys.path.insert(0, sys.argv[3])
+from cleanup_receipt import wait_for_cleanup
+# Share the original 60 * .25s budget across signalling and both completion
+# conditions; the outer process disappearing is not inner cleanup completion.
+deadline = time.monotonic() + 15
 for name, required in [('supervisor.pid', str(private)), ('rdp-relay.pid', str(private / 'rdp.sock')), ('state-relay.pid', str(private / 'state.sock'))]:
     path = private / name
     if not path.exists():
@@ -29,16 +35,16 @@ for name, required in [('supervisor.pid', str(private)), ('rdp-relay.pid', str(p
             os.kill(pid, signal.SIGTERM)
     except FileNotFoundError:
         pass
-for _ in range(60):
-    p = private / 'supervisor.pid'
-    if not p.exists() or not pathlib.Path(f'/proc/{int(p.read_text())}').exists():
-        break
-    time.sleep(.25)
-else:
-    raise SystemExit('Owned GNOME supervisor did not terminate')
-print('Owned per-user GNOME session and relays terminated; private keys were never artifact inputs.')
+supervisor = private / 'supervisor.pid'
+def supervisor_running():
+    return supervisor.exists() and pathlib.Path(f'/proc/{int(supervisor.read_text())}').exists()
+if supervisor.exists() or (out / 'runtime.json').exists() or (out / 'desktop.log').exists():
+    wait_for_cleanup(supervisor_running, out / 'inner-cleanup.json',
+                     private / 'inner-supervisor.pid', deadline)
+print('Owned GNOME supervisor terminated and inner cleanup completed; private keys were never artifact inputs.')
 PY
-# Validation runs after the supervisor has waited for the owned process/reader.
+# Validation runs only after explicit inner cleanup/receipt publication, not
+# merely the outer dbus-run-session leader exiting.
 # Preserve a missing/incomplete trace as an evidence failure, never an oracle pass.
 if [[ -f "$OUT/runtime.json" || -f "$OUT/desktop.log" ]]; then
   python3 "$ROOT/scripts/fixtures/gnome/bounded_trace.py" --verify "$OUT/desktop.log"

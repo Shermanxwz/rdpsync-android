@@ -65,6 +65,16 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
     private val folder = "rdpsync-transfer-${SystemClock.uptimeMillis()}"
     private val downloads get() = "/sdcard/Download/$folder"
     private var coachmarkAcknowledged = false
+    private var peerBeforeConnection: JSONObject? = null
+
+    private fun capturePeerBeforeConnection() {
+        if (peer != ClipboardFixturePeer.GNOME) return
+        peerBeforeConnection = peerPresentation(request("GET", "/state"))
+        val connections = measurements.optJSONArray("peer_before_connections") ?: JSONArray().also {
+            measurements.put("peer_before_connections", it)
+        }
+        connections.put(peerBeforeConnection)
+    }
 
     @Test fun explicitSafAndNativeClipboardFileRoundTrip() {
         measurements.put("fixture_app_locale", appLocale.receipt)
@@ -87,6 +97,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         measurements.put("peer", peer.name).put("scope", peer.scope)
         val device = Device(id = peer.deviceId, name = "${peer.name} synthetic file transfer", host = "10.0.2.2", port = peer.rdpPort,
             username = "rdpfixture", password = "rdpsync-fixture-only", width = 1024, height = 768)
+        capturePeerBeforeConnection()
         compose.runOnUiThread { compose.activity.setContent {
             MaterialTheme {
                 boundedScroll.Bind()
@@ -195,6 +206,7 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
             assertEquals(firstGeneration, RdpConnector.sessionGeneration())
             assertEquals(-2L, RdpConnector.nativeFileTransferState()[1])
             openFiles("发送文件")
+            capturePeerBeforeConnection()
             compose.onNodeWithText("启用并重新连接").performClick()
             waitFor("confirmed reconnect negotiates actual file streaming", 45_000) {
                 val s = RdpConnector.nativeFileTransferState()
@@ -630,28 +642,157 @@ abstract class ClipboardTransferScenario(private val peer: ClipboardFixturePeer)
         if (view is ViewGroup) for (i in 0 until view.childCount) findDesktop(view.getChildAt(i))?.let { return it }
         return null
     }
+    private fun peerPresentation(state: JSONObject): JSONObject {
+        val result = JSONObject().put("observed_elapsed_ms", SystemClock.elapsedRealtime())
+        for (key in listOf("session_id", "desktop_pid", "ready", "width", "height", "clicks", "last_release",
+            "mapped", "visible", "fullscreen", "presentation_generation", "painted_generation",
+            "after_paint_generation", "monitor_width", "monitor_height")) {
+            if (state.has(key)) result.put(key, state.get(key))
+        }
+        val events = state.optJSONArray("presentation_events") ?: JSONArray()
+        val latest = JSONObject()
+        for (index in 0 until events.length()) {
+            val event = events.getJSONObject(index)
+            if (event.optLong("generation", -1) == state.optLong("presentation_generation", -2)) {
+                latest.put(event.getString("event"), event.optDouble("observed_monotonic"))
+            }
+        }
+        return result.put("current_presentation_event_monotonic", latest)
+    }
+
     private fun focusRealPeerSurface() {
-        var desktop: RdpDesktopView? = null
-        waitFor("attached focused desktop before real clipboard owner input") {
-            compose.runOnUiThread { desktop = findDesktop(compose.activity.window.decorView) }
+        // This is the original 30s PRE-input readiness budget, not an input retry.
+        // A shown Android View alone does not prove the current Wayland output
+        // has mapped/painted or that its decoded pixels reached this View.
+        val started = SystemClock.elapsedRealtime()
+        val deadline = started + 30_000
+        val generation = RdpConnector.sessionGeneration()
+        assertTrue("Current native session must exist", generation > 0)
+        val samples = JSONArray()
+        val injections = JSONArray()
+        val receipt = JSONObject().put("started_elapsed_ms", started).put("deadline_elapsed_ms", deadline)
+            .put("native_generation", generation).put("readiness_samples", samples).put("physical_tap", injections)
+        val attempts = measurements.optJSONArray("peer_focus_attempts") ?: JSONArray().also {
+            measurements.put("peer_focus_attempts", it)
+        }
+        attempts.put(receipt)
+        var beforeState: JSONObject? = null
+        var x = 0f; var y = 0f
+        var nextSample = started
+        val mode = if (peer == ClipboardFixturePeer.GNOME)
+            requireNotNull(InstrumentationRegistry.getArguments().getString("gnomeFixtureMode")) else "xrdp"
+        if (peer == ClipboardFixturePeer.GNOME) require(mode in setOf("headless-extend", "screen-share-mirror"))
+        receipt.put("peer_mode", mode)
+        val prior = peerBeforeConnection
+        fun peerReady(state: JSONObject, remoteWidth: Int, remoteHeight: Int): Boolean = FixturePeerSurfaceReadiness.ready(
+            state.keys().asSequence().associateWith { state.get(it) },
+            prior?.let { value -> value.keys().asSequence().associateWith { value.get(it) } },
+            peer == ClipboardFixturePeer.GNOME, RdpConnector.sessionGeneration(), generation,
+            SystemClock.elapsedRealtime(), deadline, remoteWidth, remoteHeight)
+        waitFor("current peer presentation and decoded local viewport before single clipboard-owner input",
+            (deadline - SystemClock.elapsedRealtime()).coerceAtLeast(0)) {
+            val peerState = request("GET", "/state")
+            val sample = JSONObject().put("peer", peerPresentation(peerState))
+                .put("native_frame_id", RdpConnector.nativeGetFrameId()).put("native_generation", RdpConnector.sessionGeneration())
             var ready = false
-            compose.runOnUiThread { ready = desktop?.let { it.isShown && it.hasWindowFocus() && it.width > 0 } == true }
+            var positions: List<Pair<Int, Int>> = emptyList()
+            compose.runOnUiThread {
+                val view = findDesktop(compose.activity.window.decorView)
+                if (view != null) {
+                    val viewport = view.viewportSnapshot()
+                    val origin = IntArray(2); view.getLocationOnScreen(origin)
+                    val point = viewport.toScreen(400f, 300f)
+                    sample.put("view_identity", System.identityHashCode(view)).put("view_width", view.width)
+                        .put("view_height", view.height).put("remote_width", viewport.remoteWidth)
+                        .put("remote_height", viewport.remoteHeight).put("scale", viewport.scale)
+                        .put("left", viewport.left).put("top", viewport.top).put("shown", view.isShown)
+                        .put("window_focus", view.hasWindowFocus()).put("screen_x", origin[0] + point.x)
+                        .put("screen_y", origin[1] + point.y)
+                    ready = view.isAttachedToWindow && view.isShown && view.hasWindowFocus() &&
+                        view.width > 0 && view.height > 0 && viewport.remoteWidth == peerState.optInt("width") &&
+                        viewport.remoteHeight == peerState.optInt("height") &&
+                        point.x >= 0 && point.y >= 0 && point.x < view.width && point.y < view.height
+                    x = origin[0] + point.x; y = origin[1] + point.y
+                    positions = listOf(40f, 136f, 232f).map { px ->
+                        val p = viewport.toScreen(px, 40f)
+                        ready = ready && p.x >= 0 && p.y >= 0 && p.x < view.width && p.y < view.height
+                        (origin[0] + p.x).toInt() to (origin[1] + p.y).toInt()
+                    }
+                }
+            }
+            ready = ready && peerReady(peerState, sample.optInt("remote_width"), sample.optInt("remote_height")) && RdpConnector.isConnected() &&
+                RdpConnector.sessionGeneration() == generation && RdpConnector.nativeGetFrameId() > 0
+            if (ready) {
+                val bitmap = automation.takeScreenshot()
+                val pixels = JSONArray()
+                val tolerance = if (peer == ClipboardFixturePeer.GNOME) 2 else 0
+                ready = bitmap != null && positions.size == 3
+                try {
+                    positions.forEachIndexed { index, (px, py) ->
+                        val expected = listOf(0xff0000, 0x00ff00, 0x0000ff)[index]
+                        val actual = if (bitmap != null && px in 0 until bitmap.width && py in 0 until bitmap.height)
+                            bitmap.getPixel(px, py) and 0xffffff else -1
+                        pixels.put(JSONObject().put("x", px).put("y", py).put("source_rgb", expected).put("actual_rgb", actual))
+                        ready = ready && actual >= 0 && listOf(0, 8, 16).all { shift ->
+                            kotlin.math.abs(((actual shr shift) and 255) - ((expected shr shift) and 255)) <= tolerance
+                        }
+                    }
+                } finally { bitmap?.recycle() }
+                sample.put("rendered_source_pixels", pixels).put("max_channel_error", tolerance)
+            }
+            if (ready) {
+                // Reobserve after the screenshot: no old-generation map/paint
+                // snapshot may authorize input to a replaced output.
+                val current = request("GET", "/state")
+                ready = peerReady(current, sample.optInt("remote_width"), sample.optInt("remote_height")) && current.optLong("presentation_generation", -1) ==
+                    peerState.optLong("presentation_generation", -1) &&
+                    current.getInt("clicks") == peerState.getInt("clicks") &&
+                    RdpConnector.sessionGeneration() == generation
+                sample.put("peer_after_pixels", peerPresentation(current))
+                compose.runOnUiThread {
+                    val view = findDesktop(compose.activity.window.decorView)
+                    val viewport = view?.viewportSnapshot()
+                    val origin = IntArray(2); view?.getLocationOnScreen(origin)
+                    val point = viewport?.toScreen(400f, 300f)
+                    ready = ready && view != null && view.isAttachedToWindow && view.isShown && view.hasWindowFocus() &&
+                        System.identityHashCode(view) == sample.getInt("view_identity") &&
+                        view.width == sample.getInt("view_width") && view.height == sample.getInt("view_height") &&
+                        viewport != null && viewport.remoteWidth == sample.getInt("remote_width") &&
+                        viewport.remoteHeight == sample.getInt("remote_height") &&
+                        viewport.scale.toDouble() == sample.getDouble("scale") &&
+                        viewport.left.toDouble() == sample.getDouble("left") && viewport.top.toDouble() == sample.getDouble("top") &&
+                        point != null && origin[0] + point.x == x && origin[1] + point.y == y
+                }
+                sample.put("local_geometry_rechecked", ready).put("native_frame_id_after_pixels", RdpConnector.nativeGetFrameId())
+                    .put("native_generation_after_pixels", RdpConnector.sessionGeneration())
+                if (ready) beforeState = current
+            }
+            val now = SystemClock.elapsedRealtime()
+            ready = ready && now < deadline
+            sample.put("completed_elapsed_ms", now).put("ready", ready)
+            if (ready || now >= nextSample) {
+                if (samples.length() < 61) samples.put(sample)
+                nextSample = now + 500
+            }
+            if (ready) receipt.put("ready", sample).put("ready_elapsed_ms", now)
             ready
         }
-        val before = request("GET", "/state").getInt("clicks")
-        var x = 0f; var y = 0f
-        compose.runOnUiThread {
-            val view = requireNotNull(desktop); val point = view.viewportSnapshot().toScreen(400f, 300f)
-            val origin = IntArray(2); view.getLocationOnScreen(origin)
-            assertTrue(point.x >= 0 && point.y >= 0 && point.x < view.width && point.y < view.height)
-            x = origin[0] + point.x; y = origin[1] + point.y
-        }
-        physicalTap(x, y, 40)
+        assertTrue("Peer prerequisite stays inside original 30s budget", SystemClock.elapsedRealtime() < deadline)
+        val before = requireNotNull(beforeState).getInt("clicks")
+        receipt.put("before_clicks", before).put("tap_started_elapsed_ms", SystemClock.elapsedRealtime())
+        physicalTap(x, y, 40, injections)
+        receipt.put("tap_completed_elapsed_ms", SystemClock.elapsedRealtime())
         waitFor("real ${peer.name} input establishes focused clipboard owner") {
             val s = request("GET", "/state"); val position = s.optJSONArray("last_release")
+            receipt.put("latest_after_peer", peerPresentation(s))
             s.getInt("clicks") == before + 1 && position != null &&
-                kotlin.math.abs(position.getDouble(0) - 400) <= 1 && kotlin.math.abs(position.getDouble(1) - 300) <= 1
+                kotlin.math.abs(position.getDouble(0) - 400) <= 1 && kotlin.math.abs(position.getDouble(1) - 300) <= 1 &&
+                s.getString("session_id") == requireNotNull(beforeState).getString("session_id") &&
+                s.getInt("desktop_pid") == requireNotNull(beforeState).getInt("desktop_pid") &&
+                s.optLong("presentation_generation", -1) == requireNotNull(beforeState).optLong("presentation_generation", -1) &&
+                RdpConnector.sessionGeneration() == generation
         }
+        receipt.put("passed", true).put("completed_elapsed_ms", SystemClock.elapsedRealtime())
     }
     private fun navigateDocumentsFolder(child: String) {
         waitFor("real system DocumentsUI") { documentNodes { true }.also { nodes -> nodes.forEach { it.recycle() } }.isNotEmpty() }
