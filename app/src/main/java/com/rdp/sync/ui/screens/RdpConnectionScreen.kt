@@ -61,6 +61,7 @@ import com.rdp.sync.display.DisplayQuality
 import com.rdp.sync.display.ResolutionMode
 import com.rdp.sync.display.SessionDisplaySettings
 import com.rdp.sync.network.CertificateChallenge
+import com.rdp.sync.network.LinuxTextInputMode
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.security.AndroidCertificatePinStorage
 import com.rdp.sync.security.CertificateAttemptGuard
@@ -74,7 +75,11 @@ import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.rdp.rememberSessionOrientation
 import com.rdp.sync.ui.rdp.SessionSystemBars
 import com.rdp.sync.ui.rdp.SessionUiDefaults
+import com.rdp.sync.ui.rdp.HudDockState
+import com.rdp.sync.ui.rdp.MagneticEdgeHud
+import com.rdp.sync.ui.rdp.SessionImeQuickBar
 import com.rdp.sync.ui.rdp.SessionViewportLayout
+import com.rdp.sync.ui.rdp.rememberHudDockState
 import com.rdp.sync.transfer.TransferController
 import com.rdp.sync.ui.transfer.FileTransferDirection
 import com.rdp.sync.ui.transfer.SessionFileTransferUi
@@ -106,6 +111,20 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     var expandedLandscapeTools by remember(device.id) { mutableStateOf(false) }
     val compactLandscape = landscape && !expandedLandscapeTools
     val preferences = remember(context) { context.getSharedPreferences("session_preferences", Context.MODE_PRIVATE) }
+    val hudDockState = rememberHudDockState(preferences)
+    var localDesktopSize by remember(device.id) { mutableStateOf(IntSize.Zero) }
+    var peerIsUnix by remember(device.id) { mutableStateOf(false) }
+    var linuxInputMode by remember(preferences) {
+        mutableStateOf(LinuxTextInputMode.fromName(preferences.getString("linux_ime_mode", null)).also {
+            RdpConnector.linuxTextInputMode = it
+        })
+    }
+    fun cycleLinuxInputMode() {
+        val next = linuxInputMode.next()
+        linuxInputMode = next
+        RdpConnector.linuxTextInputMode = next
+        preferences.edit().putString("linux_ime_mode", next.name).apply()
+    }
     var settings by remember { mutableStateOf(SessionUiDefaults.displaySettings(
         preferences.getString("display_quality", null), preferences.getString("resolution_mode", null),
         preferences.getBoolean("adaptive_quality", false)
@@ -230,6 +249,7 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                     if (isConnected) {
                         previouslyConnected = true
                         connecting = false
+                        peerIsUnix = withContext(Dispatchers.IO) { RdpConnector.isPeerUnix() }
                         val display = withContext(Dispatchers.IO) {
                             RdpConnector.updateDisplay(viewportSize.width, viewportSize.height, device.width, device.height)
                         }
@@ -360,6 +380,8 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
 
     SessionViewportLayout(
         fullscreen = fullscreen,
+        hudDockState = hudDockState,
+        onLocalDesktopSize = { localDesktopSize = it },
         onLogicalViewport = {
             if (it.width > 0 && it.height > 0) {
                 viewportSize = it
@@ -456,15 +478,42 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                 }
             }
         },
+        imeQuickBar = {
+            SessionImeQuickBar(
+                visible = imeVisible && isConnected,
+                input = input,
+                linuxInputMode = linuxInputMode,
+                onCycleLinuxInputMode = ::cycleLinuxInputMode,
+                onHideKeyboard = { desktopView?.hideKeyboard() }
+            )
+        },
         imeControls = {
-            SessionFloatingControls(input, fullscreen, imeVisible, pointerMode, isConnected,
+            MagneticEdgeHud(
+                dockState = hudDockState,
+                viewportWidthPx = localDesktopSize.width.takeIf { it > 0 } ?: viewportSize.width,
+                viewportHeightPx = localDesktopSize.height.takeIf { it > 0 } ?: viewportSize.height,
+                input = input,
+                deviceName = device.name,
+                peerIsUnix = peerIsUnix,
+                linuxInputMode = linuxInputMode,
+                onCycleLinuxInputMode = ::cycleLinuxInputMode,
+                fullscreen = fullscreen,
+                imeVisible = imeVisible,
+                pointerMode = pointerMode,
+                connected = isConnected,
                 onKeyboard = { if (imeVisible) desktopView?.hideKeyboard() else desktopView?.showKeyboard() },
                 onPointerMode = { pointerMode = !pointerMode },
-                onChromeMode = { fullscreen = !fullscreen }, onSettings = { showSettings = true },
-                onPaste = { showPaste = true }, onResetZoom = { desktopView?.resetZoom() },
+                onChromeMode = { fullscreen = !fullscreen },
+                onSettings = { showSettings = true },
+                onPaste = { showPaste = true },
+                onResetZoom = { desktopView?.resetZoom() },
                 onSendFiles = { openFiles(FileTransferDirection.SEND) },
-                onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) }, onExit = ::exitSession,
-                onSharedSpace = ::openSharedSpace, onSharedDrive = ::openSharedDrive, onRotateScreen = rotateScreen)
+                onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) },
+                onExit = ::exitSession,
+                onSharedSpace = ::openSharedSpace,
+                onSharedDrive = ::openSharedDrive,
+                onRotateScreen = rotateScreen
+            )
         }
     )
     if (showSharedSpace) Dialog(onDismissRequest = { showSharedSpace = false },
@@ -558,67 +607,34 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
     onSendFiles: () -> Unit, onReceiveFiles: () -> Unit, onExit: () -> Unit,
     onSharedSpace: () -> Unit = {}, onSharedDrive: () -> Unit = {}, onRotateScreen: () -> Unit = {}) {
     val context = LocalContext.current
-    var showTools by remember { mutableStateOf(false) }
-    val menuScroll = rememberScrollState()
-    val menuDensity = LocalDensity.current
-    val menuInsets = WindowInsets.safeDrawing
-    val menuViewportHeight = (LocalConfiguration.current.screenHeightDp.dp - with(menuDensity) {
-        (menuInsets.getTop(menuDensity) + menuInsets.getBottom(menuDensity)).toDp()
-    } - 48.dp).coerceAtLeast(48.dp)
-    val menuScope = rememberCoroutineScope()
-    // Nonfocusable popup keeps the IME owner; handle Back locally instead of
-    // letting an open session menu accidentally navigate away from the desktop.
-    BackHandler(enabled = showTools) { showTools = false }
-    LaunchedEffect(fullscreen, imeVisible) { showTools = false }
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.90f),
-        tonalElevation = 6.dp, shadowElevation = 4.dp) {
-        // Fullscreen leaves only one recoverable 48dp handle. The nonfocusable menu
-        // preserves the desktop's InputConnection; no full-screen gesture layer exists.
-        Row(Modifier.padding(if (fullscreen) 0.dp else 4.dp)) {
-            if (!fullscreen) IconButton(onClick = { showTools = false; onKeyboard() }, modifier = Modifier.size(48.dp)) {
-                Icon(Icons.Default.Keyboard, context.getString(R.string.toggle_keyboard))
-            }
-            Box {
-                IconButton(onClick = { menuScope.launch {
-                    // Every opening starts with keyboard/exit, not the last shortcut.
-                    menuScroll.scrollTo(0)
-                    showTools = true
-                } }, modifier = Modifier.size(48.dp)) {
-                    Icon(if (fullscreen) Icons.Default.MoreVert else Icons.Default.Settings,
-                        if (fullscreen) context.getString(R.string.session_menu) else context.getString(R.string.session_tools))
-                }
-                DropdownMenu(expanded = showTools, onDismissRequest = { showTools = false },
-                    // Keep the popup inside the safe viewport. Remaining commands
-                    // stay reachable through its existing scroll state, including
-                    // compact windows, large text and the on-screen keyboard.
-                    modifier = Modifier.heightIn(max = menuViewportHeight),
-                    scrollState = menuScroll, properties = PopupProperties(focusable = false)) {
-                    if (fullscreen) DropdownMenuItem(text = { Text(context.getString(R.string.toggle_keyboard)) }, enabled = connected,
-                        onClick = { showTools = false; onKeyboard() })
-                    if (fullscreen) DropdownMenuItem(text = { Text(context.getString(R.string.disconnect)) }, onClick = { showTools = false; onExit() })
-                    DropdownMenuItem(text = { Text(if (fullscreen) context.getString(R.string.show_toolbar) else context.getString(R.string.fullscreen)) },
-                        onClick = { showTools = false; onChromeMode() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.rotate_screen)) },
-                        onClick = { showTools = false; onRotateScreen() })
-                    DropdownMenuItem(text = { Text(if (pointerMode) context.getString(R.string.direct_touch) else context.getString(R.string.trackpad)) }, enabled = connected,
-                        onClick = { showTools = false; onPointerMode() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.display_settings)) }, onClick = { showTools = false; onSettings() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.space_title)) }, onClick = { showTools = false; onSharedSpace() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.drive_status_title)) }, onClick = { showTools = false; onSharedDrive() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.send_files)) }, enabled = connected, onClick = { showTools = false; onSendFiles() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.receive_files)) }, enabled = connected, onClick = { showTools = false; onReceiveFiles() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.send_text)) }, enabled = connected, onClick = { showTools = false; onPaste() })
-                    DropdownMenuItem(text = { Text(context.getString(R.string.reset_view)) }, enabled = connected, onClick = { showTools = false; onResetZoom() })
-                    DropdownMenuItem(text = { Text("Esc") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x01) })
-                    DropdownMenuItem(text = { Text("Tab") }, enabled = connected, onClick = { showTools = false; input.enqueueKeyStroke(0x0F) })
-                    DropdownMenuItem(text = { Text("Ctrl+C") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2E) })
-                    DropdownMenuItem(text = { Text("Ctrl+V") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x2F) })
-                    DropdownMenuItem(text = { Text("Ctrl+Alt+Del") }, enabled = connected, onClick = { showTools = false; input.enqueueShortcut(0x1D, 0x38, 0xE053) })
-                }
-            }
-            if (!fullscreen) IconButton(onClick = onExit, modifier = Modifier.size(48.dp)) { Icon(Icons.Default.Stop, context.getString(R.string.disconnect)) }
-        }
-    }
+    val dockState = remember { HudDockState() }
+    var linuxMode by remember { mutableStateOf(LinuxTextInputMode.SMART_AUTO) }
+    MagneticEdgeHud(
+        dockState = dockState,
+        viewportWidthPx = 0,
+        viewportHeightPx = 0,
+        input = input,
+        deviceName = context.getString(R.string.app_name),
+        peerIsUnix = false,
+        linuxInputMode = linuxMode,
+        onCycleLinuxInputMode = { linuxMode = linuxMode.next() },
+        fullscreen = fullscreen,
+        imeVisible = imeVisible,
+        pointerMode = pointerMode,
+        connected = connected,
+        onKeyboard = onKeyboard,
+        onPointerMode = onPointerMode,
+        onChromeMode = onChromeMode,
+        onSettings = onSettings,
+        onPaste = onPaste,
+        onResetZoom = onResetZoom,
+        onSendFiles = onSendFiles,
+        onReceiveFiles = onReceiveFiles,
+        onExit = onExit,
+        onSharedSpace = onSharedSpace,
+        onSharedDrive = onSharedDrive,
+        onRotateScreen = onRotateScreen
+    )
 }
 
 

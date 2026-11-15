@@ -54,4 +54,8 @@ int rdpsync_transfer_request_chunk(RdpTransfer* transfer, uint64_t token, size_t
 /* Returns length, 0 pending, or negative error. Exactly one take per request. */
 int rdpsync_transfer_take_chunk(RdpTransfer* transfer, uint64_t token, uint8_t* out, size_t capacity);
 int rdpsync_transfer_finish(RdpTransfer* transfer, uint64_t token);
+void rdpsync_transfer_set_text_only(RdpTransfer* transfer, int text_only);
+uint64_t rdpsync_transfer_offer_text(RdpTransfer* transfer, const uint8_t* utf8, size_t utf8_len);
+int rdpsync_transfer_wait_text_ack(RdpTransfer* transfer, uint64_t seq, int timeout_ms);
+int rdpsync_transfer_wait_text_served(RdpTransfer* transfer, uint64_t seq, int timeout_ms);
 #endif

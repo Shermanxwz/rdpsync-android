@@ -6,67 +6,114 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.RectF
 import android.text.InputType
 import android.view.Choreographer
 import android.view.InputDevice
-import android.view.KeyEvent
 import android.view.KeyCharacterMap
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedText
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.network.RdpInputDispatcher
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * Vsync-driven desktop and one gesture owner. Bitmap updates never recompose the
- * surrounding screen and an idle remote desktop does not redraw every vsync.
+ * 120Hz LTPO-ready desktop surface with zero-latency vector cursor, ballistic sub-pixel
+ * trackpad acceleration, two-finger right-click/wheel gestures, and full Chinese IME composition.
  */
-// This view is constructed by AndroidView with a session-scoped input dependency, never XML.
 @SuppressLint("ViewConstructor")
 class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : View(context), Choreographer.FrameCallback {
-    /** Opt-in fixture diagnostics: numeric lengths/lifecycle only, never input content.
-     * No observer is installed by production callers. Observer failures cannot alter input. */
-    data class ImeDiagnostic(val connection: Long, val operation: String, val argumentLength: Int,
-                             val composingBefore: Int, val composingAfter: Int)
+    data class ImeDiagnostic(
+        val connection: Long,
+        val operation: String,
+        val argumentLength: Int,
+        val composingBefore: Int,
+        val composingAfter: Int
+    )
+
     private var imeConnectionSequence = 0L
     private var imeDiagnosticCount = 0
     var imeDiagnosticDropped = 0
         private set
     var imeDiagnosticObserver: ((ImeDiagnostic) -> Unit)? = null
-        set(value) { field = value; imeDiagnosticCount = 0; imeDiagnosticDropped = 0 }
+        set(value) {
+            field = value
+            imeDiagnosticCount = 0
+            imeDiagnosticDropped = 0
+        }
+
     private fun traceIme(connection: Long, operation: String, argumentLength: Int, before: Int, after: Int) {
         val observer = imeDiagnosticObserver ?: return
-        if (imeDiagnosticCount >= 128) { imeDiagnosticDropped++; return }
+        if (imeDiagnosticCount >= 128) {
+            imeDiagnosticDropped++
+            return
+        }
         imeDiagnosticCount++
         runCatching { observer(ImeDiagnostic(connection, operation, argumentLength, before, after)) }
     }
 
+    private val density = resources.displayMetrics.density
     private val viewport = ViewportTransform()
     private val destination = RectF()
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val cursorPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE; style = Paint.Style.STROKE; strokeWidth = 2f * resources.displayMetrics.density }
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val cursorFillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        style = Paint.Style.FILL
+    }
+    private val cursorOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(225, 15, 23, 42)
+        style = Paint.Style.STROKE
+        strokeWidth = 1.6f * density
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val cursorDragDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(45, 212, 191)
+        style = Paint.Style.FILL
+    }
+    private val ripplePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.rgb(125, 219, 201)
+        style = Paint.Style.STROKE
+        strokeWidth = 2f * density
+    }
+    private val cursorPath = Path()
+
     private var bitmap: Bitmap? = null
     private var logicalViewportWidth = 0
     private var logicalViewportHeight = 0
     private var lastInputTarget: ViewportTransform.Point? = null
     private val framePacer = FramePacer()
+    private var panelMaxFps = 60
     private var pendingCopyNanos = 0L
     private var pendingFrame = false
     private var running = false
     private var pointerMode = false
     private var cursorX = 0f
     private var cursorY = 0f
+    private var lastMoveEventMs = 0L
+    private var rippleX = 0f
+    private var rippleY = 0f
+    private var rippleStartNanos = 0L
+
     private var primaryId = -1
     private var activeTouch = false
     private var multiGesture = false
+    private var twoFingerTapCandidate = false
+    private var twoFingerDownTime = 0L
+    private var twoFingerPinching = false
+    private var scrollRemainderX = 0f
+    private var scrollRemainderY = 0f
     private var lastX = 0f
     private var lastY = 0f
     private var downX = 0f
@@ -97,8 +144,12 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         contentDescription = if (enabled) "远程桌面，触控板模式" else "远程桌面，直接触摸模式"
         invalidate()
     }
-    fun resetZoom() { viewport.reset(); invalidate() }
-    /** Use the non-IME layout for fit; a smaller local View crops instead of shrinking text. */
+
+    fun resetZoom() {
+        viewport.reset()
+        invalidate()
+    }
+
     fun setLogicalViewport(width: Int, height: Int) {
         if (width <= 0 || height <= 0 || (width == logicalViewportWidth && height == logicalViewportHeight)) return
         logicalViewportWidth = width
@@ -107,91 +158,164 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         updateViewport(keepInputTargetVisible = true)
         invalidate()
     }
-    /** Read on the UI thread; exactly the geometry used for drawing and input mapping. */
+
     fun viewportSnapshot(): ViewportTransform.Snapshot = viewport.snapshot()
+
     fun showKeyboard() {
         requestFocus()
-        (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
     }
+
     fun hideKeyboard() {
-        (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(windowToken, 0)
+        (context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(windowToken, 0)
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        panelMaxFps = (display?.refreshRate?.roundToInt() ?: 60).coerceIn(60, 144)
         running = true
         Choreographer.getInstance().postFrameCallback(this)
     }
+
     override fun onDetachedFromWindow() {
         running = false
         Choreographer.getInstance().removeFrameCallback(this)
         cancelGesture()
         super.onDetachedFromWindow()
     }
+
     override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
         super.onWindowFocusChanged(hasWindowFocus)
         if (!hasWindowFocus) cancelGesture()
     }
+
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         cancelGesture()
         updateViewport(keepInputTargetVisible = true)
     }
+
     private fun updateViewport(keepInputTargetVisible: Boolean = false) {
         val frame = bitmap ?: return
         val fitWidth = logicalViewportWidth.takeIf { it > 0 } ?: width
         val fitHeight = logicalViewportHeight.takeIf { it > 0 } ?: height
         viewport.update(width, height, frame.width, frame.height, fitWidth, fitHeight)
         if (keepInputTargetVisible && (height < fitHeight || width < fitWidth)) {
-            lastInputTarget?.let { viewport.ensureVisible(it, 16f * resources.displayMetrics.density) }
+            lastInputTarget?.let { viewport.ensureVisible(it, 16f * density) }
         }
         cursorX = cursorX.coerceIn(0f, (frame.width - 1).toFloat())
         cursorY = cursorY.coerceIn(0f, (frame.height - 1).toFloat())
     }
+
     override fun doFrame(frameTimeNanos: Long) {
         if (!running) return
-        if (isShown && windowVisibility == VISIBLE && framePacer.shouldPoll(frameTimeNanos, RdpConnector.targetFrameRate())) {
+        if (isShown && windowVisibility == VISIBLE &&
+            framePacer.shouldPoll(frameTimeNanos, RdpConnector.targetFrameRate(), panelMaxFps)
+        ) {
             val started = System.nanoTime()
             val frame = RdpConnector.pollFrameBitmap()
             if (frame != null) {
                 pendingCopyNanos = System.nanoTime() - started
                 pendingFrame = true
                 val previous = bitmap
-                if (previous == null) { cursorX = frame.bitmap.width / 2f; cursorY = frame.bitmap.height / 2f }
-                val resized = previous != null && (previous.width != frame.bitmap.width || previous.height != frame.bitmap.height)
+                if (previous == null) {
+                    cursorX = frame.bitmap.width / 2f
+                    cursorY = frame.bitmap.height / 2f
+                }
+                val resized = previous != null &&
+                    (previous.width != frame.bitmap.width || previous.height != frame.bitmap.height)
                 if (resized) {
                     cancelGesture()
                     viewport.reset()
-                    // Keep the last real RDP pixel coordinate, not a guessed caret
-                    // or a proportional remap. A new desktop frame can arrive after
-                    // local rotation/IME layout; discarding this anchor centers the
-                    // cropped viewport and hides the actual input region.
                 }
                 bitmap = frame.bitmap
-                // ensureVisible clamps that known point against the NEW frame's
-                // bounds, and pans only when the local viewport is cropped.
                 updateViewport(keepInputTargetVisible = resized)
+                invalidate()
+            } else if (rippleStartNanos != 0L) {
                 invalidate()
             }
         }
         Choreographer.getInstance().postFrameCallback(this)
     }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val frame = bitmap ?: return
         val started = System.nanoTime()
-        destination.set(viewport.left, viewport.top, viewport.left + frame.width * viewport.scale, viewport.top + frame.height * viewport.scale)
-        RdpConnector.withFrameLock { canvas.drawBitmap(frame, null, destination, paint) }
+        destination.set(
+            viewport.left,
+            viewport.top,
+            viewport.left + frame.width * viewport.scale,
+            viewport.top + frame.height * viewport.scale
+        )
+        // Razor-sharp integer pixels at 1:1 scale; smooth bilinear filtering when zoomed/fit-scaled.
+        bitmapPaint.isFilterBitmap = abs(viewport.scale - 1f) > 0.01f
+        RdpConnector.withFrameLock { canvas.drawBitmap(frame, null, destination, bitmapPaint) }
+
         if (pointerMode) {
-            canvas.drawCircle(viewport.left + cursorX * viewport.scale, viewport.top + cursorY * viewport.scale, 9f * resources.displayMetrics.density, cursorPaint)
+            drawVectorArrowCursor(
+                canvas,
+                viewport.left + cursorX * viewport.scale,
+                viewport.top + cursorY * viewport.scale
+            )
         }
+
+        if (rippleStartNanos != 0L) {
+            val elapsedMs = (System.nanoTime() - rippleStartNanos) / 1_000_000f
+            if (elapsedMs in 0f..180f) {
+                val progress = elapsedMs / 180f
+                ripplePaint.alpha = ((1f - progress) * 185f).roundToInt().coerceIn(0, 255)
+                canvas.drawCircle(rippleX, rippleY, (6f + 16f * progress) * density, ripplePaint)
+                postInvalidateOnAnimation()
+            } else {
+                rippleStartNanos = 0L
+            }
+        }
+
         if (pendingFrame) {
             RdpConnector.recordRenderedFrame(pendingCopyNanos, System.nanoTime() - started)
             pendingFrame = false
         }
     }
 
+    private fun drawVectorArrowCursor(canvas: Canvas, tipX: Float, tipY: Float) {
+        val s = density
+        cursorPath.reset()
+        cursorPath.moveTo(tipX, tipY)
+        cursorPath.lineTo(tipX, tipY + 17.5f * s)
+        cursorPath.lineTo(tipX + 4.6f * s, tipY + 13.5f * s)
+        cursorPath.lineTo(tipX + 7.8f * s, tipY + 20.5f * s)
+        cursorPath.lineTo(tipX + 10.4f * s, tipY + 19.3f * s)
+        cursorPath.lineTo(tipX + 7.2f * s, tipY + 12.3f * s)
+        cursorPath.lineTo(tipX + 12.8f * s, tipY + 12.3f * s)
+        cursorPath.close()
+        canvas.drawPath(cursorPath, cursorOutlinePaint)
+        canvas.drawPath(cursorPath, cursorFillPaint)
+        if (mouseDragging) {
+            canvas.drawCircle(tipX + 12f * s, tipY + 4f * s, 3.5f * s, cursorDragDotPaint)
+        }
+    }
+
+    private fun triggerTapRipple(screenX: Float, screenY: Float) {
+        rippleX = screenX
+        rippleY = screenY
+        rippleStartNanos = System.nanoTime()
+        invalidate()
+    }
+
+    private fun ballisticGain(dxPx: Float, dyPx: Float, dtMs: Long): Float {
+        val speedDpPerMs = (hypot(dxPx, dyPx) / density) / dtMs.coerceAtLeast(4L).toFloat()
+        return when {
+            speedDpPerMs < 0.35f -> 0.88f
+            speedDpPerMs < 1.80f -> 0.88f + (speedDpPerMs - 0.35f) * 0.72f
+            else -> min(2.35f, 1.92f + (speedDpPerMs - 1.80f) * 0.25f)
+        }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        framePacer.notifyUserInteraction(System.nanoTime(), panelMaxFps)
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) return handleMouse(event)
         if (bitmap == null) return true
         when (event.actionMasked) {
@@ -200,7 +324,9 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                 parent?.requestDisallowInterceptTouchEvent(true)
                 primaryId = event.getPointerId(0)
                 downX = event.x; downY = event.y; lastX = event.x; lastY = event.y
-                downTime = event.eventTime; moved = false; multiGesture = false; mouseDragging = false
+                downTime = event.eventTime; lastMoveEventMs = event.eventTime
+                moved = false; multiGesture = false; mouseDragging = false
+                twoFingerTapCandidate = false; twoFingerPinching = false
                 val remote = viewport.toRemote(event.x, event.y)
                 activeTouch = remote != null
                 if (!pointerMode && remote != null) direct(event, 0, remote, 0)
@@ -208,7 +334,16 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
             MotionEvent.ACTION_POINTER_DOWN -> {
                 if (!multiGesture) cancelRemoteTouch(event)
                 multiGesture = true
-                if (event.pointerCount >= 2) updateMultiOrigin(event)
+                if (event.pointerCount == 2) {
+                    twoFingerTapCandidate = true
+                    twoFingerPinching = false
+                    twoFingerDownTime = event.eventTime
+                    scrollRemainderX = 0f
+                    scrollRemainderY = 0f
+                    updateMultiOrigin(event)
+                } else {
+                    twoFingerTapCandidate = false
+                }
             }
             MotionEvent.ACTION_MOVE -> {
                 if (multiGesture) {
@@ -216,9 +351,26 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                         val centerX = (event.getX(0) + event.getX(1)) / 2f
                         val centerY = (event.getY(0) + event.getY(1)) / 2f
                         val span = hypot(event.getX(0) - event.getX(1), event.getY(0) - event.getY(1))
-                        if (previousSpan > 0f) {
+                        val dCenterX = centerX - previousCenterX
+                        val dCenterY = centerY - previousCenterY
+                        val spanDelta = abs(span - previousSpan)
+                        if (hypot(dCenterX, dCenterY) > touchSlop * 0.8f || spanDelta > touchSlop) {
+                            twoFingerTapCandidate = false
+                        }
+                        if (pointerMode && !twoFingerPinching && spanDelta < touchSlop * 1.35f) {
+                            // MacBook-grade 2-finger smooth trackpad scrolling in Pointer mode
+                            scrollRemainderX -= dCenterX * 1.4f
+                            scrollRemainderY += dCenterY * 1.4f
+                            val wx = scrollRemainderX.roundToInt()
+                            val wy = scrollRemainderY.roundToInt()
+                            scrollRemainderX -= wx
+                            scrollRemainderY -= wy
+                            if (wx != 0) input.enqueueHWheel(cursorX.toInt(), cursorY.toInt(), wx)
+                            if (wy != 0) input.enqueueWheel(cursorX.toInt(), cursorY.toInt(), wy)
+                        } else if (previousSpan > 0f) {
+                            twoFingerPinching = true
                             val factor = if (previousSpan > touchSlop) span / previousSpan else 1f
-                            viewport.transform(factor, centerX - previousCenterX, centerY - previousCenterY, previousCenterX, previousCenterY)
+                            viewport.transform(factor, dCenterX, dCenterY, previousCenterX, previousCenterY)
                         }
                         updateMultiOrigin(event)
                         invalidate()
@@ -233,19 +385,45 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                                 mouseDragging = true
                                 input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, true)
                             }
-                            cursorX = (cursorX + (x - lastX) / viewport.scale).coerceIn(0f, (viewport.remoteWidth - 1).toFloat())
-                            cursorY = (cursorY + (y - lastY) / viewport.scale).coerceIn(0f, (viewport.remoteHeight - 1).toFloat())
+                            // Process historical batched samples for silk-smooth 120Hz cursor trajectory
+                            val historySize = event.historySize
+                            for (h in 0 until historySize) {
+                                val hx = event.getHistoricalX(index, h)
+                                val hy = event.getHistoricalY(index, h)
+                                val ht = event.getHistoricalEventTime(h)
+                                val gain = ballisticGain(hx - lastX, hy - lastY, ht - lastMoveEventMs)
+                                cursorX = (cursorX + (hx - lastX) * gain / viewport.scale)
+                                    .coerceIn(0f, (viewport.remoteWidth - 1).toFloat())
+                                cursorY = (cursorY + (hy - lastY) * gain / viewport.scale)
+                                    .coerceIn(0f, (viewport.remoteHeight - 1).toFloat())
+                                lastX = hx; lastY = hy; lastMoveEventMs = ht
+                            }
+                            val gain = ballisticGain(x - lastX, y - lastY, event.eventTime - lastMoveEventMs)
+                            cursorX = (cursorX + (x - lastX) * gain / viewport.scale)
+                                .coerceIn(0f, (viewport.remoteWidth - 1).toFloat())
+                            cursorY = (cursorY + (y - lastY) * gain / viewport.scale)
+                                .coerceIn(0f, (viewport.remoteHeight - 1).toFloat())
+                            lastMoveEventMs = event.eventTime
                             lastInputTarget = ViewportTransform.Point(cursorX, cursorY)
                             input.enqueuePointerMove(cursorX.toInt(), cursorY.toInt())
                             invalidate()
-                        } else viewport.toRemote(x, y, clamp = true)?.let { direct(event, 1, it, index) }
+                        } else {
+                            viewport.toRemote(x, y, clamp = true)?.let { direct(event, 1, it, index) }
+                        }
                         moved = moved || movement
                         lastX = x; lastY = y
                     }
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> {
-                // Never reinterpret the remaining finger as a fresh click.
+                if (pointerMode && twoFingerTapCandidate && event.eventTime - twoFingerDownTime < 260L) {
+                    twoFingerTapCandidate = false
+                    triggerTapRipple(
+                        viewport.left + cursorX * viewport.scale,
+                        viewport.top + cursorY * viewport.scale
+                    )
+                    input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), 2)
+                }
                 multiGesture = true
                 if (event.getPointerId(event.actionIndex) == primaryId) cancelRemoteTouch(event)
                 previousSpan = 0f
@@ -254,39 +432,71 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                 if (activeTouch && !multiGesture) {
                     if (pointerMode) {
                         lastInputTarget = ViewportTransform.Point(cursorX, cursorY)
-                        if (mouseDragging) input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, false)
-                        else if (!moved) input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), if (event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout()) 2 else 1)
-                    } else viewport.toRemote(event.x, event.y, clamp = true)?.let { direct(event, 2, it, 0) }
+                        if (mouseDragging) {
+                            input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, false)
+                        } else if (!moved) {
+                            val btn = if (event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout()) 2 else 1
+                            triggerTapRipple(
+                                viewport.left + cursorX * viewport.scale,
+                                viewport.top + cursorY * viewport.scale
+                            )
+                            input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), btn)
+                        }
+                    } else {
+                        if (!moved) triggerTapRipple(event.x, event.y)
+                        viewport.toRemote(event.x, event.y, clamp = true)?.let { direct(event, 2, it, 0) }
+                    }
                     if (!moved) performClick()
                 }
                 activeTouch = false; primaryId = -1; multiGesture = false; mouseDragging = false
+                twoFingerTapCandidate = false; twoFingerPinching = false
                 parent?.requestDisallowInterceptTouchEvent(false)
             }
             MotionEvent.ACTION_CANCEL -> cancelGesture()
         }
         return true
     }
-    override fun performClick(): Boolean { super.performClick(); return true }
+
+    override fun performClick(): Boolean {
+        super.performClick()
+        return true
+    }
+
     private fun direct(event: MotionEvent, type: Int, point: ViewportTransform.Point, index: Int) {
         if (type != 3) lastInputTarget = point
-        input.enqueueDirectTouch(primaryId, type, point.x.toInt(), point.y.toInt(), event.getX(index), event.getY(index), event.eventTime, touchSlop)
+        input.enqueueDirectTouch(
+            primaryId,
+            type,
+            point.x.toInt(),
+            point.y.toInt(),
+            event.getX(index),
+            event.getY(index),
+            event.eventTime,
+            touchSlop
+        )
     }
+
     private fun updateMultiOrigin(event: MotionEvent) {
         previousCenterX = (event.getX(0) + event.getX(1)) / 2f
         previousCenterY = (event.getY(0) + event.getY(1)) / 2f
         previousSpan = hypot(event.getX(0) - event.getX(1), event.getY(0) - event.getY(1))
     }
+
     private fun cancelRemoteTouch(event: MotionEvent) {
         if (activeTouch && !pointerMode) {
             val index = event.findPointerIndex(primaryId)
-            if (index >= 0) viewport.toRemote(event.getX(index), event.getY(index), clamp = true)?.let { direct(event, 3, it, index) }
+            if (index >= 0) {
+                viewport.toRemote(event.getX(index), event.getY(index), clamp = true)?.let { direct(event, 3, it, index) }
+            }
         }
         if (mouseDragging) input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, false)
         activeTouch = false; mouseDragging = false
     }
+
     private fun cancelGesture() {
         input.releasePressedInputs()
         activeTouch = false; mouseDragging = false; primaryId = -1; mouseButtons = 0; multiGesture = false
+        twoFingerTapCandidate = false; twoFingerPinching = false
         unicodeKeys.clear(); deadAccent = 0
         parent?.requestDisallowInterceptTouchEvent(false)
     }
@@ -297,9 +507,17 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         cursorX = remote.x; cursorY = remote.y
         if (event.actionMasked != MotionEvent.ACTION_CANCEL) lastInputTarget = remote
         input.enqueuePointerMove(remote.x.toInt(), remote.y.toInt())
-        val current = if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) 0 else event.buttonState
-        listOf(MotionEvent.BUTTON_PRIMARY to 1, MotionEvent.BUTTON_SECONDARY to 2, MotionEvent.BUTTON_TERTIARY to 3).forEach { (mask, button) ->
-            if ((current and mask) != (mouseButtons and mask)) input.enqueueMouseButton(remote.x.toInt(), remote.y.toInt(), button, current and mask != 0)
+        val current = if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) {
+            0
+        } else event.buttonState
+        listOf(
+            MotionEvent.BUTTON_PRIMARY to 1,
+            MotionEvent.BUTTON_SECONDARY to 2,
+            MotionEvent.BUTTON_TERTIARY to 3
+        ).forEach { (mask, button) ->
+            if ((current and mask) != (mouseButtons and mask)) {
+                input.enqueueMouseButton(remote.x.toInt(), remote.y.toInt(), button, current and mask != 0)
+            }
         }
         mouseButtons = current
         if (event.actionMasked == MotionEvent.ACTION_SCROLL) {
@@ -309,59 +527,141 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         invalidate()
         return true
     }
+
     override fun onGenericMotionEvent(event: MotionEvent): Boolean =
         if (event.isFromSource(InputDevice.SOURCE_MOUSE)) handleMouse(event) else super.onGenericMotionEvent(event)
 
     override fun onCheckIsTextEditor() = true
+
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN
+        // Omit TYPE_TEXT_FLAG_NO_SUGGESTIONS so Chinese 9-key/26-key Pinyin, handwriting,
+        // and voice IMEs display their full native candidate bar identically to Windows sessions.
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+        outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            EditorInfo.IME_FLAG_NO_FULLSCREEN or
+            EditorInfo.IME_ACTION_NONE
+        outAttrs.initialSelStart = 0
+        outAttrs.initialSelEnd = 0
         val connection = ++imeConnectionSequence
         traceIme(connection, "create", 0, 0, 0)
         return object : BaseInputConnection(this, false) {
             private val buffer = RemoteImeBuffer(input::enqueueText, input::enqueueKeyStroke)
+
             private inline fun <T> observed(operation: String, argumentLength: Int = 0, block: () -> T): T {
                 val before = buffer.composing.length
-                try { return block() }
-                finally { traceIme(connection, operation, argumentLength, before, buffer.composing.length) }
+                try {
+                    return block()
+                } finally {
+                    traceIme(connection, operation, argumentLength, before, buffer.composing.length)
+                }
             }
-            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean = observed("compose", text?.length ?: -1) { buffer.compose(text?.toString().orEmpty()); true }
-            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean = observed("commit", text?.length ?: -1) { buffer.commit(text?.toString().orEmpty()); true }
-            override fun finishComposingText(): Boolean = observed("finish") { buffer.finish(); true }
-            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean = observed("delete-code-units", beforeLength) { buffer.deleteCodeUnits(beforeLength, afterLength); true }
-            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean = observed("delete-code-points", beforeLength) { buffer.deleteCodePoints(beforeLength, afterLength); true }
-            override fun closeConnection() = observed("close") { buffer.clear(); super.closeConnection() }
-            override fun performEditorAction(editorAction: Int): Boolean = observed("editor-action") { input.enqueueKeyStroke(0x1C); true }
-            override fun sendKeyEvent(event: KeyEvent): Boolean = observed(if (event.action == KeyEvent.ACTION_DOWN) "key-down" else if (event.action == KeyEvent.ACTION_UP) "key-up" else "key-other") { this@RdpDesktopView.dispatchKeyEvent(event) }
-            override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence = buffer.composing.takeLast(n.coerceAtLeast(0))
+
+            override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean =
+                observed("compose", text?.length ?: -1) {
+                    buffer.compose(text?.toString().orEmpty())
+                    true
+                }
+
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean =
+                observed("commit", text?.length ?: -1) {
+                    buffer.commit(text?.toString().orEmpty())
+                    true
+                }
+
+            override fun finishComposingText(): Boolean =
+                observed("finish") {
+                    buffer.finish()
+                    true
+                }
+
+            override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean =
+                observed("delete-code-units", beforeLength) {
+                    buffer.deleteCodeUnits(beforeLength, afterLength)
+                    true
+                }
+
+            override fun deleteSurroundingTextInCodePoints(beforeLength: Int, afterLength: Int): Boolean =
+                observed("delete-code-points", beforeLength) {
+                    buffer.deleteCodePoints(beforeLength, afterLength)
+                    true
+                }
+
+            override fun closeConnection() =
+                observed("close") {
+                    buffer.clear()
+                    super.closeConnection()
+                }
+
+            override fun performEditorAction(editorAction: Int): Boolean =
+                observed("editor-action") {
+                    buffer.finish()
+                    input.enqueueKeyStroke(0x1C)
+                    true
+                }
+
+            override fun sendKeyEvent(event: KeyEvent): Boolean =
+                observed(
+                    when (event.action) {
+                        KeyEvent.ACTION_DOWN -> "key-down"
+                        KeyEvent.ACTION_UP -> "key-up"
+                        else -> "key-other"
+                    }
+                ) {
+                    this@RdpDesktopView.dispatchKeyEvent(event)
+                }
+
+            override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText =
+                ExtractedText().apply {
+                    text = buffer.composing
+                    startOffset = 0
+                    selectionStart = buffer.composing.length
+                    selectionEnd = buffer.composing.length
+                }
+
+            override fun getTextBeforeCursor(n: Int, flags: Int): CharSequence =
+                buffer.composing.takeLast(n.coerceAtLeast(0))
+
             override fun getTextAfterCursor(n: Int, flags: Int): CharSequence = ""
             override fun getSelectedText(flags: Int): CharSequence = ""
         }
     }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        framePacer.notifyUserInteraction(System.nanoTime(), panelMaxFps)
         val unicode = event.unicodeChar
-        // Android's keyboard layout determines printable characters. Fixed US scan
-        // codes remain correct for shortcuts, not for e.g. AZERTY text entry.
-        if ((unicode >= 0x20 || unicode and KeyCharacterMap.COMBINING_ACCENT != 0) && unicode != 0x7F && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed) {
+        if ((unicode >= 0x20 || unicode and KeyCharacterMap.COMBINING_ACCENT != 0) &&
+            unicode != 0x7F && !event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed
+        ) {
             unicodeKeys.add(keyCode)
             if (unicode and KeyCharacterMap.COMBINING_ACCENT != 0) {
                 deadAccent = unicode and KeyCharacterMap.COMBINING_ACCENT_MASK
             } else {
                 val combined = if (deadAccent != 0) KeyCharacterMap.getDeadChar(deadAccent, unicode) else unicode
-                if (combined != 0) input.enqueueText(String(Character.toChars(combined)))
-                else { input.enqueueText(String(Character.toChars(deadAccent))); input.enqueueText(String(Character.toChars(unicode))) }
+                if (combined != 0) {
+                    input.enqueueText(String(Character.toChars(combined)))
+                } else {
+                    input.enqueueText(String(Character.toChars(deadAccent)))
+                    input.enqueueText(String(Character.toChars(unicode)))
+                }
                 deadAccent = 0
             }
             return true
         }
         val scan = keyScanCode(keyCode)
-        if (scan != null) { input.enqueueKey(scan, true); return true }
+        if (scan != null) {
+            input.enqueueKey(scan, true)
+            return true
+        }
         return super.onKeyDown(keyCode, event)
     }
+
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
         if (unicodeKeys.remove(keyCode)) return true
         val scan = keyScanCode(keyCode)
-        if (scan != null) { input.enqueueKey(scan, false); return true }
+        if (scan != null) {
+            input.enqueueKey(scan, false)
+            return true
+        }
         return super.onKeyUp(keyCode, event)
     }
 
@@ -407,6 +707,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         KeyEvent.KEYCODE_F12 -> 0x58
         else -> LETTER_SCAN_CODES[key]
     }
+
     companion object {
         private val LETTER_SCAN_CODES = mapOf(
             KeyEvent.KEYCODE_A to 0x1E, KeyEvent.KEYCODE_B to 0x30, KeyEvent.KEYCODE_C to 0x2E,

@@ -18,11 +18,138 @@ fi
 [[ "$(git -C "$FREERDP_DIR" rev-parse HEAD)" == "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc" ]] || { echo "Unexpected FreeRDP source revision" >&2; exit 1; }
 # A pinned HEAD alone does not establish a reviewed working tree. Allow only
 # the exact idempotent scoped flow-control addition; reject unrelated dirty cache sources.
-if [[ -n "$(git -C "$FREERDP_DIR" diff --name-only HEAD -- | grep -Ev '^libfreerdp/core/(transport|tcp)\.c$')" ]] ||
+if [[ -n "$(git -C "$FREERDP_DIR" diff --name-only HEAD -- | grep -Ev '^(libfreerdp/core/(transport|tcp)|libfreerdp/codec/h264_mediacodec)\.c$')" ]] ||
    [[ -n "$(git -C "$FREERDP_DIR" ls-files --others --exclude-standard)" ]]; then
     echo "Unreviewed FreeRDP working-tree changes" >&2; exit 1
 fi
 python3 "$PROJECT_DIR/scripts/patch-freerdp-flow-control.py" "$FREERDP_DIR"
+python3 - "$FREERDP_DIR/libfreerdp/codec/h264_mediacodec.c" <<'PYMEDIACODEC'
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+src = p.read_text("utf-8")
+if "__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__" not in src:
+    repls = [
+        (
+            "#include <freerdp/config.h>\n",
+            "/* Backport upstream FreeRDP PR #13706 for Android API 26 NDK strict availability */\n"
+            "#define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__\n\n"
+            "#include <freerdp/config.h>\n",
+        ),
+        (
+            "\tAMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PRIORITY, 0);\n",
+            "\tif (__builtin_available(android 28, *))\n"
+            "\t\tAMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PRIORITY, 0);\n",
+        ),
+        (
+            "\tinputFormat = AMediaCodec_getInputFormat(sys->decoder);\n"
+            "\tif (inputFormat == nullptr)\n"
+            "\t{\n"
+            "\t\tWLog_Print(h264->log, WLOG_ERROR, \"AMediaCodec_getInputFormat failed\");\n"
+            "\t\treturn -1;\n"
+            "\t}\n",
+            "\tif (__builtin_available(android 28, *))\n"
+            "\t{\n"
+            "\t\tinputFormat = AMediaCodec_getInputFormat(sys->decoder);\n"
+            "\t\tif (inputFormat == nullptr)\n"
+            "\t\t{\n"
+            "\t\t\tWLog_Print(h264->log, WLOG_ERROR, \"AMediaCodec_getInputFormat failed\");\n"
+            "\t\t\treturn -1;\n"
+            "\t\t}\n"
+            "\t}\n"
+            "\telse\n"
+            "\t\tinputFormat = sys->inputFormat;\n",
+        ),
+        (
+            "\tif (!AMediaFormat_getInt32(sys->outputFormat, AMEDIAFORMAT_KEY_SLICE_HEIGHT,\n"
+            "\t                           &outputSliceHeight) ||\n"
+            "\t    outputSliceHeight < outputHeight)\n"
+            "\t\toutputSliceHeight = outputHeight;\n",
+            "\toutputSliceHeight = outputHeight;\n"
+            "\tif (__builtin_available(android 28, *))\n"
+            "\t{\n"
+            "\t\tint32_t reportedSliceHeight = 0;\n"
+            "\t\tif (AMediaFormat_getInt32(sys->outputFormat, AMEDIAFORMAT_KEY_SLICE_HEIGHT,\n"
+            "\t\t                          &reportedSliceHeight) &&\n"
+            "\t\t    reportedSliceHeight >= outputHeight)\n"
+            "\t\t\toutputSliceHeight = reportedSliceHeight;\n"
+            "\t}\n",
+        ),
+        (
+            "\t\tAMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BITRATE_MODE, MEDIACODEC_BITRATE_MODE_VBR);\n",
+            "\t\tif (__builtin_available(android 28, *))\n"
+            "\t\t\tAMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BITRATE_MODE,\n"
+            "\t\t\t                      MEDIACODEC_BITRATE_MODE_VBR);\n",
+        ),
+        (
+            "\tAMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BITRATE_MODE, MEDIACODEC_BITRATE_MODE_VBR);\n",
+            "\tif (__builtin_available(android 28, *))\n"
+            "\t\tAMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BITRATE_MODE, MEDIACODEC_BITRATE_MODE_VBR);\n",
+        ),
+        (
+            "\tAMediaFormat* inputFormat = AMediaCodec_getInputFormat(sys->encoder);\n"
+            "\tif (inputFormat)\n"
+            "\t{\n"
+            "\t\tint32_t stride = 0;\n"
+            "\t\tint32_t sliceHeight = 0;\n"
+            "\t\tif (AMediaFormat_getInt32(inputFormat, AMEDIAFORMAT_KEY_STRIDE, &stride) &&\n"
+            "\t\t    (stride >= sys->encoderWidth))\n"
+            "\t\t\tsys->encoderStride = stride;\n"
+            "\t\tif (AMediaFormat_getInt32(inputFormat, AMEDIAFORMAT_KEY_SLICE_HEIGHT, &sliceHeight) &&\n"
+            "\t\t    (sliceHeight >= sys->encoderHeight))\n"
+            "\t\t\tsys->encoderSliceHeight = sliceHeight;\n"
+            "\t\tmediacodec_warn(h264->log, AMediaFormat_delete(inputFormat), \"AMediaFormat_delete\");\n"
+            "\t}\n",
+            "\tif (__builtin_available(android 28, *))\n"
+            "\t{\n"
+            "\t\tAMediaFormat* inputFormat = AMediaCodec_getInputFormat(sys->encoder);\n"
+            "\t\tif (inputFormat)\n"
+            "\t\t{\n"
+            "\t\t\tint32_t stride = 0;\n"
+            "\t\t\tint32_t sliceHeight = 0;\n"
+            "\t\t\tif (AMediaFormat_getInt32(inputFormat, AMEDIAFORMAT_KEY_STRIDE, &stride) &&\n"
+            "\t\t\t    (stride >= sys->encoderWidth))\n"
+            "\t\t\t\tsys->encoderStride = stride;\n"
+            "\t\t\tif (AMediaFormat_getInt32(inputFormat, AMEDIAFORMAT_KEY_SLICE_HEIGHT, &sliceHeight) &&\n"
+            "\t\t\t    (sliceHeight >= sys->encoderHeight))\n"
+            "\t\t\t\tsys->encoderSliceHeight = sliceHeight;\n"
+            "\t\t\tmediacodec_warn(h264->log, AMediaFormat_delete(inputFormat), \"AMediaFormat_delete\");\n"
+            "\t\t}\n"
+            "\t}\n",
+        ),
+        (
+            "\tchar* codec_name = nullptr;\n"
+            "\tstatus = AMediaCodec_getName(sys->decoder, &codec_name);\n"
+            "\tif (status != AMEDIA_OK)\n"
+            "\t{\n"
+            "\t\tWLog_Print(h264->log, WLOG_ERROR, \"AMediaCodec_getName failed: %d\", status);\n"
+            "\t\tgoto EXCEPTION;\n"
+            "\t}\n\n"
+            "\tWLog_Print(h264->log, WLOG_DEBUG, \"MediaCodec using %s codec [%s]\", CODEC_NAME, codec_name);\n"
+            "\tAMediaCodec_releaseName(sys->decoder, codec_name);\n",
+            "\tif (__builtin_available(android 28, *))\n"
+            "\t{\n"
+            "\t\tchar* codec_name = nullptr;\n"
+            "\t\tstatus = AMediaCodec_getName(sys->decoder, &codec_name);\n"
+            "\t\tif (status != AMEDIA_OK)\n"
+            "\t\t{\n"
+            "\t\t\tWLog_Print(h264->log, WLOG_ERROR, \"AMediaCodec_getName failed: %d\", status);\n"
+            "\t\t\tgoto EXCEPTION;\n"
+            "\t\t}\n\n"
+            "\t\tWLog_Print(h264->log, WLOG_DEBUG, \"MediaCodec using %s codec [%s]\", CODEC_NAME, codec_name);\n"
+            "\t\tAMediaCodec_releaseName(sys->decoder, codec_name);\n"
+            "\t}\n"
+            "\telse\n"
+            "\t\tWLog_Print(h264->log, WLOG_DEBUG, \"MediaCodec using %s codec\", CODEC_NAME);\n",
+        ),
+    ]
+    for old, new in repls:
+        if src.count(old) != 1:
+            raise SystemExit(f"Expected 1 match in h264_mediacodec.c, got {src.count(old)} for:\n{old[:80]}")
+        src = src.replace(old, new, 1)
+    p.write_text(src, "utf-8")
+PYMEDIACODEC
 python3 - "$PROJECT_DIR" "$FREERDP_DIR" "$BUILD_DIR" "$ABI" <<'PYPROVENANCE'
 import hashlib, importlib.util, json, sys
 from pathlib import Path
@@ -74,6 +201,7 @@ cmake "$FREERDP_DIR" \
     -DWITH_SNDIO=OFF \
     -DWITH_FFMPEG=OFF \
     -DWITH_OPENH264=OFF \
+    -DWITH_MEDIACODEC=ON \
     -DWITH_WEBVIEW=OFF \
     -DWITH_GSM=OFF \
     -DWITH_KRB5=OFF \

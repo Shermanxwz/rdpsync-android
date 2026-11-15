@@ -62,7 +62,8 @@
     <string name="sync_upload">上传本机列表</string>
     <string name="sync_download">下载云端列表</string>
     <string name="sync_file_title">选择同步文件</string>
-    <string name="sync_profile_info">默认：仅设备配置 · rdpsync_profiles.json\n不发送 RDP 密码，不改动旧版云端文件；导入时保留已有本机密码和设备。</string>
+    <string name="sync_profile_info">默认：仅设备配置 · rdpsync_profiles.json
+不发送 RDP 密码，不改动旧版云端文件；导入时保留已有本机密码和设备。</string>
     <string name="sync_legacy">使用旧版含密码文件 rdpsync_devices.json</string>
     <string name="sync_legacy_download">读取旧客户端的备份。文件中的密码将导入本机加密存储；明确的空密码会更新本机密码。</string>
     <string name="sync_legacy_warning">警告：继续会将 RDP 密码以可读明文上传到旧版文件！仅 HTTPS 传输加密，不是端到端加密。服务器和有文件权限的人可读取密码。</string>
@@ -135,7 +136,7 @@
     <string name="quality_a11y">画质上限：%1$s</string>
     <string name="adaptive_quality">自适应网络与渲染负载</string>
     <string name="adaptive_help">自适应基于实测延迟、带宽和渲染耗时，持续变差才降级，恢复后缓慢提高。缺少测量时不会猜测网速。</string>
-    <string name="gesture_help">操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移只改变本地视图。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。</string>
+    <string name="gesture_help">操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。</string>
     <string name="security_help">安全提示：首次连接或证书变化时，必须通过独立渠道核对指纹后授权。这是手动指纹固定（TOFU），不是 CA 身份验证。同步数据可能含凭据，请仅使用受信任的 HTTPS WebDAV。</string>
     <string name="view_diagnostics_full">查看诊断信息</string>
     <string name="certificate_changed">服务器证书已改变</string>
@@ -205,4 +206,11 @@
     <string name="sync_in_progress">正在同步</string>
     <string name="testing_connection">正在测试连接…</string>
     <string name="testing_connection_close">关闭此窗口不会取消正在进行的连接测试。</string>
+    <string name="hud_os_ubuntu_linux">Ubuntu / Linux 远控 · 中文直输已就绪</string>
+    <string name="hud_os_windows_rdp">Windows 远控 · 超低延迟会话</string>
+    <string name="ime_mode_auto">直输:自动</string>
+    <string name="ime_mode_ubuntu_gui">Ubuntu桌面</string>
+    <string name="ime_mode_ubuntu_term">Ubuntu终端</string>
+    <string name="ime_mode_ubuntu_hex">IBus编码</string>
+    <string name="ime_mode_unicode">原生Unicode</string>
 </resources>

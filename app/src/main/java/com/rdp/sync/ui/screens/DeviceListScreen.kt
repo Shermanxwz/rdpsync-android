@@ -1,5 +1,6 @@
 package com.rdp.sync.ui.screens
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -172,15 +173,21 @@ internal fun WebDavSettingsDialog(initialUrl: String, initialUsername: String, i
         }, dismissButton = { TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text(stringResource(if (busy) R.string.close else R.string.cancel)) } })
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DeviceCard(device: Device, compact: Boolean = false, onClick: () -> Unit) {
-    Card(onClick = onClick, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large,
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest)) {
+    Card(
+        onClick = onClick,
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+    ) {
         Column(Modifier.padding(if (compact) 16.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Surface(Modifier.size(if (compact) 32.dp else 44.dp), shape = MaterialTheme.shapes.small,
+                Surface(Modifier.size(if (compact) 36.dp else 44.dp), shape = MaterialTheme.shapes.medium,
                     color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer) {
-                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Computer, null, modifier = Modifier.size(if (compact) 20.dp else 26.dp)) }
+                    Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Computer, null, modifier = Modifier.size(if (compact) 20.dp else 24.dp)) }
                 }
                 Text(device.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
@@ -193,8 +200,21 @@ fun DeviceCard(device: Device, compact: Boolean = false, onClick: () -> Unit) {
                 Text(":${device.port}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, softWrap = false)
             }
-            if (device.username.isNotEmpty()) Text(device.username, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f)) {
+                    Text("${device.width} × ${device.height}", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                }
+                Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f)) {
+                    Text("TLS · NLA", style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp))
+                }
+                if (device.username.isNotEmpty()) {
+                    Text(device.username, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(vertical = 2.dp))
+                }
+            }
             if (device.credentialUnavailable) Text(stringResource(if (device.passwordFormat == 2) R.string.password_missing else R.string.password_locked),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
         }
