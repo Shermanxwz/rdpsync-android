@@ -104,14 +104,13 @@ static DriveHandle* find_handle(RdpDrive* d, uint32_t id) {
     return NULL;
 }
 
-static uint32_t wire_path(const RdpDrive* d, const BYTE* p, size_t bytes, int wildcard, char output[RDP_WS_MAX_PATH + 1]) {
+static uint32_t wire_path_ex(bool direct, const BYTE* p, size_t bytes, int wildcard, char output[RDP_WS_MAX_PATH + 1]) {
     if (bytes % 2 || bytes / 2 > DRIVE_MAX_UTF16) return STATUS_OBJECT_NAME_INVALID;
     size_t units = bytes / 2;
     if (units && get16(p + (units - 1) * 2) == 0) --units;
     WCHAR wide[DRIVE_MAX_UTF16 + 1];
     size_t begin = 0, count = 0;
     uint16_t separator = 0;
-    const bool direct = rdp_ws_is_direct_storage(d->workspace);
     for (size_t i = 0; i < units; ++i) {
         uint16_t ch = get16(p + i * 2);
         if (ch == '\\' || ch == '/') {
@@ -158,6 +157,9 @@ static uint32_t wire_path(const RdpDrive* d, const BYTE* p, size_t bytes, int wi
 out:
     free(utf8); return result;
 }
+static uint32_t wire_path(const BYTE* p, size_t bytes, int wildcard, char output[RDP_WS_MAX_PATH + 1]) {
+    return wire_path_ex(false, p, bytes, wildcard, output);
+}
 
 static int output_room(IRP* irp, size_t length) {
     return length <= RDP_WS_MAX_IO + 2048U && Stream_EnsureRemainingCapacity(irp->output, length);
@@ -183,7 +185,7 @@ static uint32_t process_create(RdpDrive* d, IRP* irp) {
     const uint32_t length = get32(p + 28);
     if (length > Stream_GetRemainingLength(irp->input) - 32) return STATUS_INVALID_PARAMETER;
     char path[RDP_WS_MAX_PATH + 1];
-    uint32_t status = wire_path(d, p + 32, length, 0, path);
+    uint32_t status = wire_path_ex(rdp_ws_is_direct_storage(d->workspace), p + 32, length, 0, path);
     if (status) return status;
     DriveHandle* holder = NULL;
     for (size_t i = 0; i < RDP_WS_MAX_HANDLES; ++i) if (!d->handles[i].id) { holder = &d->handles[i]; break; }
@@ -337,7 +339,7 @@ static uint32_t process_set(RdpDrive* d, IRP* irp) {
             const uint32_t path_length = get32(data + 2);
             if (path_length != length - 6) return STATUS_INVALID_PARAMETER;
             char path[RDP_WS_MAX_PATH + 1];
-            status = wire_path(d, data + 6, path_length, 0, path);
+            status = wire_path_ex(rdp_ws_is_direct_storage(d->workspace), data + 6, path_length, 0, path);
             if (!status) status = rdp_ws_rename(d->workspace, d->owner, irp->FileId, path, data[0] != 0);
             break;
         }
@@ -400,7 +402,7 @@ static uint32_t process_directory(RdpDrive* d, IRP* irp) {
     if (!h) return STATUS_INVALID_HANDLE;
     if (p[4]) {
         char path[RDP_WS_MAX_PATH + 1];
-        uint32_t status = wire_path(d, p + 32, path_length, 1, path);
+        uint32_t status = wire_path_ex(rdp_ws_is_direct_storage(d->workspace), p + 32, path_length, 1, path);
         if (status) return status;
         char* slash = strrchr(path, '/');
         const char* pattern = slash ? slash + 1 : path;

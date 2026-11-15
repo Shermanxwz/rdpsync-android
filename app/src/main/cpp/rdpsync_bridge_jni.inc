@@ -39,15 +39,14 @@ static void* thread_fn(void* arg) {
         if (status != WAIT_TIMEOUT && !freerdp_check_event_handles(instance->context)) {
             if (!freerdp_shall_disconnect_context(instance->context)) {
                 const UINT32 err = freerdp_get_last_error(instance->context);
-                const UINT32 info = freerdp_disconnect_error_info(instance);
                 char diag_line[96];
-                snprintf(diag_line, sizeof(diag_line), "disconnect-error=0x%08x;info=0x%08x", err, info);
+                snprintf(diag_line, sizeof(diag_line), "disconnect-error=0x%08x", (unsigned)err);
                 s_diag(s, diag_line);
                 pthread_mutex_lock(&s->mutex);
                 const int has_err = s->last_error[0] != 0;
                 pthread_mutex_unlock(&s->mutex);
                 if (!has_err) {
-                    if (err) s_error(s, "连接中断 [0x%08x]: %s", err, freerdp_get_last_error_string(err));
+                    if (err) s_error(s, "连接中断 [0x%08x]: %s", (unsigned)err, freerdp_get_last_error_string(err));
                     else s_error(s, "连接中断");
                 }
             }
