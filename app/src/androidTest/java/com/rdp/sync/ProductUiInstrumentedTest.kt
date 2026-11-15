@@ -4,6 +4,7 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.Surface
@@ -145,7 +146,8 @@ class ProductUiInstrumentedTest {
                 compose.activity.setContent {
                     val actualDensity = LocalDensity.current.density
                     CompositionLocalProvider(LocalContext provides localized, LocalConfiguration provides config,
-                        LocalDensity provides Density(actualDensity, fontScale)) {
+                        LocalDensity provides Density(actualDensity, fontScale),
+                        LocalActivityResultRegistryOwner provides base) {
                         RdpSyncTheme(darkTheme = dark) {
                             Surface(Modifier.fillMaxSize()) {
                                 Box(Modifier.fillMaxSize().testTag("product-ui-${screen.value}"), contentAlignment = Alignment.TopCenter) {

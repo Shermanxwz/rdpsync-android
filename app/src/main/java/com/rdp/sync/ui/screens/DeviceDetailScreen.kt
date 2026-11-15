@@ -1,6 +1,7 @@
 package com.rdp.sync.ui.screens
 
 import android.os.Build
+import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
@@ -44,17 +45,20 @@ fun DeviceDetailScreen(
     var pendingEnableAfterGrant by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
 
-    val legacyPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        val granted = results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)
-        hasFileAccess = granted
-        if (granted && pendingEnableAfterGrant) {
-            shareEnabled = true
-            PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
+    val registryOwner = LocalActivityResultRegistryOwner.current
+    val legacyPermissionLauncher = if (registryOwner != null) {
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestMultiplePermissions()
+        ) { results ->
+            val granted = results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)
+            hasFileAccess = granted
+            if (granted && pendingEnableAfterGrant) {
+                shareEnabled = true
+                PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
+            }
+            pendingEnableAfterGrant = false
         }
-        pendingEnableAfterGrant = false
-    }
+    } else null
 
     DisposableEffect(lifecycleOwner, context) {
         val observer = LifecycleEventObserver { _, event ->
@@ -88,7 +92,7 @@ fun DeviceDetailScreen(
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 PhoneStorageAccess.openManageAllFilesSettings(context)
             } else {
-                legacyPermissionLauncher.launch(PhoneStorageAccess.legacyPermissions())
+                legacyPermissionLauncher?.launch(PhoneStorageAccess.legacyPermissions())
             }
         }
     }

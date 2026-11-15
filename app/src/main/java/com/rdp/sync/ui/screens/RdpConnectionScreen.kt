@@ -3,6 +3,7 @@ package com.rdp.sync.ui.screens
 import com.rdp.sync.R
 import com.rdp.sync.ui.components.UiMessages
 import android.os.Build
+import androidx.activity.compose.LocalActivityResultRegistryOwner
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.rdp.sync.storage.PhoneStorageAccess
@@ -327,18 +328,21 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
         isConnected = false
         attempt++
     }
-    val legacyDrivePermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)) {
-            PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
-            showDriveStatus = false
-            sharedDriveMode = SharedDriveMode.READ_WRITE
-            reconnect()
-        } else {
-            driveActionError = context.getString(R.string.phone_storage_permission_needed)
+    val registryOwner = LocalActivityResultRegistryOwner.current
+    val legacyDrivePermLauncher = if (registryOwner != null) {
+        rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.RequestMultiplePermissions()
+        ) { results ->
+            if (results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)) {
+                PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
+                showDriveStatus = false
+                sharedDriveMode = SharedDriveMode.READ_WRITE
+                reconnect()
+            } else {
+                driveActionError = context.getString(R.string.phone_storage_permission_needed)
+            }
         }
-    }
+    } else null
 
     fun exitSession() {
         attemptDriveGrant.requestRevocation()
@@ -536,7 +540,7 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                 PhoneStorageAccess.openManageAllFilesSettings(context)
                 driveActionError = context.getString(R.string.phone_storage_permission_needed)
             } else {
-                legacyDrivePermLauncher.launch(PhoneStorageAccess.legacyPermissions())
+                legacyDrivePermLauncher?.launch(PhoneStorageAccess.legacyPermissions())
             }
         },
         onDismiss = { showDriveStatus = false },
