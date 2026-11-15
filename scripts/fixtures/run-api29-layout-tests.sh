@@ -23,7 +23,7 @@ APP_APK=app/build/outputs/apk/debug/app-debug.apk
 TEST_APK=app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 PACKAGE="$($AAPT dump badging "$APP_APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
 TEST_PACKAGE="$($AAPT dump badging "$TEST_APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
-[[ "$PACKAGE" =~ ^com\.rdp\.sync\.preview[0-9]*$ && "$TEST_PACKAGE" == "$PACKAGE.test" ]]
+[[ "$PACKAGE" =~ ^com\.rdp\.sync(\.preview[0-9]*)?$ && "$TEST_PACKAGE" == "$PACKAGE.test" ]]
 SHA=$(git rev-parse HEAD)
 TREE=$(git rev-parse HEAD^{tree})
 printf '%s\n' "$SHA" >"$OUT/tested-sha.txt"

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.0 - 2026-11-15
+
+- Switched back to the official package identity `com.rdp.sync` (`versionCode = 17`, `versionName = "1.3.0"`), producing verified non-debuggable release APKs alongside debug instrumentation APKs.
+- Replaced the bottom-right floating session menu button with `MagneticEdgeHud` (auto-tucking translucent edge capsule capped at `MAX_FRACTION = 0.78f`) and `SessionImeQuickBar`, eliminating occlusion over the remote desktop's bottom-right taskbar, input indicator, and system tray; refined `DeviceListScreen` spatial layout.
+- Enabled FreeRDP 3.32.2 Android NDK `MediaCodec` H.264 hardware decoding (`-DWITH_MEDIACODEC=ON`, backporting upstream FreeRDP PR #13706 weak-symbol availability guards for `minSdk 26`), runtime `video/avc` hardware decoder detection, 64-bit aligned scanline batch copying, adaptive high-refresh `FramePacer` (`60/90/120/144Hz`), and sub-pixel trackpad ballistics.
+- Added `rdpsync_ubuntu_ime.h` and `LinuxTextInputMode` to deliver direct mobile Chinese/CJK IME commit parity on Ubuntu (`xrdp` / GNOME Remote Desktop) via isolated text-only outbound `CLIPRDR` (`CF_UNICODETEXT` / `UTF8_STRING` + atomic paste) with automatic zero-channel ISO-14755 (`Ctrl+Shift+U`) fallback, strictly isolated from file-transfer consent.
+
 ## 1.2.0-preview.4
 
 - Add a session-menu “Rotate screen” action to switch phone portrait/landscape without restarting the session; restore the prior orientation policy when leaving.

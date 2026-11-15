@@ -15,7 +15,7 @@ def ledger(method):
     prefix = prefix_for(method, spec)
     expected = [f'{prefix}-{x}.png' for x in spec['suffixes']]
     return {'success': True, 'method': method, 'source_commit': COMMIT,
-            'package': 'com.rdp.sync.preview4', 'sdk': 35, 'synthetic_ui_only': True,
+            'package': 'com.rdp.sync', 'sdk': 35, 'synthetic_ui_only': True,
             'credential_screenshots': False, 'physical_foldable_test': False,
             'locale': spec['locale'], 'dark': spec['dark'], 'font_scale': spec['font_scale'],
             'activity_locale': spec['locale'], 'activity_font_scale': spec['font_scale'],
@@ -37,7 +37,7 @@ class UiCollectorTest(unittest.TestCase):
         for method in methods: self.check(ledger(method), method)
 
     def test_wrong_source_and_old_package_fail(self):
-        for key, value in [('source_commit', 'c' * 40), ('package', 'com.rdp.sync.preview2')]:
+        for key, value in [('source_commit', 'c' * 40), ('package', 'com.rdp.sync.preview2'), ('package', 'com.rdp.sync.preview4')]:
             item = ledger('englishLight'); item[key] = value
             with self.assertRaises(AssertionError): self.check(item)
 

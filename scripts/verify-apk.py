@@ -73,9 +73,9 @@ subprocess.run([str(build_tools / "zipalign"), "-c", "-P", "16", "4", str(apk)],
 subprocess.run([str(build_tools / "apksigner"), "verify", "--print-certs", str(apk)], check=True)
 badging = subprocess.check_output([str(build_tools / "aapt"), "dump", "badging", str(apk)], text=True)
 package_line = next(line for line in badging.splitlines() if line.startswith("package:"))
-assert "name='com.rdp.sync.preview4'" in package_line, "Not the authorized side-by-side Preview4 package"
-assert "versionCode='16'" in package_line and "versionName='1.2.0-preview.4-debug'" in package_line, \
-    "Unexpected Preview4 version identity"
+assert "name='com.rdp.sync'" in package_line, f"Unexpected official package identity: {package_line}"
+assert "versionCode='17'" in package_line and "versionName='1.3.0'" in package_line, \
+    f"Unexpected 1.3.0 version identity: {package_line}"
 labels = [line.split(":", 1)[1] for line in badging.splitlines() if line.startswith("application-label") ]
 assert labels and all(label == "'RDPsync'" for label in labels), "App display name must be RDPsync in every locale"
 print("\n".join(line for line in badging.splitlines() if line.startswith(("package:", "native-code:", "sdkVersion:", "targetSdkVersion:"))))

@@ -9,7 +9,14 @@ RDPsync is an open Android RDP client that combines remote desktop connections, 
 [![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-## Preview 4: Phone rotation and RDPsync naming (development preview)
+## Release 1.3.0: Official `com.rdp.sync` package, zero-occlusion HUD, MediaCodec H.264 & Ubuntu Chinese IME
+
+- **Official Package & Version**: Restores the canonical package identity **`com.rdp.sync`** (`versionCode = 17`, `versionName = "1.3.0"`), shipping verified 16 KiB page-aligned `arm64-v8a` release APKs.
+- **Zero Bottom-Right Occlusion (`MagneticEdgeHud`)**: Replaces the bottom-right floating session button with a translucent edge-magnetic capsule (`MAX_FRACTION = 0.78f`) that auto-tucks after idle and never blocks the remote desktop's bottom-right taskbar, input indicator, or system tray.
+- **Hardware MediaCodec H.264 & High-Refresh Pacing**: Enables FreeRDP 3.32.2 Android NDK `MediaCodec` H.264 hardware decoding (`WITH_MEDIACODEC=ON` with API 26 weak-symbol availability guards), 64-bit aligned scanline batch copying, `FramePacer` adaptive `60/90/120/144Hz` vsync pacing, and sub-pixel 1:1 trackpad ballistics.
+- **Ubuntu RDP Native-Equivalent Chinese IME**: Automatically detects non-Windows peers (`xrdp` / GNOME Remote Desktop) where `TS_UNICODE_KEYBOARD_EVENT` is ignored and delivers mobile Chinese/CJK commits via isolated text-only outbound `CLIPRDR` (`CF_UNICODETEXT` / `UTF8_STRING` + atomic paste) with automatic zero-channel ISO-14755 (`Ctrl+Shift+U`) fallback, strictly isolated from file-transfer consent.
+
+## Preview 4: Phone rotation and RDPsync naming (historical notes)
 
 Open the remote session menu and choose **Rotate screen / 旋转屏幕** to switch
 between phone portrait and landscape without moving the handset. This is an
@@ -53,14 +60,7 @@ phone folders. Opening the Shared space browser alone grants no remote access.
 [verification notes](docs/VERIFICATION.md); definitions and host tests are not a
 substitute for an actual mounted drive, stalled-peer recovery or Android UI tests.
 
-The delivery package is **RDPsync** (`com.rdp.sync.preview4`), using a
-development signer. It installs alongside Preview 3; it does not overwrite or
-migrate existing profiles/files, and no uninstall is required. Persistent signing-key
-setup was declined for this iteration. Future differently signed development
-builds cannot be promised to update the same package in place. The published
-[Preview 3 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.3)
-and older releases are preserved unchanged. No physical Windows-server/phone or
-Windows App parity claim is made by the fixture plan.
+The official release package is **RDPsync** (`com.rdp.sync`, `versionName = "1.3.0"`, `versionCode = 17`). Published historical releases ([Preview 4](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.4), [Preview 3](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.3), and earlier) remain preserved unchanged on the Releases page.
 
 ## Published Preview 2 baseline: display, input and compatibility
 
@@ -72,24 +72,23 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 - Fit-window sizing preserves aspect ratio and safely bounds memory; rotation/window changes are debounced. Opening the Android keyboard does not request a remote desktop resize.
 - Adaptive mode uses genuine server-reported RTT/bandwidth plus local bitmap-copy/draw-submission timings. It uses sustained samples and asymmetric cooldowns; idle, absent and stale network reports are not guessed from Wi-Fi/cellular or low frame rate. Some servers do not report network metrics.
 - Quality changes adjust **remote pixel count and local presentation FPS**, not an invented live codec/colour-depth setting. Fixed manual resolutions remain exact when adaptive mode is off.
-- Normal connections include the software RDP Graphics Pipeline (RDPGFX), including RemoteFX Progressive, for servers such as GNOME Remote Desktop that require it. Compatibility mode remains classic GDI; no H.264 capability is advertised without a decoder.
+- Normal connections include the RDP Graphics Pipeline (RDPGFX), including Android NDK `MediaCodec` H.264 hardware decoding when supported by the device/server and RemoteFX Progressive fallback. Compatibility mode remains classic GDI.
 - Native rendering unions all damage until consumed, respects both row strides, and removes redundant channel conversions. A lifecycle-bound Android View polls on vsync without per-frame Compose recomposition.
 - Input is an ordered, bounded worker stream with held mouse buttons, extended keys, IME composition and cancellation/release handling.
 - New/changed TLS certificates stop before login and require explicit fingerprint trust. Saved passwords migrate to device-bound Android Keystore AES-GCM; unavailable credentials remain visible and require deliberate re-entry.
 - Default WebDAV sync uses password-free `rdpsync_profiles.json`; explicit legacy sync uses the separate secret-bearing `rdpsync_devices.json`, without silently overwriting old backups.
 
-**Previous release:** The published Preview 2 APK is `RdpSync Preview 2` (`com.rdp.sync.preview2`), signed with a development key. It installs alongside both the original app and the previously released `com.rdp.sync.preview`; it does **not** overwrite or automatically migrate the original app's saved profiles. Do not uninstall the original app to work around a signature mismatch. Production package identity and signing are unchanged. Development keys can differ between CI runs. The separate Preview 2 identity avoids replacing the old preview, but future Preview 2 APKs are not guaranteed to update each other unless their signing certificates match. Do not uninstall either app as a workaround; preserve its saved profiles and credentials.
-
-**Important limits:** this is not a benchmark claim of Microsoft Windows App equivalence. H.264/hardware video decoding is not enabled; RDPGFX uses software decoding rather than a zero-copy video surface; high-motion/video workloads and actual phone radio/touch/GPU behaviour still require physical-device validation. Server cursor shapes remain a synthetic cursor. GNOME per-user desktop sharing/headless sessions and GDM system Remote Login are distinct: server redirection remains blocked rather than forwarding credentials to an untrusted target. First-use certificate trust requires independent fingerprint verification; local passwords use Android Keystore encryption, while explicitly selected legacy WebDAV sync still contains plaintext passwords and is not end-to-end encrypted. See [SECURITY.md](SECURITY.md), [PRIVACY.md](PRIVACY.md), and [verification notes](docs/VERIFICATION.md).
-
 ## Highlights
 
 - RDP desktop connections powered by FreeRDP through a small JNI bridge.
+- Hardware-accelerated H.264 `MediaCodec` decoding on supported Android devices with software RDPGFX / GDI fallback.
+- Direct mobile Chinese / CJK IME input parity across both Windows and Ubuntu (`xrdp` / GNOME Remote Desktop) hosts.
+- Edge-magnetic `MagneticEdgeHud` session controls with zero bottom-right taskbar occlusion.
 - WebDAV synchronization for saved device profiles across Android devices.
 - Mobile-oriented pointer mode and direct-touch mode.
 - RDPEI native touch input is attempted first in direct-touch drags, with wheel/HWheel fallback if the channel is unavailable.
 - Smooth touch scrolling with wheel batching and fling decay.
-- Android `View` based renderer paced by Android vsync.
+- Android `View` based renderer paced by Android vsync (`60/90/120/144Hz`).
 - Reusable bitmap/frame buffer path to reduce allocations during long sessions.
 - Native dirty-rectangle tracking and `frameId` de-duplication to avoid unnecessary redraws.
 - Server-negotiated dynamic remote resolution, with honest capability fallback and optional measured adaptive quality.
@@ -98,9 +97,9 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 ## Use Cases
 
 - Keep the same RDP server list on several Android phones or tablets.
-- Connect to Windows desktops, Windows Server hosts, or compatible xrdp endpoints from a touch screen.
+- Connect to Windows desktops, Windows Server hosts, or Ubuntu / `xrdp` / GNOME Remote Desktop endpoints from a touch screen.
 - Use a self-hosted WebDAV service such as Nextcloud, Alist, CloudDrive2, or another standards-compatible provider for profile backup.
-- Test or operate remote Windows tools from a mobile device without relying on a proprietary profile sync service.
+- Test or operate remote Windows and Linux tools from a mobile device without relying on a proprietary profile sync service.
 
 ## Feature Overview
 
@@ -114,18 +113,18 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 
 ### Mobile Input
 
-- Pointer mode for trackpad-like cursor control.
+- Pointer mode for trackpad-like cursor control with sub-pixel ballistics.
 - Direct-touch mode for touch-to-coordinate interaction.
 - RDPEI native touch down/move/up/cancel is used first for direct-touch drags when the server negotiates the channel.
-- Unicode text input support.
-- Axis-aware scroll handling and 60 fps wheel event scheduling remain as fallback for servers or builds without RDPEI.
+- Unicode text input on Windows plus automatic outbound text-only `CLIPRDR` / ISO-14755 Chinese & CJK commit support on Ubuntu (`xrdp` / GNOME Remote Desktop).
+- Axis-aware scroll handling and high-refresh wheel event scheduling remain as fallback for servers or builds without RDPEI.
 - Fling velocity smoothing to avoid overly aggressive remote scrolling.
 
 ### Rendering
 
-- FreeRDP classic GDI and software RDPGFX render into the same native primary buffer.
+- FreeRDP classic GDI, `MediaCodec` H.264, and software RDPGFX render into the unified native primary buffer.
 - Graphics surface/cache allocations and output mappings are bounded before delegated decoding; diagnostic codec counters reflect successfully processed commands, not only a requested capability.
-- JNI copies RGBA dirty rows directly into an Android-compatible ARGB_8888 bitmap.
+- JNI copies 64-bit aligned RGBA dirty rows directly into an Android-compatible ARGB_8888 bitmap.
 - A single reusable Android `Bitmap` is retained across frames when size is stable.
 - `frameId` only advances when the native side has a changed frame.
 - Dirty rectangles are tracked by the native bridge and used to reduce pixel copying work.
@@ -139,62 +138,26 @@ The preview starts every session in **direct-touch, fullscreen mode**. The small
 - URLs are normalized so a mistakenly entered file URL can be treated as its parent collection.
 - Merge uses a stable connection/account key including host, port, username, domain and server name. Omitted passwords preserve matching local secrets; imports retain unmatched local profiles.
 
-### Explicit File Transfer (Preview 2)
+### Explicit File Transfer
 
-- Open **会话菜单 → 发送文件 / 接收文件**. File transfer is off by default. Its first activation requires an explicit reconnect confirmation because the file-only clipboard channel is negotiated at connection start. This is not automatic text clipboard synchronization or phone-drive redirection.
+- Open **会话菜单 → 发送文件 / 接收文件**. File transfer is off by default. Its first activation requires an explicit reconnect confirmation because the file-only clipboard channel is negotiated at connection start. This is strictly isolated from text IME clipboard commits and does not expose phone directories.
 - **Send:** select regular files using Android's system picker, stage private snapshots, then explicitly choose **提供给远程剪贴板**. Paste in the remote file manager. Serving bytes is not proof that the remote application saved them; confirm the remote files yourself.
 - **Receive:** copy files in the remote file manager, choose **读取远程文件列表**, then confirm receipt. Contents are downloaded only after confirmation. Export each complete file by selecting a destination directory; the app creates a new name and does not overwrite existing files.
-- The initial send allowance is **32 MiB cumulatively per RDP connection**, including repeated range requests. Remaining allowance is shown before publishing; cancelling or replacing an offer does not reset it. Reconnecting is always an explicit choice and withdraws the old offer. On servers without clipboard snapshot locking, stopping an offer works immediately, but publishing a subsequent or replacement file list requires a manual reconnect; the app explains this instead of endlessly retrying or exposing a new list through stale requests. Incoming files are limited to 128 MiB each, 64 files and 256 MiB total private staging, with a 64 MiB free-space reserve. These are safety limits, not Windows App large-file parity.
-- Only ordinary files are supported; folders, shortcuts and virtual documents are rejected. Closing the file dialog does not withdraw an explicitly published snapshot; **停止共享**, leaving the session or disconnecting does. A recipient may already have copied bytes, which cannot be recalled.
-- Support depends on the server and remote file manager. Unsupported file-clipboard capability is reported; there is no fallback that exposes a phone directory. Actual GNOME, xrdp and Windows results must be distinguished in the [verification notes](docs/VERIFICATION.md).
+- The initial send allowance is **32 MiB cumulatively per RDP connection**, including repeated range requests. Incoming files are limited to 128 MiB each, 64 files and 256 MiB total private staging, with a 64 MiB free-space reserve.
+- Only ordinary files are supported; folders, shortcuts and virtual documents are rejected. Closing the file dialog does not withdraw an explicitly published snapshot; **停止共享**, leaving the session or disconnecting does.
 
 ## Architecture
 
 | Area | Implementation |
 | --- | --- |
-| UI | Jetpack Compose screens plus `RdpDesktopView` for the live desktop |
+| UI | Jetpack Compose screens plus `RdpDesktopView` & `MagneticEdgeHud` for the live desktop |
 | State | ViewModel, Kotlin Flow, Compose state |
 | Local data | Room database for device profiles, SharedPreferences for WebDAV settings |
 | Sync | OkHttp WebDAV client, JSON payload format |
-| RDP engine | FreeRDP 3.x native libraries |
-| Native bridge | C/JNI bridge in `app/src/main/cpp/freerdp_bridge.c` |
-| Crypto/TLS dependency | OpenSSL built for Android and linked with FreeRDP |
+| RDP engine | FreeRDP 3.32.2 native libraries (`WITH_MEDIACODEC=ON`) |
+| Native bridge | C/JNI bridge in `app/src/main/cpp/freerdp_bridge.c` + `rdpsync_ubuntu_ime.h` |
+| Crypto/TLS dependency | OpenSSL 3.5.9 LTS built for Android and linked with FreeRDP |
 | Build | Gradle, Android Gradle Plugin, CMake, Android NDK |
-
-### Data Flow
-
-```text
-Compose screens
-  -> DeviceViewModel
-  -> Room / SharedPreferences / SyncManager
-  -> WebDavSyncService
-  -> WebDAV collection / rdpsync_profiles.json (or explicit legacy rdpsync_devices.json)
-```
-
-```text
-RdpConnectionScreen
-  -> RdpConnector Kotlin wrapper
-  -> JNI native bridge
-  -> FreeRDP instance and GDI callbacks
-  -> native frame buffer + dirty rectangle metadata
-  -> RdpDesktopView bitmap copy and canvas draw
-```
-
-### Native Render Loop
-
-```text
-FreeRDP EndPaint callback
-  -> read GDI invalid region
-  -> copy valid RGBA dirty rows using the GDI stride
-  -> union pending dirty regions and increment frameId
-  -> Kotlin checks frameId
-  -> copy frame into reusable Bitmap
-  -> Android View draws on the next invalidation
-```
-
-## Scope
-
-RdpSync combines open-source Android RDP with WebDAV profile portability. The preview improves correctness and interaction in that scope; it does not claim every feature or performance characteristic of mature commercial clients. Android emulator tests exercise real isolated RDP sessions, but are not physical-phone or Windows-server certification.
 
 ## Privacy Model
 
@@ -204,9 +167,7 @@ RdpSync is designed to avoid project-owned cloud services.
 - No advertising SDK is included.
 - RDP passwords are stored locally using device-bound Android Keystore authenticated encryption.
 - The saved WebDAV password uses the same encrypted storage; endpoint and account metadata are not encrypted.
-- When WebDAV sync is used, device profiles are uploaded to the WebDAV server selected by the user.
 - Default WebDAV JSON includes connection metadata but omits passwords. Explicit legacy sync includes plaintext passwords.
-- Use trusted HTTPS WebDAV endpoints. Password-inclusive sync is not end-to-end encrypted; old secret-bearing files are not automatically removed.
 
 For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
@@ -214,32 +175,15 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 ### Download
 
-Get the latest APK from the project's GitHub Releases page.
+Get the latest `RDPsync-v1.3.0-arm64-v8a.apk` (`com.rdp.sync`, `versionCode 17`) from the project's [GitHub Releases](https://github.com/Shermanxwz/rdpsync-android/releases) page.
 
-- The existing [Preview 2 release](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.1.0-preview.2) remains unchanged; its APK does not include Preview 3 changes.
-- For Preview 3 (`1.2.0-preview.3-debug`, `com.rdp.sync.preview3`), use only the APK attached to a tagged GitHub Release with its exact-commit acceptance report. Source code and CI artifacts alone are not a published release; the release carries the verified download details.
 - Minimum Android version: Android 8.0, API 26
-- Current packaged ABI target: `arm64-v8a`
-
-### Basic Usage
-
-1. Add a device profile with host, port, credentials, optional domain, and resolution.
-2. Open the device and start an RDP session.
-3. Switch between pointer mode and direct-touch mode from the connection screen.
-4. Optionally configure WebDAV sync and use upload, download, or merge.
-
-### Build Requirements
-
-- JDK 21 or compatible JDK for the Android build.
-- Android SDK with API 35.
-- Android NDK installed locally.
-- CMake and Ninja through the Android SDK tooling.
-- FreeRDP and OpenSSL Android native libraries built before APK packaging.
+- Packaged ABI target: `arm64-v8a` (16 KiB ELF page-aligned)
 
 ### Build Commands
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/Shermanxwz/rdpsync-android.git
 cd rdpsync-android
 
 export ANDROID_HOME=/path/to/android-sdk
@@ -247,38 +191,7 @@ export JAVA_HOME=/path/to/jdk-21
 bash scripts/build-apk.sh
 ```
 
-`scripts/build-apk.sh` builds pinned FreeRDP 3.32.2 and OpenSSL 3.5.9 LTS from verified source, then tests/lints/packages a side-by-side preview. It uses NDK 28.0.13004108 and places generated `.so` files under `app/src/main/jniLibs/arm64-v8a/`. Override `ANDROID_NDK` if needed. The `ABI=x86_64` native build and Gradle `-PnativeAbis=x86_64` are used only for emulator testing. These native outputs and APK artifacts are intentionally ignored by Git.
-
-## Project Layout
-
-```text
-.
-├── app/src/main/cpp/
-│   ├── freerdp_bridge.c          # FreeRDP lifecycle, JNI calls, frame buffer bridge
-│   ├── freerdp_client_stub.c     # Native client stub symbols
-│   └── CMakeLists.txt
-├── app/src/main/java/com/rdp/sync/
-│   ├── data/                     # Room entity and DAO
-│   ├── database/                 # Room database singleton
-│   ├── manager/                  # Sync orchestration and merge logic
-│   ├── network/                  # RDP wrapper and WebDAV service
-│   ├── repository/               # Device repository
-│   ├── ui/                       # Compose screens, navigation, theme, RDP view
-│   └── viewmodel/                # DeviceViewModel and UI state
-├── scripts/                      # Native dependency and APK build scripts
-├── assets/                       # Source icon asset
-├── CHANGELOG.md
-├── CONTRIBUTING.md
-├── PRIVACY.md
-└── SECURITY.md
-```
-
-## Roadmap
-
-- Multi-ABI release builds.
-- Dedicated non-debug release signing key.
-- Import/export format documentation.
-- Broader physical-device, Windows-server, codec and enterprise identity validation.
+`scripts/build-apk.sh` builds pinned FreeRDP 3.32.2 and OpenSSL 3.5.9 LTS from verified source, runs unit tests and Lint, packages and verifies `RDPsync-v1.3.0-arm64-v8a.apk` (`com.rdp.sync`), and outputs its SHA-256 digest.
 
 ## Contributing
 
