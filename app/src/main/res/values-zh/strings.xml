@@ -112,7 +112,7 @@
     <string name="reconnect_title">重新连接远程桌面？</string>
     <string name="reconnect_body">这会短暂断开当前连接，并用所选分辨率重新连接。不会替你保存远程程序中的工作。</string>
     <string name="text_field">文字</string>
-    <string name="text_input_help">文字将作为键盘输入发送；不覆盖远程剪贴板。</string>
+    <string name="text_input_help">直接将中文、英文或符号粘贴到远程焦点窗口，不会触发远程拼音候选框。</string>
     <string name="send">发送</string>
     <string name="diagnostics">诊断信息</string>
     <string name="copy_close">复制并关闭</string>
@@ -136,7 +136,7 @@
     <string name="quality_a11y">画质上限：%1$s</string>
     <string name="adaptive_quality">自适应网络与渲染负载</string>
     <string name="adaptive_help">自适应基于实测延迟、带宽和渲染耗时，持续变差才降级，恢复后缓慢提高。缺少测量时不会猜测网速。</string>
-    <string name="gesture_help">操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。</string>
+    <string name="gesture_help">操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移只改变本地视图。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。</string>
     <string name="security_help">安全提示：首次连接或证书变化时，必须通过独立渠道核对指纹后授权。这是手动指纹固定（TOFU），不是 CA 身份验证。同步数据可能含凭据，请仅使用受信任的 HTTPS WebDAV。</string>
     <string name="view_diagnostics_full">查看诊断信息</string>
     <string name="certificate_changed">服务器证书已改变</string>
@@ -213,4 +213,9 @@
     <string name="ime_mode_ubuntu_term">Ubuntu终端</string>
     <string name="ime_mode_ubuntu_hex">IBus编码</string>
     <string name="ime_mode_unicode">原生Unicode</string>
+    <string name="phone_storage_share_title">共享手机存储（Android 上的 RdpSync）</string>
+    <string name="phone_storage_share_ready">已就绪 · 连接后直接读写手机真实的 Download、DCIM、Documents 等目录</string>
+    <string name="phone_storage_share_desc">开启并授予 Android 文件访问权限后，电脑 Android 上的 RdpSync 里可直接读写手机真实的 Download、DCIM、Documents 等目录</string>
+    <string name="phone_storage_grant_action">授予文件访问权限</string>
+    <string name="phone_storage_permission_needed">请先在系统设置中授予文件访问权限，返回后再次点击即可挂载手机真实存储。</string>
 </resources>

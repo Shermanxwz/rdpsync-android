@@ -9,21 +9,16 @@
       "actual_width_dp": 320,
       "suffixes": [
         "drive-stop-confirmation",
-        "drive-write-consent",
         "editor-validation",
         "error",
         "locked",
         "plaintext-warning",
         "previous-fingerprint",
         "profiles",
-        "progress",
         "save-busy-action",
         "session-menu-open",
         "session-menu-shortcuts",
-        "settings-options",
-        "space-busy-error",
-        "space-invalid-name",
-        "space_delete_dialog"
+        "settings-options"
       ]
     },
     "expandedWidth": {
@@ -34,15 +29,10 @@
       "suffixes": [
         "changed",
         "detail",
-        "drive_consent",
         "editor",
-        "preconnect-drive-consent",
         "profiles",
         "session-menu-open",
-        "settings-options",
-        "space",
-        "space_name_rename",
-        "staged"
+        "settings-options"
       ]
     },
     "englishLight": {
@@ -54,10 +44,8 @@
         "changed",
         "delete-confirmation",
         "detail",
-        "drive-write-consent",
         "drive_accepted",
         "drive_accepted_rw",
-        "drive_consent",
         "drive_off",
         "drive_requested",
         "drive_revoked",
@@ -66,10 +54,6 @@
         "empty",
         "plaintext-warning",
         "profiles",
-        "receive",
-        "space",
-        "space_progress",
-        "staged",
         "trust",
         "webdav"
       ]
@@ -82,13 +66,10 @@
       "suffixes": [
         "changed",
         "detail",
-        "drive-write-consent",
         "editor",
         "profiles",
         "session-menu-open",
         "settings",
-        "space",
-        "staged",
         "webdav"
       ]
     },
@@ -100,12 +81,9 @@
       "suffixes": [
         "detail",
         "drive_accepted",
-        "drive_consent",
         "editor",
         "empty",
         "profiles",
-        "receive",
-        "space",
         "trust",
         "webdav"
       ]
@@ -117,14 +95,11 @@
       "actual_width_dp": 320,
       "suffixes": [
         "changed",
-        "drive-write-consent",
         "editor",
         "plaintext-warning",
         "profiles",
         "session-menu-open",
         "settings",
-        "space",
-        "staged",
         "webdav"
       ]
     }

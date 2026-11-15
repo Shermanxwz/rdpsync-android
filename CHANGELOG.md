@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.1 - 2026-11-15
+
+- Fixed IPv4 post-connect session disconnects (`frame=0x0`) on Windows RDP hosts by disabling unnegotiated byte-buffer `GfxH264` defaults while retaining `GfxSmallCache`, enabling TCP KeepAlive (`15s / 5s / 3`), accepting Windows `rdpclip.exe` `CB_TEMP_DIRECTORY (0x0006)` PDUs, and making text-only `CLIPRDR` resilient to nonstandard remote clipboard frames without tearing down the session.
+- Fixed Ubuntu (`xrdp` X11 and GNOME Remote Desktop Wayland) direct mobile Chinese/CJK IME input and `"发送文字"` (`Send Text`): added `xrdp` 4-byte zero-trailer peer fingerprinting alongside FreeRDP `CAPSTYPE_GENERAL` `OSMAJORTYPE_UNIX` detection, pure-text `CB_FORMAT_LIST` (`CF_UNICODETEXT` / `UTF8_STRING` without `FileGroupDescriptorW` interference), X11 selection-ownership settle timing, and universal clipboard-paste bulk text delivery so neither Chinese nor English triggers remote Pinyin candidate bars.
+- Replaced the private app-confined `Shared space` and redundant file-transfer menus with Microsoft Windows App–style direct phone storage redirection (`Android 上的 RdpSync` / `RdpSync on Android`): once Android file access (`MANAGE_EXTERNAL_STORAGE` / storage runtime permission) is granted, remote desktops directly read and write real phone folders (`Download`, `DCIM`, `Documents`, `Pictures`, etc.).
+
 ## 1.3.0 - 2026-11-15
 
 - Switched back to the official package identity `com.rdp.sync` (`versionCode = 17`, `versionName = "1.3.0"`), producing verified non-debuggable release APKs alongside debug instrumentation APKs.

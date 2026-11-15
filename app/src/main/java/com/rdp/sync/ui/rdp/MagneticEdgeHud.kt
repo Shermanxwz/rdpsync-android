@@ -429,28 +429,15 @@ internal fun MagneticEdgeHud(
 
                         HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                        // Tier 4: Compact System, Clipboard & Shared Space Actions
+                        // Tier 4: Streamlined Display, Direct Text Paste & Phone Storage Drive
                         HudActionRow(Icons.Default.Tune, context.getString(R.string.display_settings), true) {
                             expanded = false; onSettings()
                         }
                         HudActionRow(Icons.Default.ContentPaste, context.getString(R.string.send_text), connected) {
                             expanded = false; onPaste()
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            HudMiniActionButton(context.getString(R.string.space_title), true, Modifier.weight(1f)) {
-                                expanded = false; onSharedSpace()
-                            }
-                            HudMiniActionButton(context.getString(R.string.drive_status_title), true, Modifier.weight(1f)) {
-                                expanded = false; onSharedDrive()
-                            }
-                        }
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.fillMaxWidth()) {
-                            HudMiniActionButton(context.getString(R.string.send_files), connected, Modifier.weight(1f)) {
-                                expanded = false; onSendFiles()
-                            }
-                            HudMiniActionButton(context.getString(R.string.receive_files), connected, Modifier.weight(1f)) {
-                                expanded = false; onReceiveFiles()
-                            }
+                        HudActionRow(Icons.Default.FolderShared, context.getString(R.string.drive_status_title), true) {
+                            expanded = false; onSharedDrive()
                         }
                     }
                 }

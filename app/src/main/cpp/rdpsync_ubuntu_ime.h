@@ -24,7 +24,8 @@ enum {
     RDPSYNC_LINUX_TEXT_GUI_PASTE = 1,
     RDPSYNC_LINUX_TEXT_TERM_PASTE = 2,
     RDPSYNC_LINUX_TEXT_IBUS_HEX = 3,
-    RDPSYNC_LINUX_TEXT_UNICODE = 4
+    RDPSYNC_LINUX_TEXT_UNICODE = 4,
+    RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE = 5
 };
 
 /* Strict RFC-3629 UTF-8 decoder. Returns 1 on codepoint, 0 at end, -1 on invalid byte. */

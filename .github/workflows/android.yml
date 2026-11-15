@@ -70,15 +70,15 @@ jobs:
         run: |
           python3 scripts/verify-apk.py app/build/outputs/apk/debug/app-debug.apk
           python3 scripts/verify-apk.py app/build/outputs/apk/release/app-release.apk | tee build/apk-verification.txt
-          cp app/build/outputs/apk/release/app-release.apk RDPsync-v1.3.0-arm64-v8a.apk
-          sha256sum RDPsync-v1.3.0-arm64-v8a.apk | tee RDPsync-v1.3.0-arm64-v8a.apk.sha256
+          cp app/build/outputs/apk/release/app-release.apk RDPsync-v1.3.1-arm64-v8a.apk
+          sha256sum RDPsync-v1.3.1-arm64-v8a.apk | tee RDPsync-v1.3.1-arm64-v8a.apk.sha256
       - name: Upload installable release APK and evidence
         uses: actions/upload-artifact@v4
         with:
           name: rdpsync-release-arm64-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
-            RDPsync-v1.3.0-arm64-v8a.apk
-            RDPsync-v1.3.0-arm64-v8a.apk.sha256
+            RDPsync-v1.3.1-arm64-v8a.apk
+            RDPsync-v1.3.1-arm64-v8a.apk.sha256
             build/apk-verification.txt
             build/freerdp-android/rdpsync-native-provenance-arm64-v8a.json
           if-no-files-found: error

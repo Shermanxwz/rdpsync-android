@@ -77,8 +77,6 @@ static uint64_t filetime(int64_t millis) {
     return DRIVE_FILETIME_EPOCH + (uint64_t)millis * 10000;
 }
 static void write_file_times(wStream* output, const RdpWorkspaceEntry* entry) {
-    /* Android/POSIX stat has no portable birth time. Zero is explicitly
-     * unknown, not a relabelled change/modified timestamp. */
     Stream_Write_UINT64(output, 0);
     Stream_Write_UINT64(output, filetime(entry->access_millis));
     Stream_Write_UINT64(output, filetime(entry->modified_millis));
@@ -106,25 +104,22 @@ static DriveHandle* find_handle(RdpDrive* d, uint32_t id) {
     return NULL;
 }
 
-/* Strict UTF-16 wire decoding. Accept homogeneous Windows or POSIX separators
- * (pinned xrdp open sends POSIX paths), with one optional device-root prefix
- * and final NUL. Canonicalize only separators, never traversal/empty components.
- * Mixed separators, alternate streams and malformed Unicode remain rejected. */
-static uint32_t wire_path(const BYTE* p, size_t bytes, int wildcard, char output[RDP_WS_MAX_PATH + 1]) {
+static uint32_t wire_path(const RdpDrive* d, const BYTE* p, size_t bytes, int wildcard, char output[RDP_WS_MAX_PATH + 1]) {
     if (bytes % 2 || bytes / 2 > DRIVE_MAX_UTF16) return STATUS_OBJECT_NAME_INVALID;
     size_t units = bytes / 2;
     if (units && get16(p + (units - 1) * 2) == 0) --units;
     WCHAR wide[DRIVE_MAX_UTF16 + 1];
     size_t begin = 0, count = 0;
     uint16_t separator = 0;
+    const bool direct = rdp_ws_is_direct_storage(d->workspace);
     for (size_t i = 0; i < units; ++i) {
         uint16_t ch = get16(p + i * 2);
         if (ch == '\\' || ch == '/') {
-            if (separator && separator != ch) return STATUS_OBJECT_NAME_INVALID;
+            if (!direct && separator && separator != ch) return STATUS_OBJECT_NAME_INVALID;
             separator = ch;
         }
     }
-    if (units && separator && get16(p) == separator) begin = 1;
+    if (units && separator && (get16(p) == '\\' || get16(p) == '/')) begin = 1;
     for (size_t i = begin; i < units; ++i) {
         uint16_t ch = get16(p + i * 2);
         if (!ch || ch < 32 || ch == ':' || ch == '|' || ch == '<' || ch == '>' || ch == '"')
@@ -147,10 +142,11 @@ static uint32_t wire_path(const BYTE* p, size_t bytes, int wildcard, char output
     uint32_t result = STATUS_OBJECT_NAME_INVALID;
     if (utf8_len > RDP_WS_MAX_PATH) goto out;
     size_t start = 0, depth = 0;
+    const size_t max_depth = direct ? RDP_WS_DIRECT_MAX_DEPTH : RDP_WS_MAX_DEPTH;
     for (size_t i = 0; i <= utf8_len; ++i) {
         if (i < utf8_len && utf8[i] != '/') continue;
         const size_t length = i - start;
-        if (!length || length > RDP_WS_MAX_NAME || ++depth > RDP_WS_MAX_DEPTH ||
+        if (!length || length > RDP_WS_MAX_NAME || ++depth > max_depth ||
             (length == 1 && utf8[start] == '.') ||
             (length == 2 && utf8[start] == '.' && utf8[start + 1] == '.') ||
             utf8[i - 1] == '.' || utf8[i - 1] == ' ') goto out;
@@ -172,7 +168,6 @@ static int input_bytes(IRP* irp, size_t length, const BYTE** data) {
     return 1;
 }
 static void empty_response(IRP* irp) {
-    /* Every response retains its common header. Never leak a cancelled payload. */
     (void)Stream_SetPosition(irp->output, RDPDR_DEVICE_IO_RESPONSE_LENGTH);
     if (!output_room(irp, 5)) return;
     Stream_Write_UINT32(irp->output, 0);
@@ -182,21 +177,23 @@ static void empty_response(IRP* irp) {
 static uint32_t process_create(RdpDrive* d, IRP* irp) {
     const BYTE* p;
     if (!input_bytes(irp, 32, &p)) return STATUS_INVALID_PARAMETER;
-    if (get32(p + 12) & ~(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_DIRECTORY)) return STATUS_NOT_SUPPORTED;
+    const bool direct = rdp_ws_is_direct_storage(d->workspace);
+    if (!direct && (get32(p + 12) & ~(FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_ARCHIVE | FILE_ATTRIBUTE_DIRECTORY)))
+        return STATUS_NOT_SUPPORTED;
     const uint32_t length = get32(p + 28);
     if (length > Stream_GetRemainingLength(irp->input) - 32) return STATUS_INVALID_PARAMETER;
     char path[RDP_WS_MAX_PATH + 1];
-    uint32_t status = wire_path(p + 32, length, 0, path);
+    uint32_t status = wire_path(d, p + 32, length, 0, path);
     if (status) return status;
     DriveHandle* holder = NULL;
     for (size_t i = 0; i < RDP_WS_MAX_HANDLES; ++i) if (!d->handles[i].id) { holder = &d->handles[i]; break; }
     if (!holder) return STATUS_INSUFFICIENT_RESOURCES;
     uint32_t handle = 0, information = 0;
-    /* xrdp includes WRITE_DAC in its fixed ordinary-create access mask.
-     * This device has no ACL operations: tolerate that ancillary intent only
-     * in explicit RW mode, without granting it to the broker handle. */
     uint32_t desired_access = get32(p);
-    if (desired_access & WRITE_DAC) {
+    if (direct) {
+        if ((desired_access & (WRITE_DAC | 0x00080000U)) && d->mode != 2) return STATUS_ACCESS_DENIED;
+        desired_access &= ~(WRITE_DAC | 0x00080000U);
+    } else if (desired_access & WRITE_DAC) {
         if (d->mode != 2) return STATUS_ACCESS_DENIED;
         const uint32_t options = get32(p + 24);
         const uint32_t attrs = get32(p + 12);
@@ -208,8 +205,6 @@ static uint32_t process_create(RdpDrive* d, IRP* irp) {
     }
     status = rdp_ws_open(d->workspace, d->owner, path, desired_access, get32(p + 16),
         get32(p + 20), get32(p + 24), d->mode == 1, get64(p + 4), &handle, &information);
-    /* Match stock FreeRDP CREATE: a missing name is NO_SUCH_FILE on wire.
-     * Keep broker/JNI errors and all other broker errors distinct. */
     if (status == RDP_WS_OBJECT_NAME_NOT_FOUND) return STATUS_NO_SUCH_FILE;
     if (status) return status;
     if (!handle || !output_room(irp, 5)) {
@@ -259,8 +254,10 @@ static uint32_t process_query(RdpDrive* d, IRP* irp) {
     RdpWorkspaceEntry e;
     uint32_t status = rdp_ws_stat(d->workspace, d->owner, irp->FileId, &e);
     if (status) return status;
-    if (!output_room(irp, 48)) return STATUS_INSUFFICIENT_RESOURCES;
-    switch (get32(p)) {
+    if (!output_room(irp, 64)) return STATUS_INSUFFICIENT_RESOURCES;
+    const bool direct = rdp_ws_is_direct_storage(d->workspace);
+    const uint32_t info_class = get32(p);
+    switch (info_class) {
         case FileBasicInformation:
             Stream_Write_UINT32(irp->output, 36);
             write_file_times(irp->output, &e);
@@ -275,7 +272,22 @@ static uint32_t process_query(RdpDrive* d, IRP* irp) {
             Stream_Write_UINT32(irp->output, 8);
             Stream_Write_UINT32(irp->output, attributes(&e) | (d->mode == 1 ? FILE_ATTRIBUTE_READONLY : 0));
             Stream_Write_UINT32(irp->output, 0); break;
-        default: return STATUS_NOT_SUPPORTED;
+        default:
+            if (direct && info_class == 6U) { /* FileInternalInformation */
+                Stream_Write_UINT32(irp->output, 8);
+                Stream_Write_UINT64(irp->output, e.inode);
+                break;
+            }
+            if (direct && info_class == 34U) { /* FileNetworkOpenInformation */
+                Stream_Write_UINT32(irp->output, 56);
+                write_file_times(irp->output, &e);
+                Stream_Write_UINT64(irp->output, e.size);
+                Stream_Write_UINT64(irp->output, e.size);
+                Stream_Write_UINT32(irp->output, attributes(&e) | (d->mode == 1 ? FILE_ATTRIBUTE_READONLY : 0));
+                Stream_Write_UINT32(irp->output, 0);
+                break;
+            }
+            return STATUS_NOT_SUPPORTED;
     }
     return STATUS_SUCCESS;
 }
@@ -285,27 +297,23 @@ static uint32_t process_set(RdpDrive* d, IRP* irp) {
     const uint32_t type = get32(p), length = get32(p + 4);
     if (length > Stream_GetRemainingLength(irp->input) - 32) return STATUS_INVALID_PARAMETER;
     const BYTE* data = p + 32;
+    const bool direct = rdp_ws_is_direct_storage(d->workspace);
     uint32_t status = STATUS_NOT_SUPPORTED;
     switch (type) {
         case FileEndOfFileInformation:
         case FileAllocationInformation:
             if (length != 8) return STATUS_INVALID_PARAMETER;
-            /* Shrinking allocation truncates EOF by NT semantics. Growing
-             * allocation requires durable reservation accounting we do not
-             * implement; never return fake successful preallocation. */
             if (type == FileAllocationInformation) {
                 RdpWorkspaceEntry e;
                 status = rdp_ws_stat(d->workspace, d->owner, irp->FileId, &e);
                 if (!status && get64(data) < e.size) status = rdp_ws_truncate(d->workspace, d->owner, irp->FileId, get64(data));
-                else if (!status && get64(data) > e.size) status = STATUS_NOT_SUPPORTED;
+                else if (!status && get64(data) > e.size && !direct) status = STATUS_NOT_SUPPORTED;
             } else status = rdp_ws_truncate(d->workspace, d->owner, irp->FileId, get64(data));
             break;
         case FileBasicInformation: {
             if (length != 36) return STATUS_INVALID_PARAMETER;
-            /* This filesystem has no settable birth/change time; do not claim
-             * to have persisted NT metadata that Android cannot represent. */
-            if ((get64(data) && get64(data) != UINT64_MAX) ||
-                (get64(data + 24) && get64(data + 24) != UINT64_MAX)) return STATUS_NOT_SUPPORTED;
+            if (!direct && ((get64(data) && get64(data) != UINT64_MAX) ||
+                (get64(data + 24) && get64(data + 24) != UINT64_MAX))) return STATUS_NOT_SUPPORTED;
             const uint64_t at = get64(data + 8), mt = get64(data + 16);
             if ((at && at != UINT64_MAX && at < DRIVE_FILETIME_EPOCH) ||
                 (mt && mt != UINT64_MAX && mt < DRIVE_FILETIME_EPOCH)) return STATUS_INVALID_PARAMETER;
@@ -315,8 +323,6 @@ static uint32_t process_set(RdpDrive* d, IRP* irp) {
             break;
         }
         case FileDispositionInformation:
-            /* Stock FreeRDP defines legacy length-zero as delete=true.
-             * Ordinary one-byte requests retain strict per-handle DELETE rights. */
             if (!length) {
                 if (Stream_GetRemainingLength(irp->input) != 32) return STATUS_INVALID_PARAMETER;
                 if (d->mode != 2) return STATUS_ACCESS_DENIED;
@@ -327,11 +333,11 @@ static uint32_t process_set(RdpDrive* d, IRP* irp) {
             }
             break;
         case FileRenameInformation: {
-            if (length < 6 || data[0] > 1 || data[1] != 0) return STATUS_INVALID_PARAMETER;
+            if (length < 6 || data[0] > 1 || (!direct && data[1] != 0)) return STATUS_INVALID_PARAMETER;
             const uint32_t path_length = get32(data + 2);
             if (path_length != length - 6) return STATUS_INVALID_PARAMETER;
             char path[RDP_WS_MAX_PATH + 1];
-            status = wire_path(data + 6, path_length, 0, path);
+            status = wire_path(d, data + 6, path_length, 0, path);
             if (!status) status = rdp_ws_rename(d->workspace, d->owner, irp->FileId, path, data[0] != 0);
             break;
         }
@@ -348,7 +354,11 @@ static uint32_t process_volume(RdpDrive* d, IRP* irp) {
     RdpWorkspaceSpace space;
     uint32_t status = rdp_ws_space(d->workspace, &space);
     if (status) return status;
-    const uint64_t total = RDP_WS_MAX_BYTES / 4096, available = space.available_bytes / 4096;
+    const bool direct = rdp_ws_is_direct_storage(d->workspace);
+    const uint64_t total_bytes = direct
+        ? (space.used_bytes > UINT64_MAX - space.available_bytes ? UINT64_MAX : space.used_bytes + space.available_bytes)
+        : RDP_WS_MAX_BYTES;
+    const uint64_t total = total_bytes / 4096, available = space.available_bytes / 4096;
     switch (get32(p)) {
         case FileFsVolumeInformation: {
             const WCHAR label[] = {'R','d','p','S','y','n','c'};
@@ -390,7 +400,7 @@ static uint32_t process_directory(RdpDrive* d, IRP* irp) {
     if (!h) return STATUS_INVALID_HANDLE;
     if (p[4]) {
         char path[RDP_WS_MAX_PATH + 1];
-        uint32_t status = wire_path(p + 32, path_length, 1, path);
+        uint32_t status = wire_path(d, p + 32, path_length, 1, path);
         if (status) return status;
         char* slash = strrchr(path, '/');
         const char* pattern = slash ? slash + 1 : path;
@@ -407,14 +417,15 @@ static uint32_t process_directory(RdpDrive* d, IRP* irp) {
     } else if (!h->enumerating) return STATUS_INVALID_PARAMETER;
     RdpWorkspaceEntry e;
     uint32_t status;
-    for (size_t tries = 0; tries <= RDP_WS_MAX_ENTRIES; ++tries) {
+    const size_t max_tries = rdp_ws_is_direct_storage(d->workspace) ? RDP_WS_DIRECT_MAX_ENTRIES : RDP_WS_MAX_ENTRIES;
+    for (size_t tries = 0; tries <= max_tries; ++tries) {
         status = rdp_ws_next(d->workspace, d->owner, irp->FileId, p[4] && tries == 0, &e);
         if (status) return status;
         bool matches = false;
         status = rdp_ws_pattern_matches(d->workspace, h->pattern, e.name, &matches);
         if (status) return status;
         if (matches) break;
-        if (tries == RDP_WS_MAX_ENTRIES) return STATUS_INSUFFICIENT_RESOURCES;
+        if (tries == max_tries) return STATUS_INSUFFICIENT_RESOURCES;
     }
     size_t units = 0;
     WCHAR* name = rdpsync_utf8_to_utf16(e.name, strlen(e.name), &units);
@@ -459,6 +470,13 @@ static uint32_t process_irp(RdpDrive* d, IRP* irp) {
         }
         case 0x07: /* IRP_MJ_FLUSH_BUFFERS */
             return rdp_ws_flush(d->workspace, d->owner, irp->FileId);
+        case 0x11: /* IRP_MJ_LOCK_CONTROL: Windows Office / Explorer byte-range lock no-op */
+            if (rdp_ws_is_direct_storage(d->workspace)) {
+                if (!output_room(irp, 4)) return STATUS_INSUFFICIENT_RESOURCES;
+                Stream_Write_UINT32(irp->output, 0);
+                return STATUS_SUCCESS;
+            }
+            return STATUS_NOT_SUPPORTED;
         default: return STATUS_NOT_SUPPORTED;
     }
 }
@@ -473,9 +491,6 @@ static UINT drive_irp(DEVICE* device, IRP* irp) {
     if (slot->epoch != d->initialized_epoch) {
         pthread_mutex_unlock(&d->mutex); irp->Discard(irp); return ERROR_INVALID_STATE;
     }
-    /* This callback is on the same upstream worker after process_init clears
-     * its private clearing flag. Caps/reply observed by the owner are NOT such
-     * a barrier: they may still be queued ahead of that worker. */
     d->ready_epoch = slot->epoch;
     irp->IoStatus = process_irp(d, irp);
     const size_t trace_index = (size_t)(d->irp_observed++ % 16);
@@ -510,8 +525,6 @@ static UINT drive_init(DEVICE* device) {
     RdpDrive* d = ((DriveDevice*)device)->owner;
     pthread_mutex_lock(&d->mutex);
     ++d->initialized_epoch;
-    /* Owner ingress may already have reserved requests after this announce.
-     * Preserve those future requests, discarding only the previous epoch. */
     for (size_t i = 0; i < RDPSYNC_DRIVE_PENDING; ++i) {
         DriveSlot* slot = &d->slots[i];
         if (slot->reserved && slot->epoch < d->initialized_epoch) {
@@ -585,7 +598,6 @@ void rdpsync_drive_set_wakeup(RdpDrive* d, void (*wake)(void*), void* context) {
 }
 void rdpsync_drive_free(RdpDrive* d) {
     if (!d) return;
-    /* FreeRDP context/device must have been freed first. */
     pthread_mutex_lock(&d->mutex); discard_slots(d); rdp_ws_close_owner(d->workspace, d->owner);
     pthread_mutex_unlock(&d->mutex); pthread_mutex_destroy(&d->mutex); free(d);
 }
@@ -632,10 +644,6 @@ static int observe_control(RdpDrive* d, const BYTE* p, size_t length) {
             if (length != 12 || !d->device || !d->device_id || get32(p + 4) != d->device_id) return 0;
             d->reply_status = get32(p + 8);
             if (d->reply_status) {
-                /* Upstream will unregister/free the device asynchronously.
-                 * Retire its ingress identity before forwarding this reply;
-                 * otherwise queued unknown-device requests could elicit
-                 * upstream errors outside the custom completion gate. */
                 d->revoked = 1; d->state = -2; d->device_id = 0;
                 rdp_ws_close_owner(d->workspace, d->owner);
                 memset(d->handles, 0, sizeof(d->handles));
@@ -724,13 +732,8 @@ out:
 }
 BOOL rdpsync_drive_pump(RdpDrive* d, freerdp* instance) {
     if (!d) return TRUE;
-    /* This lifetime is held by the protocol owner. The source probe separately
-     * locks the transport write state; no broker/provider runs under that lock. */
     const INT64 observed = rdpsync_freerdp_pending_bytes(instance->context);
     INT64 pending = observed;
-    /* A read-only high-water gate otherwise strands buffered ciphertext once
-     * socket backpressure clears: the client event loop does not flush it.
-     * No new credit or IRP completion until this owner-only drain succeeds. */
     if (pending > 0) pending = rdpsync_freerdp_drain_pending(instance->context);
     if (pending == -3) return FALSE;
     pthread_mutex_lock(&d->mutex);
@@ -740,9 +743,6 @@ BOOL rdpsync_drive_pump(RdpDrive* d, freerdp* instance) {
     for (size_t i = 0; i < RDPSYNC_DRIVE_PENDING; ++i) {
         if (d->slots[i].reserved && !d->slots[i].irp &&
             drive_seconds() - d->slots[i].admitted_seconds > 30) {
-            /* Upstream rejected the channel state without invoking the device,
-             * or a provider stopped making progress. Never replenish a leaked
-             * ingress reservation and admit an unbounded replacement queue. */
             d->state = -5; pthread_mutex_unlock(&d->mutex); return FALSE;
         }
     }
@@ -753,9 +753,6 @@ BOOL rdpsync_drive_pump(RdpDrive* d, freerdp* instance) {
         }
     }
     if (d->state == -2 || pending == -1 || pending > RDPSYNC_DRIVE_TRANSPORT_HIGH) { pthread_mutex_unlock(&d->mutex); return TRUE; }
-    /* An ingress announce prevents all old Complete calls before the upstream
-     * worker can set clearing. Only a new-epoch IRP callback proves clearing
-     * has ended. This also handles caps/reply observed ahead of that worker. */
     if (d->announced_epoch != d->initialized_epoch || d->ready_epoch != d->announced_epoch) {
         pthread_mutex_unlock(&d->mutex); return TRUE;
     }
@@ -768,20 +765,13 @@ BOOL rdpsync_drive_pump(RdpDrive* d, freerdp* instance) {
         if (charge > d->error_remaining) { pthread_mutex_unlock(&d->mutex); return FALSE; }
         d->error_remaining -= charge;
     }
-    /* Complete consumes the IRP even if it reports failure. Publish retirement
-     * before that once-only transition; Device.Free/Init share this mutex. */
     release_slot(d, slot); ++d->completed;
     UINT result = irp->Complete(irp);
-    /* Ready work must not wait for a new network packet or the 100ms owner
-     * timeout. One extra wake at the high watermark is harmless: the next
-     * pump observes the actual queue and does not re-arm until progress. */
     if (d->wake) for (size_t i = 0; i < RDPSYNC_DRIVE_PENDING; ++i) {
         if (d->slots[i].irp) { d->wake(d->wake_context); break; }
     }
     pthread_mutex_unlock(&d->mutex);
     if (result != CHANNEL_RC_OK) return FALSE;
-    /* Complete only enqueues. Immediately pass that queue through the real
-     * channel manager, then re-check actual pending ciphertext next iteration. */
     return freerdp_channels_check_fds(instance->context->channels, instance);
 }
 void rdpsync_drive_revoke(RdpDrive* d) {
@@ -815,7 +805,6 @@ void rdpsync_drive_diagnostics(RdpDrive* d, char* output, size_t capacity) {
         "shared-space-ready-responses=%zu\nshared-space-control-input-remaining=%zu\n"
         "shared-space-error-output-remaining=%zu\n",
         d->pending_response_bytes, d->peak_response_bytes, ready, d->control_remaining, d->error_remaining);
-    /* Fixed numeric protocol metadata only: never paths, names or file bytes. */
     const uint64_t first = d->irp_observed > 16 ? d->irp_observed - 16 : 0;
     for (uint64_t i = first; i < d->irp_observed; ++i) {
         const size_t used = strlen(output), index = (size_t)(i % 16);

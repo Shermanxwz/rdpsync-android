@@ -113,7 +113,7 @@ RDP passwords are not sent and the legacy cloud file is untouched. Import preser
     <string name="reconnect_title">Reconnect to your desktop?</string>
     <string name="reconnect_body">This briefly disconnects your desktop and reconnects with the selected resolution. Your work in remote apps will not be saved automatically.</string>
     <string name="text_field">Text</string>
-    <string name="text_input_help">Text is sent as keyboard input. The remote clipboard is not replaced.</string>
+    <string name="text_input_help">Directly pastes Chinese, English, or symbols into the active remote window without triggering remote IME candidates.</string>
     <string name="send">Send</string>
     <string name="diagnostics">Diagnostics</string>
     <string name="copy_close">Copy and close</string>
@@ -214,4 +214,9 @@ RDP passwords are not sent and the legacy cloud file is untouched. Import preser
     <string name="ime_mode_ubuntu_term">Ubuntu Term</string>
     <string name="ime_mode_ubuntu_hex">IBus Hex</string>
     <string name="ime_mode_unicode">Unicode</string>
+    <string name="phone_storage_share_title">Share phone storage (RdpSync on Android)</string>
+    <string name="phone_storage_share_ready">Ready · Directly read and write Download, DCIM, Documents, and phone folders after connecting</string>
+    <string name="phone_storage_share_desc">Enable and grant Android file access so the remote computer can directly read and write Download, DCIM, Documents, and phone folders</string>
+    <string name="phone_storage_grant_action">Grant file access</string>
+    <string name="phone_storage_permission_needed">Grant All Files Access in Android Settings first, then tap Enable &amp; reconnect again.</string>
 </resources>

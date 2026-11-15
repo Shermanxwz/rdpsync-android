@@ -9,9 +9,9 @@ RDPsync is an open Android RDP client that combines remote desktop connections, 
 [![FreeRDP](https://img.shields.io/badge/FreeRDP-3.x-orange)](https://www.freerdp.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow)](LICENSE)
 
-## Release 1.3.0: Official `com.rdp.sync` package, zero-occlusion HUD, MediaCodec H.264 & Ubuntu Chinese IME
+## Release 1.3.1: Official `com.rdp.sync` package, zero-occlusion HUD, MediaCodec H.264 & Ubuntu Chinese IME
 
-- **Official Package & Version**: Restores the canonical package identity **`com.rdp.sync`** (`versionCode = 17`, `versionName = "1.3.0"`), shipping verified 16 KiB page-aligned `arm64-v8a` release APKs.
+- **Official Package & Version**: Restores the canonical package identity **`com.rdp.sync`** (`versionCode = 18`, `versionName = "1.3.1"`), shipping verified 16 KiB page-aligned `arm64-v8a` release APKs.
 - **Zero Bottom-Right Occlusion (`MagneticEdgeHud`)**: Replaces the bottom-right floating session button with a translucent edge-magnetic capsule (`MAX_FRACTION = 0.78f`) that auto-tucks after idle and never blocks the remote desktop's bottom-right taskbar, input indicator, or system tray.
 - **Hardware MediaCodec H.264 & High-Refresh Pacing**: Enables FreeRDP 3.32.2 Android NDK `MediaCodec` H.264 hardware decoding (`WITH_MEDIACODEC=ON` with API 26 weak-symbol availability guards), 64-bit aligned scanline batch copying, `FramePacer` adaptive `60/90/120/144Hz` vsync pacing, and sub-pixel 1:1 trackpad ballistics.
 - **Ubuntu RDP Native-Equivalent Chinese IME**: Automatically detects non-Windows peers (`xrdp` / GNOME Remote Desktop) where `TS_UNICODE_KEYBOARD_EVENT` is ignored and delivers mobile Chinese/CJK commits via isolated text-only outbound `CLIPRDR` (`CF_UNICODETEXT` / `UTF8_STRING` + atomic paste) with automatic zero-channel ISO-14755 (`Ctrl+Shift+U`) fallback, strictly isolated from file-transfer consent.
@@ -60,7 +60,7 @@ phone folders. Opening the Shared space browser alone grants no remote access.
 [verification notes](docs/VERIFICATION.md); definitions and host tests are not a
 substitute for an actual mounted drive, stalled-peer recovery or Android UI tests.
 
-The official release package is **RDPsync** (`com.rdp.sync`, `versionName = "1.3.0"`, `versionCode = 17`). Published historical releases ([Preview 4](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.4), [Preview 3](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.3), and earlier) remain preserved unchanged on the Releases page.
+The official release package is **RDPsync** (`com.rdp.sync`, `versionName = "1.3.1"`, `versionCode = 18`). Published historical releases ([Preview 4](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.4), [Preview 3](https://github.com/Shermanxwz/rdpsync-android/releases/tag/v1.2.0-preview.3), and earlier) remain preserved unchanged on the Releases page.
 
 ## Published Preview 2 baseline: display, input and compatibility
 
@@ -175,7 +175,7 @@ For more detail, see [PRIVACY.md](PRIVACY.md) and [SECURITY.md](SECURITY.md).
 
 ### Download
 
-Get the latest `RDPsync-v1.3.0-arm64-v8a.apk` (`com.rdp.sync`, `versionCode 17`) from the project's [GitHub Releases](https://github.com/Shermanxwz/rdpsync-android/releases) page.
+Get the latest `RDPsync-v1.3.1-arm64-v8a.apk` (`com.rdp.sync`, `versionCode 18`) from the project's [GitHub Releases](https://github.com/Shermanxwz/rdpsync-android/releases) page.
 
 - Minimum Android version: Android 8.0, API 26
 - Packaged ABI target: `arm64-v8a` (16 KiB ELF page-aligned)
@@ -191,7 +191,7 @@ export JAVA_HOME=/path/to/jdk-21
 bash scripts/build-apk.sh
 ```
 
-`scripts/build-apk.sh` builds pinned FreeRDP 3.32.2 and OpenSSL 3.5.9 LTS from verified source, runs unit tests and Lint, packages and verifies `RDPsync-v1.3.0-arm64-v8a.apk` (`com.rdp.sync`), and outputs its SHA-256 digest.
+`scripts/build-apk.sh` builds pinned FreeRDP 3.32.2 and OpenSSL 3.5.9 LTS from verified source, runs unit tests and Lint, packages and verifies `RDPsync-v1.3.1-arm64-v8a.apk` (`com.rdp.sync`), and outputs its SHA-256 digest.
 
 ## Contributing
 

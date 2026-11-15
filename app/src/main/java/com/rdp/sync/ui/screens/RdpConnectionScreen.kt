@@ -2,8 +2,10 @@ package com.rdp.sync.ui.screens
 
 import com.rdp.sync.R
 import com.rdp.sync.ui.components.UiMessages
-import com.rdp.sync.ui.sharedspace.SharedSpaceRoute
-import com.rdp.sync.ui.sharedspace.SharedDriveConsentDialog
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.rdp.sync.storage.PhoneStorageAccess
 import com.rdp.sync.ui.sharedspace.SharedDriveStatusDialog
 import com.rdp.sync.network.SharedDriveAttemptGrant
 import com.rdp.sync.network.SharedDriveMode
@@ -140,9 +142,19 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     var fileTransferEnabled by remember(endpoint) { mutableStateOf(false) }
     // Ephemeral consent only: never persisted in the profile or restored from a route argument.
     var sharedDriveMode by remember(endpoint) { mutableStateOf(initialSharedDriveMode) }
-    var showSharedSpace by remember(endpoint) { mutableStateOf(false) }
-    var showDriveConsent by remember(endpoint) { mutableStateOf(false) }
     var showDriveStatus by remember(endpoint) { mutableStateOf(false) }
+    val legacyDrivePermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)) {
+            PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
+            showDriveStatus = false
+            sharedDriveMode = SharedDriveMode.READ_WRITE
+            reconnect()
+        } else {
+            driveActionError = context.getString(R.string.phone_storage_permission_needed)
+        }
+    }
     var sharedDriveState by remember(endpoint, attempt) { mutableStateOf(SharedDriveState(
         mode = sharedDriveMode, status = if (sharedDriveMode == SharedDriveMode.OFF) SharedDriveStatus.OFF else SharedDriveStatus.REQUESTED)) }
     var driveActionError by remember(endpoint, attempt) { mutableStateOf("") }
@@ -342,11 +354,7 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
         fileDirection = direction
         if (fileTransferEnabled) showFileTransfer = true else showFileEnable = true
     }
-    fun openSharedSpace() {
-        desktopView?.hideKeyboard()
-        input.releasePressedInputs()
-        showSharedSpace = true
-    }
+
     fun openSharedDrive() {
         desktopView?.hideKeyboard()
         input.releasePressedInputs()
@@ -510,32 +518,32 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                 onSendFiles = { openFiles(FileTransferDirection.SEND) },
                 onReceiveFiles = { openFiles(FileTransferDirection.RECEIVE) },
                 onExit = ::exitSession,
-                onSharedSpace = ::openSharedSpace,
                 onSharedDrive = ::openSharedDrive,
                 onRotateScreen = rotateScreen
             )
         }
     )
-    if (showSharedSpace) Dialog(onDismissRequest = { showSharedSpace = false },
-        properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false)) {
-        // Keep the underlying desktop/IME owner composed. This is not navigation away from the session.
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            SharedSpaceRoute(onBack = { showSharedSpace = false })
-        }
-    }
-    if (showDriveStatus) SharedDriveStatusDialog(sharedDriveState,
-        onOpenSpace = { showDriveStatus = false; openSharedSpace() },
+    if (showDriveStatus) SharedDriveStatusDialog(
+        state = sharedDriveState,
         onStopSharing = ::revokeSharedDrive,
-        onReconnect = { showDriveStatus = false; showDriveConsent = true },
-        onDismiss = { showDriveStatus = false }, actionError = driveActionError, busy = driveActionBusy,
-        canStop = sharedDriveMode != SharedDriveMode.OFF || sharedDriveState.mayRevoke)
-    if (showDriveConsent) SharedDriveConsentDialog(
-        serverLabel = "${device.name} · ${device.host}:${device.port}", reconnectRequired = true,
-        onConfirm = { readOnly ->
-            showDriveConsent = false
-            sharedDriveMode = if (readOnly) SharedDriveMode.READ_ONLY else SharedDriveMode.READ_WRITE
-            reconnect()
-        }, onDismiss = { showDriveConsent = false })
+        onReconnect = {
+            if (PhoneStorageAccess.hasAllFilesAccess(context)) {
+                PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
+                showDriveStatus = false
+                sharedDriveMode = SharedDriveMode.READ_WRITE
+                reconnect()
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                PhoneStorageAccess.openManageAllFilesSettings(context)
+                driveActionError = context.getString(R.string.phone_storage_permission_needed)
+            } else {
+                legacyDrivePermLauncher.launch(PhoneStorageAccess.legacyPermissions())
+            }
+        },
+        onDismiss = { showDriveStatus = false },
+        actionError = driveActionError,
+        busy = driveActionBusy,
+        canStop = sharedDriveMode != SharedDriveMode.OFF || sharedDriveState.mayRevoke
+    )
     transferController?.let { controller ->
         SessionFileTransferUi(controller, showFileTransfer, fileDirection,
             onReconnect = { showFileTransfer = false; showReconnect = true },
@@ -582,7 +590,6 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
         onSendFiles = { showSettings = false; openFiles(FileTransferDirection.SEND) },
         onReceiveFiles = { showSettings = false; openFiles(FileTransferDirection.RECEIVE) },
         onReconnect = { showSettings = false; showReconnect = true },
-        onSharedSpace = { showSettings = false; openSharedSpace() },
         onSharedDrive = { showSettings = false; openSharedDrive() },
         onChange = ::saveSettings, onDismiss = { showSettings = false }, onDiagnostics = {
         diagnostics = RdpConnector.getDiag().ifBlank { context.getString(R.string.no_diagnostics) }; showDiagnostics = true
@@ -591,9 +598,40 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
         confirmButton = { TextButton(onClick = { showReconnect = false; reconnect() }) { Text(context.getString(R.string.reconnect)) } }, dismissButton = { TextButton(onClick = { showReconnect = false }) { Text(context.getString(R.string.cancel)) } })
     if (showPaste) {
         var text by remember { mutableStateOf(clipboard.getText()?.text.orEmpty()) }
-        AlertDialog(onDismissRequest = { showPaste = false }, title = { Text(context.getString(R.string.send_text)) }, text = {
-            Column { OutlinedTextField(text, { text = it }, modifier = Modifier.fillMaxWidth(), label = { Text(context.getString(R.string.text_field)) }); Text(context.getString(R.string.text_input_help), style = MaterialTheme.typography.bodySmall) }
-        }, confirmButton = { TextButton(onClick = { input.enqueueText(text); showPaste = false }, enabled = isConnected) { Text(context.getString(R.string.send)) } }, dismissButton = { TextButton(onClick = { showPaste = false }) { Text(context.getString(R.string.cancel)) } })
+        AlertDialog(
+            onDismissRequest = { showPaste = false },
+            title = { Text(context.getString(R.string.send_text)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { text = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text(context.getString(R.string.text_field)) }
+                    )
+                    Text(context.getString(R.string.text_input_help), style = MaterialTheme.typography.bodySmall)
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val payload = text
+                        showPaste = false
+                        if (payload.isNotEmpty()) {
+                            uiScope.launch(Dispatchers.IO) {
+                                if (RdpConnector.sendBulkText(payload) != 0) {
+                                    inputWarning = context.getString(R.string.text_interrupted)
+                                }
+                            }
+                        }
+                    },
+                    enabled = isConnected && text.isNotEmpty()
+                ) { Text(context.getString(R.string.send)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPaste = false }) { Text(context.getString(R.string.cancel)) }
+            }
+        )
     }
     if (showDiagnostics) AlertDialog(onDismissRequest = { showDiagnostics = false }, title = { Text(context.getString(R.string.diagnostics)) }, text = { Text(diagnostics, modifier = Modifier.verticalScroll(rememberScrollState()), style = MaterialTheme.typography.bodySmall) },
         confirmButton = { TextButton(onClick = { clipboard.setText(AnnotatedString(diagnostics)); showDiagnostics = false }) { Text(context.getString(R.string.copy_close)) } }, dismissButton = { TextButton(onClick = { showDiagnostics = false }) { Text(context.getString(R.string.close)) } })
@@ -653,15 +691,9 @@ internal fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Dev
             if (reconnectRequired) TextButton(onClick = onReconnect) { Text(context.getString(R.string.reconnect_settings)) }
             Spacer(Modifier.height(8.dp))
             Text(context.getString(R.string.drive_status_title), style = MaterialTheme.typography.titleSmall)
-            TextButton(onClick = onSharedSpace, modifier = Modifier.heightIn(min = 48.dp)) { Text(context.getString(R.string.space_title)) }
-            TextButton(onClick = onSharedDrive, modifier = Modifier.heightIn(min = 48.dp)) { Text(context.getString(R.string.drive_status_title)) }
-            HorizontalDivider()
-            Text(context.getString(R.string.file_transfer), style = MaterialTheme.typography.titleSmall)
-            Row {
-                TextButton(onClick = onSendFiles, enabled = fileTransferConnected) { Text(context.getString(R.string.send_files)) }
-                TextButton(onClick = onReceiveFiles, enabled = fileTransferConnected) { Text(context.getString(R.string.receive_files)) }
+            TextButton(onClick = onSharedDrive, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text(context.getString(R.string.phone_storage_share_title))
             }
-            Text(context.getString(R.string.clipboard_transfer_help), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             Text(context.getString(R.string.remote_resolution), style = MaterialTheme.typography.titleSmall)
             ResolutionMode.entries.forEach { mode ->

@@ -37,7 +37,21 @@ static void* thread_fn(void* arg) {
         if (atomic_load(&s->terminating)) break;
         if (status == WAIT_FAILED) { s_error(s, "连接事件等待失败"); break; }
         if (status != WAIT_TIMEOUT && !freerdp_check_event_handles(instance->context)) {
-            s_error(s, "连接中断"); break;
+            if (!freerdp_shall_disconnect_context(instance->context)) {
+                const UINT32 err = freerdp_get_last_error(instance->context);
+                const UINT32 info = freerdp_disconnect_error_info(instance);
+                char diag_line[96];
+                snprintf(diag_line, sizeof(diag_line), "disconnect-error=0x%08x;info=0x%08x", err, info);
+                s_diag(s, diag_line);
+                pthread_mutex_lock(&s->mutex);
+                const int has_err = s->last_error[0] != 0;
+                pthread_mutex_unlock(&s->mutex);
+                if (!has_err) {
+                    if (err) s_error(s, "连接中断 [0x%08x]: %s", err, freerdp_get_last_error_string(err));
+                    else s_error(s, "连接中断");
+                }
+            }
+            break;
         }
         if (freerdp_shall_disconnect_context(instance->context)) break;
     }
@@ -219,7 +233,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect7(
     pthread_mutex_unlock(&g_lock);
     if (shared_space_mode < 0 || shared_space_mode > 2) return 0;
     uint32_t workspace_status = 0;
-    RdpWorkspace* workspace = shared_space_mode ? workspace_require(env, &workspace_status) : NULL;
+    RdpWorkspace* workspace = shared_space_mode ? active_drive_workspace_require(env, &workspace_status) : NULL;
     if (shared_space_mode && !workspace) {
         pthread_mutex_lock(&g_lock);
         snprintf(g_startup_error, sizeof(g_startup_error), "共享空间初始化失败 [0x%08x]", workspace_status);
@@ -304,7 +318,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect7(
     if (invariant) { failure_stage = invariant; session_destroy(session); goto failure; }
     /* Preserve earlier initialization milestones instead of overwriting them. */
     s_diag(session, "engine=FreeRDP " FREERDP_VERSION_FULL);
-    s_diag(session, session->hw_h264_active ? "renderer=MediaCodec H.264 + GDI" : "renderer=software GDI; AVC disabled");
+    s_diag(session, session->hw_h264_active ? "renderer=MediaCodec H.264 + GDI" : "renderer=RemoteFX Progressive + GDI");
     s_diag(session, "certificate=profile-settings-ready");
     s_diag(session, compatibility ? "connection=compatibility-retry" : "display-control=requested");
     s_diag(session, touch && !compatibility ? "rdpei=requested" : "rdpei=disabled");
@@ -638,11 +652,16 @@ JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeEnableNextTe
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetPeerOsMajor(JNIEnv* e, jobject o) {
     (void)e; (void)o;
     int os_major = 0;
+    RdpTransfer* transfer = NULL;
     pthread_mutex_lock(&g_lock);
     if (g_session) {
         pthread_mutex_lock(&g_session->mutex);
         os_major = g_session->peer_os_major;
+        transfer = g_session->transfer;
         pthread_mutex_unlock(&g_session->mutex);
+        if (os_major != 0x0004 && rdpsync_transfer_is_unix_peer(transfer)) {
+            os_major = 0x0004;
+        }
     }
     pthread_mutex_unlock(&g_lock);
     return (jint)os_major;
@@ -708,26 +727,67 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
     }
     pthread_mutex_unlock(&g_lock);
 
+    int is_unix = 0;
+    pthread_mutex_lock(&g_lock);
+    if (g_session) {
+        pthread_mutex_lock(&g_session->mutex);
+        is_unix = (g_session->peer_os_major == 0x0004);
+        pthread_mutex_unlock(&g_session->mutex);
+        if (!is_unix && rdpsync_transfer_is_unix_peer(transfer)) is_unix = 1;
+    }
+    pthread_mutex_unlock(&g_lock);
+
     uint64_t seq = transfer ? rdpsync_transfer_offer_text(transfer, (const uint8_t*)raw, len) : 0;
     if (seq > 0 && wake) {
         SetEvent(wake);
-        (void)rdpsync_transfer_wait_text_ack(transfer, seq, 160);
-        int rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}); /* LCtrl down */
+        (void)rdpsync_transfer_wait_text_ack(transfer, seq, 320);
+        /* xrdp sends CB_FORMAT_LIST_RESPONSE before XSetSelectionOwner(CLIPBOARD)
+         * finishes its X11 PropertyNotify round-trip. Allow X11/Wayland selection
+         * ownership to settle before injecting Ctrl+V / Ctrl+Shift+V. */
+        struct timespec settle = {0, 24000000L}; /* 24ms */
+        nanosleep(&settle, NULL);
+        struct timespec key_gap = {0, 6000000L}; /* 6ms */
+        int rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}); /* LCtrl down */
         if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
-            rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}); /* LShift down */
+            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}); /* LShift down */
         }
-        if (!rc) rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x2F, 1}); /* V down */
-        if (!rc) rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x2F, 0}); /* V up */
+        nanosleep(&key_gap, NULL);
+        if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 1}); /* V down */
+        nanosleep(&key_gap, NULL);
+        if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 0}); /* V up */
+        nanosleep(&key_gap, NULL);
         if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
-            rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}); /* LShift up */
+            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}); /* LShift up */
         }
-        if (!rc) rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}); /* LCtrl up */
-        if (!rc) (void)rdpsync_transfer_wait_text_served(transfer, seq, 95);
+        if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}); /* LCtrl up */
+        if (!rc) (void)rdpsync_transfer_wait_text_served(transfer, seq, 500);
         (*e)->ReleaseStringUTFChars(e, text, raw);
         return rc;
     }
 
-    /* Automatic zero-channel ISO-14755 Ctrl+Shift+U fallback when CLIPRDR is inactive */
+    if (!is_unix && mode == RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE) {
+        /* Windows fallback when CLIPRDR has not finished MonitorReady yet */
+        size_t idx = 0;
+        int rc = 0;
+        while (idx < len && !rc) {
+            uint32_t cp = 0;
+            if (rdpsync_utf8_next((const uint8_t*)raw, len, &idx, &cp) <= 0) { rc = -3; break; }
+            if (cp == '\n' || cp == '\r') {
+                rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1C, 1});
+                if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1C, 0});
+            } else if (cp <= 0xFFFFU) {
+                rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)cp, 0});
+            } else {
+                const uint32_t v = cp - 0x10000U;
+                rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)(0xD800U + (v >> 10)), 0});
+                if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)(0xDC00U + (v & 0x3FFU)), 0});
+            }
+        }
+        (*e)->ReleaseStringUTFChars(e, text, raw);
+        return rc;
+    }
+
+    /* Automatic zero-channel ISO-14755 Ctrl+Shift+U fallback on Ubuntu when CLIPRDR is inactive */
     const int fallback_rc = send_ubuntu_hex_fallback((const uint8_t*)raw, len);
     (*e)->ReleaseStringUTFChars(e, text, raw);
     return fallback_rc;

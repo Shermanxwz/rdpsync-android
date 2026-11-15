@@ -43,7 +43,7 @@ struct RdpTransfer {
     uint32_t request_length;
     uint8_t chunk[RDPSYNC_TRANSFER_CHUNK]; size_t chunk_length;
     uint64_t deadline_ms;
-    int file_only_blocked;
+    int file_only_blocked, peer_is_xrdp;
     pthread_cond_t text_cond;
     int text_cond_ready, advertise_text;
     uint64_t text_offer_seq, text_ack_seq, text_served_seq;
@@ -112,13 +112,14 @@ int rdpsync_sharedspace_open_staged(const char* cache,const char* directory,cons
     return open_staged_bounded(cache,directory,file,size,RDP_WS_MAX_FILE_BYTES);
 }
 static uint16_t get16(const uint8_t* p) { return (uint16_t)(p[0]|(uint16_t)p[1]<<8); }
-static uint32_t get32(const uint8_t* p) { return (uint32_t)get16(p)|(uint32_t)get16(p+2)<<16; }
+static uint32_t get32(const uint8_t* p) { return (uint32_t)get16(p)|(uint16_t)get16(p+2)<<16; }
 /* xrdp v0.10.6.1 clipboard.c / clipboard_file.c append one zero DWORD
  * outside dataLen on these message shapes. Accept ONLY that bounded trailer;
  * it is not payload and never increases admitted descriptor/chunk lengths. */
 static int zero_trailer_shape(uint16_t type,uint32_t length) {
     switch(type) {
         case CB_CLIP_CAPS:return length==16;
+        case CB_TEMP_DIRECTORY:return length==520;
         case CB_MONITOR_READY:case CB_FORMAT_LIST_RESPONSE:return length==0;
         case CB_FORMAT_DATA_REQUEST:return length==4;
         case CB_FORMAT_LIST:return 1; /* variable serialized format records */
@@ -161,6 +162,7 @@ int rdpsync_transfer_admit_incoming(RdpTransfer* t,const uint8_t* p,size_t size,
     uint32_t payload=0;
     if(!t||!wire_payload_length(p,size,total,&payload))return 0;
     uint16_t type=get16(p);pthread_mutex_lock(&t->mutex);int okay=0;
+    if((type==CB_CLIP_CAPS||type==CB_MONITOR_READY)&&total==payload+12U)t->peer_is_xrdp=1;
     if(type==CB_FILECONTENTS_RESPONSE) {
         if(size>=12&&payload>=4&&!t->data_admitted) {
             uint32_t id=get32(p+8),length=0;
@@ -261,13 +263,20 @@ static UINT control_admit(RdpTransfer* t,uint64_t bytes) {
 }
 static RdpTransfer* transfer_from(CliprdrClientContext* c) { return c?c->custom:NULL; }
 static UINT caps_callback(CliprdrClientContext* c,const CLIPRDR_CAPABILITIES* caps) {
-    RdpTransfer* t=transfer_from(c); if(!t||!caps)return ERROR_INVALID_PARAMETER;
-    /* Pinned FreeRDP invokes this once per parsed GENERAL set, with one
-     * fixed, host-endian structure (not an untrusted serialized array). */
-    if(caps->cCapabilitiesSets!=1||!caps->capabilitySets||
-       caps->capabilitySets->capabilitySetType!=CB_CAPSTYPE_GENERAL||
-       caps->capabilitySets->capabilitySetLength!=CB_CAPSTYPE_GENERAL_LEN)return ERROR_INVALID_DATA;
-    const CLIPRDR_GENERAL_CAPABILITY_SET* g=(const void*)caps->capabilitySets;
+    RdpTransfer* t=transfer_from(c); if(!t||!caps||!caps->cCapabilitiesSets||!caps->capabilitySets)return ERROR_INVALID_PARAMETER;
+    const CLIPRDR_GENERAL_CAPABILITY_SET* g=NULL;
+    const uint8_t* cursor=(const uint8_t*)caps->capabilitySets;
+    for(UINT32 i=0;i<caps->cCapabilitiesSets&&i<16U;++i) {
+        const CLIPRDR_CAPABILITY_SET* cs=(const CLIPRDR_CAPABILITY_SET*)cursor;
+        if(cs->capabilitySetLength<4U)return ERROR_INVALID_DATA;
+        if(cs->capabilitySetType==CB_CAPSTYPE_GENERAL) {
+            if(cs->capabilitySetLength<CB_CAPSTYPE_GENERAL_LEN)return ERROR_INVALID_DATA;
+            g=(const CLIPRDR_GENERAL_CAPABILITY_SET*)cs;
+            break;
+        }
+        cursor+=cs->capabilitySetLength;
+    }
+    if(!g)return ERROR_INVALID_DATA;
     int files=!!(g->generalFlags&CB_STREAM_FILECLIP_ENABLED),lock=!!(g->generalFlags&CB_CAN_LOCK_CLIPDATA);
     pthread_mutex_lock(&t->mutex);t->peer_files=files;t->peer_lock=lock;t->capability=t->file_only_blocked?-2:(t->ready?(files?1:-1):0);pthread_mutex_unlock(&t->mutex);return CHANNEL_RC_OK;
 }
@@ -315,7 +324,8 @@ static UINT format_request_callback(CliprdrClientContext* c,const CLIPRDR_FORMAT
         t->text_served_seq=t->text_offer_seq;
         if(t->text_cond_ready)pthread_cond_broadcast(&t->text_cond);
     }
-    UINT rc=control_admit_locked(t,8+n);
+    const int text_reply=(p->requestedFormatId==13U||p->requestedFormatId==1U||p->requestedFormatId==RDPSYNC_FMT_UTF8_STRING||p->requestedFormatId==RDPSYNC_FMT_TEXT_PLAIN_UTF8)&&n>0;
+    UINT rc=text_reply?CHANNEL_RC_OK:control_admit_locked(t,8+n);
     if(!rc){CLIPRDR_FORMAT_DATA_RESPONSE response={.common={.msgFlags=n?CB_RESPONSE_OK:CB_RESPONSE_FAIL,.dataLen=(UINT32)n},.requestedFormatData=n?data:NULL};rc=c->ClientFormatDataResponse(c,&response);}
     pthread_mutex_unlock(&t->mutex);return rc;
 }
@@ -420,15 +430,21 @@ UINT rdpsync_transfer_pump(RdpTransfer* t) {
     if(t->unlock_id){CLIPRDR_UNLOCK_CLIPBOARD_DATA p={.clipDataId=t->unlock_id};t->unlock_id=0;rc=control_admit_locked(t,12);if(!rc)rc=c->ClientUnlockClipboardData(c,&p);}
     if(!rc&&(t->advertise||t->advertise_text)){
         CLIPRDR_FORMAT fmts[4]; UINT32 nfmt=0;
-        if(!t->file_only_blocked&&t->offer_count)fmts[nfmt++]=(CLIPRDR_FORMAT){TF_FORMAT_ID,"FileGroupDescriptorW"};
-        if(t->text_utf16_len>0){
+        const int pure_text=t->advertise_text&&t->text_utf16_len>0;
+        if(pure_text){
             fmts[nfmt++]=(CLIPRDR_FORMAT){13U,NULL};
+            fmts[nfmt++]=(CLIPRDR_FORMAT){1U,NULL};
             fmts[nfmt++]=(CLIPRDR_FORMAT){RDPSYNC_FMT_UTF8_STRING,"UTF8_STRING"};
             fmts[nfmt++]=(CLIPRDR_FORMAT){RDPSYNC_FMT_TEXT_PLAIN_UTF8,"text/plain;charset=utf-8"};
+            t->advertise_text=0;
+        } else if(!t->file_only_blocked&&t->offer_count){
+            fmts[nfmt++]=(CLIPRDR_FORMAT){TF_FORMAT_ID,"FileGroupDescriptorW"};
+            t->advertise=0;
+        } else {
+            t->advertise=0;t->advertise_text=0;
         }
         CLIPRDR_FORMAT_LIST p={.numFormats=nfmt,.formats=nfmt?fmts:NULL};
-        t->advertise=0;t->advertise_text=0;
-        rc=control_admit_locked(t,nfmt?160:8);
+        if(!pure_text)rc=control_admit_locked(t,nfmt?160:8);
         if(!rc)rc=c->ClientFormatList(c,&p);
     }
     if(!rc&&t->request_list){t->request_list=0;
@@ -528,4 +544,20 @@ int rdpsync_transfer_wait_text_ack(RdpTransfer* t, uint64_t seq, int timeout_ms)
 
 int rdpsync_transfer_wait_text_served(RdpTransfer* t, uint64_t seq, int timeout_ms) {
     return wait_seq_monotonic(t, &t->text_served_seq, seq, timeout_ms);
+}
+
+int rdpsync_transfer_is_unix_peer(RdpTransfer* t) {
+    if (!t) return 0;
+    pthread_mutex_lock(&t->mutex);
+    const int is_unix = t->peer_is_xrdp || (t->ready && !t->peer_lock && t->peer_files);
+    pthread_mutex_unlock(&t->mutex);
+    return is_unix;
+}
+
+int rdpsync_transfer_is_ready(RdpTransfer* t) {
+    if (!t) return 0;
+    pthread_mutex_lock(&t->mutex);
+    const int ready = t->ready && t->context != NULL;
+    pthread_mutex_unlock(&t->mutex);
+    return ready;
 }

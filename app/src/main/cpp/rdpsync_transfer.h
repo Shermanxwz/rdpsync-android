@@ -58,4 +58,6 @@ void rdpsync_transfer_set_text_only(RdpTransfer* transfer, int text_only);
 uint64_t rdpsync_transfer_offer_text(RdpTransfer* transfer, const uint8_t* utf8, size_t utf8_len);
 int rdpsync_transfer_wait_text_ack(RdpTransfer* transfer, uint64_t seq, int timeout_ms);
 int rdpsync_transfer_wait_text_served(RdpTransfer* transfer, uint64_t seq, int timeout_ms);
+int rdpsync_transfer_is_unix_peer(RdpTransfer* transfer);
+int rdpsync_transfer_is_ready(RdpTransfer* transfer);
 #endif

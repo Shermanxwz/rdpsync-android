@@ -5,13 +5,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Persistent app-owned files. This is not a mirror of an Android SAF tree.
+/* Persistent app-owned files or direct Android external storage root (/storage/emulated/0).
  * Every remote IRP and local browser/import/export action uses this broker. */
 #define RDP_WS_MAX_FILE_BYTES (UINT64_C(512) * 1024 * 1024)
 #define RDP_WS_MAX_BYTES (UINT64_C(1024) * 1024 * 1024)
 #define RDP_WS_RESERVE_BYTES (UINT64_C(128) * 1024 * 1024)
 #define RDP_WS_MAX_ENTRIES 4096U
+#define RDP_WS_DIRECT_MAX_ENTRIES 131072U
 #define RDP_WS_MAX_DEPTH 16U
+#define RDP_WS_DIRECT_MAX_DEPTH 32U
 #define RDP_WS_MAX_PATH 4096U
 #define RDP_WS_MAX_NAME 255U
 #define RDP_WS_MAX_KEY 1024U
@@ -58,9 +60,6 @@
 #define RDP_WS_NON_DIRECTORY_FILE 0x40U
 #define RDP_WS_DELETE_ON_CLOSE 0x1000U
 
-/* Must be pure, bounded, non-reentrant and perform no IO. Return a strict NFC,
- * case-insensitive collision key, or false for malformed/unsafe UTF-8 names.
- * Android uses the same Java policy for both UI and native operations. */
 typedef bool (*RdpWorkspaceNameKey)(void* context, const char* name, char* key, size_t capacity);
 typedef bool (*RdpWorkspaceCancelled)(void* context);
 typedef struct RdpWorkspace RdpWorkspace;
@@ -70,23 +69,24 @@ typedef struct {
     bool read_only;
     bool delete_pending;
     uint64_t size;
+    uint64_t inode;
     int64_t modified_millis;
     int64_t access_millis;
     int64_t change_millis; /* POSIX metadata change, not creation/birth time. */
 } RdpWorkspaceEntry;
 typedef struct {
     uint64_t used_bytes;
-    uint64_t available_bytes; /* min(quota remaining, filesystem free less reserve) */
+    uint64_t available_bytes;
     uint32_t entries;
 } RdpWorkspaceSpace;
 
-/* trusted_home_fd is the already validated private runtime HOME directory.
- * Duplicates the descriptor. Creates only shared-drive/shared-drive-pending.
- * Never purges committed files on init/destroy/revoke/restart. Previously
- * accepted delete-on-close intent is applied when its last handle closes,
- * except exact legacy wire directory intent at its requesting close (below). */
 uint32_t rdp_ws_create(int trusted_home_fd, RdpWorkspaceNameKey name_key, void* name_context,
                        RdpWorkspace** result);
+/* Direct Android external storage mount (/storage/emulated/0: Download, DCIM, Documents, etc.)
+ * matching Microsoft Windows App behavior once MANAGE_EXTERNAL_STORAGE is granted. */
+uint32_t rdp_ws_create_external(const char* storage_root_path, RdpWorkspaceNameKey name_key,
+                                void* name_context, RdpWorkspace** result);
+bool rdp_ws_is_direct_storage(const RdpWorkspace* workspace);
 void rdp_ws_destroy(RdpWorkspace* workspace);
 uint32_t rdp_ws_space(RdpWorkspace* workspace, RdpWorkspaceSpace* result);
 uint32_t rdp_ws_open(RdpWorkspace* workspace, uint64_t owner, const char* path,
@@ -102,13 +102,7 @@ uint32_t rdp_ws_truncate(RdpWorkspace* workspace, uint64_t owner, uint32_t handl
 uint32_t rdp_ws_rename(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,
     const char* new_path, bool replace);
 uint32_t rdp_ws_set_delete(RdpWorkspace* workspace, uint64_t owner, uint32_t handle, bool deleting);
-/* Wire-only length-zero disposition; never exposed by JNI/local API.
- * Requires remote owner, RW handle, exact legacy shape or existing DELETE.
- * An exact legacy directory request unlinks at its requesting close after
- * revalidation; retained mkdir IDs then permit CLOSE only. This accommodates
- * pinned xrdp retaining mkdir handles, without changing ordinary dispositions. */
 uint32_t rdp_ws_wire_legacy_delete(RdpWorkspace* workspace, uint64_t owner, uint32_t handle);
-/* -1 leaves a timestamp unchanged; 0 is the Unix epoch, not a sentinel. */
 uint32_t rdp_ws_set_basic(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,
     uint32_t attributes, int64_t access_millis, int64_t write_millis);
 uint32_t rdp_ws_flush(RdpWorkspace* workspace, uint64_t owner, uint32_t handle);
@@ -116,24 +110,13 @@ uint32_t rdp_ws_next(RdpWorkspace* workspace, uint64_t owner, uint32_t directory
     bool restart, RdpWorkspaceEntry* entry);
 uint32_t rdp_ws_close(RdpWorkspace* workspace, uint64_t owner, uint32_t handle);
 void rdp_ws_close_owner(RdpWorkspace* workspace, uint64_t owner);
-
-/* Synchronous, bounded import from a held readonly regular-file FD. Copies into
- * owned pending storage before atomic exclusive publication; no live SAF URI or
- * user-provided filesystem path reaches this API. The caller keeps source_fd
- * valid throughout. Local owner 0 is reserved; imports survive remote revoke.
- * Failure/cancellation deletes only this call's own incomplete pending file. */
 uint32_t rdp_ws_import(RdpWorkspace* workspace, const char* parent_path, const char* name,
     int source_fd, uint64_t size, RdpWorkspaceCancelled cancelled, void* cancel_context);
-
-/* Picker/confirmation selections are ordinary bounded local-owner handles.
- * Import selections need WRITE access and should deny share-DELETE. */
 uint32_t rdp_ws_import_at(RdpWorkspace* workspace, uint64_t owner, uint32_t directory_handle,
     const char* name, int source_fd, uint64_t size, RdpWorkspaceCancelled cancelled, void* cancel_context);
 uint32_t rdp_ws_mkdir_at(RdpWorkspace* workspace, uint64_t owner, uint32_t directory_handle, const char* name);
 uint32_t rdp_ws_handle_path_matches(RdpWorkspace* workspace, uint64_t owner, uint32_t handle,
     const char* path, bool* matches);
-/* pattern_key must be produced by the pure JNI nativePatternKey policy; only
- * '*' and '?' wildcard semantics are supported, with '*.*' matching all. */
 uint32_t rdp_ws_pattern_matches(RdpWorkspace* workspace, const char* pattern_key, const char* name, bool* matches);
 
 #endif

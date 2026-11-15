@@ -52,7 +52,6 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
     }
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }, topBar = {
         TopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
-            IconButton(onClick = onSharedSpace) { Icon(Icons.Default.FolderShared, stringResource(R.string.space_title)) }
             Box {
                 IconButton(enabled = uiState.webDavSettingsLoaded && !uiState.isSyncing, onClick = { showSyncMenu = true },
                     modifier = Modifier.semantics { contentDescription = syncDescription; if (uiState.isSyncing) stateDescription = syncingDescription }) {

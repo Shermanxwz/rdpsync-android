@@ -1,13 +1,13 @@
-/* One persistent broker is shared by remote IRPs and explicit local actions.
- * JNI never receives a SAF URI or a server-selected absolute filesystem path.
- * Name-key callbacks are pure CPU-only Java, with process-lifetime class refs.
- */
+/* Broker JNI layer supporting both legacy private-workspace host tests and
+ * direct Android phone storage (/storage/emulated/0: Download, DCIM, Documents, etc.). */
 #include <fcntl.h>
 #include <errno.h>
 #include "rdpsync_utf.h"
 
 static pthread_mutex_t g_workspace_init_lock = PTHREAD_MUTEX_INITIALIZER;
 static RdpWorkspace* g_workspace;
+static RdpWorkspace* g_phone_workspace;
+static char g_phone_storage_root[PATH_MAX];
 static JavaVM* g_workspace_vm;
 static jclass g_workspace_names, g_workspace_entry, g_workspace_listing, g_workspace_read;
 static jmethodID g_workspace_key, g_workspace_pattern_key, g_workspace_entry_ctor, g_workspace_listing_ctor, g_workspace_read_ctor;
@@ -97,21 +97,24 @@ static int workspace_cache_class(JNIEnv* env, const char* name, jclass* target) 
     *target = (*env)->NewGlobalRef(env, local); (*env)->DeleteLocalRef(env, local);
     return *target != NULL;
 }
-static RdpWorkspace* workspace_require(JNIEnv* env, uint32_t* status) {
-    pthread_mutex_lock(&g_workspace_init_lock);
-    *status = RDP_WS_OK;
-    if (g_workspace) { pthread_mutex_unlock(&g_workspace_init_lock); return g_workspace; }
+static int workspace_ensure_jni_refs(JNIEnv* env) {
     if ((*env)->GetJavaVM(env, &g_workspace_vm) != JNI_OK ||
         !workspace_cache_class(env, "com/rdp/sync/sharedspace/SharedSpaceNames", &g_workspace_names) ||
         !workspace_cache_class(env, "com/rdp/sync/sharedspace/SharedSpaceEntry", &g_workspace_entry) ||
         !workspace_cache_class(env, "com/rdp/sync/sharedspace/SharedSpaceListingResult", &g_workspace_listing) ||
-        !workspace_cache_class(env, "com/rdp/sync/sharedspace/SharedSpaceReadResult", &g_workspace_read)) goto invalid;
-    g_workspace_key = (*env)->GetStaticMethodID(env, g_workspace_names, "nativeKey", "(Ljava/lang/String;)Ljava/lang/String;");
-    g_workspace_pattern_key = (*env)->GetStaticMethodID(env, g_workspace_names, "nativePatternKey", "(Ljava/lang/String;)Ljava/lang/String;");
-    g_workspace_entry_ctor = (*env)->GetMethodID(env, g_workspace_entry, "<init>", "(Ljava/lang/String;ZJJZ)V");
-    g_workspace_listing_ctor = (*env)->GetMethodID(env, g_workspace_listing, "<init>", "(I[Lcom/rdp/sync/sharedspace/SharedSpaceEntry;)V");
-    g_workspace_read_ctor = (*env)->GetMethodID(env, g_workspace_read, "<init>", "(I[B)V");
-    if (!g_workspace_key || !g_workspace_pattern_key || !g_workspace_entry_ctor || !g_workspace_listing_ctor || !g_workspace_read_ctor) goto invalid;
+        !workspace_cache_class(env, "com/rdp/sync/sharedspace/SharedSpaceReadResult", &g_workspace_read)) return 0;
+    if (!g_workspace_key) g_workspace_key = (*env)->GetStaticMethodID(env, g_workspace_names, "nativeKey", "(Ljava/lang/String;)Ljava/lang/String;");
+    if (!g_workspace_pattern_key) g_workspace_pattern_key = (*env)->GetStaticMethodID(env, g_workspace_names, "nativePatternKey", "(Ljava/lang/String;)Ljava/lang/String;");
+    if (!g_workspace_entry_ctor) g_workspace_entry_ctor = (*env)->GetMethodID(env, g_workspace_entry, "<init>", "(Ljava/lang/String;ZJJZ)V");
+    if (!g_workspace_listing_ctor) g_workspace_listing_ctor = (*env)->GetMethodID(env, g_workspace_listing, "<init>", "(I[Lcom/rdp/sync/sharedspace/SharedSpaceEntry;)V");
+    if (!g_workspace_read_ctor) g_workspace_read_ctor = (*env)->GetMethodID(env, g_workspace_read, "<init>", "(I[B)V");
+    return g_workspace_key && g_workspace_pattern_key && g_workspace_entry_ctor && g_workspace_listing_ctor && g_workspace_read_ctor;
+}
+static RdpWorkspace* workspace_require(JNIEnv* env, uint32_t* status) {
+    pthread_mutex_lock(&g_workspace_init_lock);
+    *status = RDP_WS_OK;
+    if (g_workspace) { pthread_mutex_unlock(&g_workspace_init_lock); return g_workspace; }
+    if (!workspace_ensure_jni_refs(env)) goto invalid;
     char home[PATH_MAX];
     pthread_mutex_lock(&g_lifecycle_lock); memcpy(home, g_runtime_home, sizeof(home)); pthread_mutex_unlock(&g_lifecycle_lock);
     int fd = home[0] ? open(home, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW) : -1;
@@ -121,6 +124,49 @@ static RdpWorkspace* workspace_require(JNIEnv* env, uint32_t* status) {
 invalid:
     *status = RDP_WS_UNSUCCESSFUL;
     pthread_mutex_unlock(&g_workspace_init_lock); return NULL;
+}
+static RdpWorkspace* active_drive_workspace_require(JNIEnv* env, uint32_t* status) {
+    pthread_mutex_lock(&g_workspace_init_lock);
+    if (!g_phone_storage_root[0]) {
+        pthread_mutex_unlock(&g_workspace_init_lock);
+        return workspace_require(env, status);
+    }
+    *status = RDP_WS_OK;
+    if (g_phone_workspace) {
+        pthread_mutex_unlock(&g_workspace_init_lock);
+        return g_phone_workspace;
+    }
+    if (!workspace_ensure_jni_refs(env)) {
+        *status = RDP_WS_UNSUCCESSFUL;
+        pthread_mutex_unlock(&g_workspace_init_lock);
+        return NULL;
+    }
+    *status = rdp_ws_create_external(g_phone_storage_root, workspace_name_key, NULL, &g_phone_workspace);
+    RdpWorkspace* created = g_phone_workspace;
+    pthread_mutex_unlock(&g_workspace_init_lock);
+    return created;
+}
+JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSetPhoneStorageRoot(
+    JNIEnv* env, jobject obj, jstring jpath) {
+    (void)obj;
+    char* utf8 = jpath ? workspace_utf8(env, jpath, PATH_MAX - 1) : NULL;
+    if (jpath && !utf8) return JNI_FALSE;
+    jboolean ok = JNI_TRUE;
+    pthread_mutex_lock(&g_workspace_init_lock);
+    if (!utf8 || !utf8[0]) {
+        g_phone_storage_root[0] = 0;
+    } else if (utf8[0] != '/' || strlen(utf8) >= sizeof(g_phone_storage_root)) {
+        ok = JNI_FALSE;
+    } else if (strcmp(g_phone_storage_root, utf8) != 0) {
+        if (g_phone_workspace) {
+            rdp_ws_destroy(g_phone_workspace);
+            g_phone_workspace = NULL;
+        }
+        snprintf(g_phone_storage_root, sizeof(g_phone_storage_root), "%s", utf8);
+    }
+    pthread_mutex_unlock(&g_workspace_init_lock);
+    free(utf8);
+    return ok;
 }
 static jlongArray workspace_longs(JNIEnv* env, const jlong* values, jsize count) {
     jlongArray result = (*env)->NewLongArray(env, count);
@@ -201,11 +247,6 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSharedSpaceC
     (void)obj; uint32_t status; RdpWorkspace* ws = workspace_require(env, &status);
     return ws && handle > 0 && handle <= UINT32_MAX ? (jint)rdp_ws_close(ws, 0, (uint32_t)handle) : (jint)RDP_WS_INVALID_HANDLE;
 }
-/* One explicitly registered batch owns cancellation throughout provider staging
- * and all of its imports. UI cancel is atomic only. Before registration, the
- * Java cancellation flag is authoritative and MUST be checked immediately after
- * Begin; thus there is no check-to-native-entry gap and no cumulative foreign
- * token watermark cancelling unrelated work. */
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSharedSpaceBeginImport(JNIEnv* env, jobject obj, jlong token) {
     (void)env; (void)obj;
     if (token <= 0) return RDP_WS_INVALID_PARAMETER;
@@ -318,8 +359,6 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSharedSpaceM
     free(name); return status;
 }
 static void workspace_import_mark_cancelled(jlong token) {
-    /* A delayed old signal may race End/new Begin. AtomicMax prevents that
-     * delayed store from erasing cancellation of the newer registered token. */
     long long previous = atomic_load(&g_workspace_import_cancel);
     while (token > previous && !atomic_compare_exchange_weak(&g_workspace_import_cancel, &previous, (long long)token)) {}
 }

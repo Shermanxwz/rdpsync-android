@@ -3,26 +3,27 @@ package com.rdp.sync.ui.navigation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.setValue
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
-import com.rdp.sync.network.SharedDriveMode
-import com.rdp.sync.security.CertificateEndpoint
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
-import com.rdp.sync.manager.SyncDirection
+import com.rdp.sync.network.SharedDriveMode
+import com.rdp.sync.security.CertificateEndpoint
+import com.rdp.sync.storage.PhoneStorageAccess
 import com.rdp.sync.ui.screens.DeviceDetailScreen
 import com.rdp.sync.ui.screens.DeviceEditScreen
 import com.rdp.sync.ui.screens.DeviceListScreen
 import com.rdp.sync.ui.screens.RdpConnectionScreen
-import com.rdp.sync.ui.sharedspace.SharedSpaceRoute
 import com.rdp.sync.viewmodel.DeviceViewModel
 
 @Composable
 fun AppNavigation() {
+    val context = LocalContext.current
     val navController = rememberNavController()
     val viewModel: DeviceViewModel = viewModel()
     val uiState by viewModel.uiState.collectAsState()
@@ -41,13 +42,8 @@ fun AppNavigation() {
                 onSync = { direction -> viewModel.syncWebdav(direction) },
                 onSaveWebDavSettings = { url, username, password -> viewModel.saveWebDavSettings(url, username, password) },
                 onTestWebDavSettings = { url, username, password -> viewModel.testWebDavSettings(url, username, password) },
-                onMessageShown = { viewModel.clearTransientMessages() },
-                onSharedSpace = { navController.navigate("shared_space") }
+                onMessageShown = { viewModel.clearTransientMessages() }
             )
-        }
-
-        composable("shared_space") {
-            SharedSpaceRoute(onBack = { navController.popBackStack() })
         }
 
         composable("device_edit") {
@@ -103,9 +99,13 @@ fun AppNavigation() {
                     device = device,
                     onBack = { navController.popBackStack() },
                     onEdit = { navController.navigate("device_edit/${device.id}") },
-                    onConnect = { sharedDriveGrant = null; navController.navigate("rdp_connection/${device.id}") },
-                    onConnectWithSharedDrive = { mode ->
-                        sharedDriveGrant = CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName)?.let { it to mode }
+                    onConnect = {
+                        val endpoint = CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName)
+                        sharedDriveGrant = if (endpoint != null && PhoneStorageAccess.shouldMountOnConnect(context)) {
+                            endpoint to SharedDriveMode.READ_WRITE
+                        } else {
+                            null
+                        }
                         navController.navigate("rdp_connection/${device.id}")
                     },
                     onDelete = {
@@ -123,9 +123,16 @@ fun AppNavigation() {
             val deviceId = backStackEntry.arguments?.getLong("deviceId") ?: 0L
             val device = uiState.devices.find { it.id == deviceId }
             if (device != null) {
+                val endpoint = CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName)
+                val initialMode = sharedDriveGrant?.takeIf { it.first == endpoint }?.second
+                    ?: if (endpoint != null && PhoneStorageAccess.shouldMountOnConnect(context)) {
+                        SharedDriveMode.READ_WRITE
+                    } else {
+                        SharedDriveMode.OFF
+                    }
                 RdpConnectionScreen(
                     device = device,
-                    initialSharedDriveMode = sharedDriveGrant?.takeIf { it.first == CertificateEndpoint.of(device.id, device.host, device.port, device.rdpServerName) }?.second ?: SharedDriveMode.OFF,
+                    initialSharedDriveMode = initialMode,
                     onBack = { sharedDriveGrant = null; navController.popBackStack() }
                 )
             }

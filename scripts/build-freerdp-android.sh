@@ -18,11 +18,66 @@ fi
 [[ "$(git -C "$FREERDP_DIR" rev-parse HEAD)" == "97eff6ddfbbfaa8e42a126d362686bd001ff8bdc" ]] || { echo "Unexpected FreeRDP source revision" >&2; exit 1; }
 # A pinned HEAD alone does not establish a reviewed working tree. Allow only
 # the exact idempotent scoped flow-control addition; reject unrelated dirty cache sources.
-if [[ -n "$(git -C "$FREERDP_DIR" diff --name-only HEAD -- | grep -Ev '^(libfreerdp/core/(transport|tcp)|libfreerdp/codec/h264_mediacodec)\.c$')" ]] ||
+if [[ -n "$(git -C "$FREERDP_DIR" diff --name-only HEAD -- | grep -Ev '^(libfreerdp/core/(transport|tcp|capabilities)|libfreerdp/codec/h264_mediacodec)\.c$')" ]] ||
    [[ -n "$(git -C "$FREERDP_DIR" ls-files --others --exclude-standard)" ]]; then
     echo "Unreviewed FreeRDP working-tree changes" >&2; exit 1
 fi
 python3 "$PROJECT_DIR/scripts/patch-freerdp-flow-control.py" "$FREERDP_DIR"
+python3 - "$FREERDP_DIR/libfreerdp/core/capabilities.c" <<'PYCAPABILITIES'
+import sys
+from pathlib import Path
+
+p = Path(sys.argv[1])
+src = p.read_text("utf-8")
+if "rdpsync_freerdp_peer_os_major" not in src:
+    anchor = """static BOOL rdp_apply_general_capability_set(rdpSettings* settings, const rdpSettings* src)
+{
+	WINPR_ASSERT(settings);
+	WINPR_ASSERT(src);
+"""
+    replacement = """static struct { const rdpSettings* key; UINT32 os_major; } g_rdpsync_peer_os[16];
+static unsigned g_rdpsync_peer_os_idx;
+
+static void rdpsync_record_peer_os_major(const rdpSettings* settings, UINT32 os_major)
+{
+	if (!settings)
+		return;
+	for (unsigned i = 0; i < 16; ++i)
+	{
+		if (g_rdpsync_peer_os[i].key == settings)
+		{
+			g_rdpsync_peer_os[i].os_major = os_major;
+			return;
+		}
+	}
+	const unsigned slot = (g_rdpsync_peer_os_idx++) & 15U;
+	g_rdpsync_peer_os[slot].key = settings;
+	g_rdpsync_peer_os[slot].os_major = os_major;
+}
+
+FREERDP_API UINT32 rdpsync_freerdp_peer_os_major(const rdpSettings* settings)
+{
+	if (!settings)
+		return 0;
+	for (unsigned i = 0; i < 16; ++i)
+	{
+		if (g_rdpsync_peer_os[i].key == settings)
+			return g_rdpsync_peer_os[i].os_major;
+	}
+	return 0;
+}
+
+static BOOL rdp_apply_general_capability_set(rdpSettings* settings, const rdpSettings* src)
+{
+	WINPR_ASSERT(settings);
+	WINPR_ASSERT(src);
+	if (!settings->ServerMode)
+		rdpsync_record_peer_os_major(settings, src->OsMajorType);
+"""
+    if src.count(anchor) != 1:
+        raise SystemExit(f"Expected 1 capabilities.c anchor, got {src.count(anchor)}")
+    p.write_text(src.replace(anchor, replacement, 1), "utf-8")
+PYCAPABILITIES
 python3 - "$FREERDP_DIR/libfreerdp/codec/h264_mediacodec.c" <<'PYMEDIACODEC'
 import sys
 from pathlib import Path

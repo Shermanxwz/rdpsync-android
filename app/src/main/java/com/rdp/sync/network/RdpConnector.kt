@@ -9,6 +9,7 @@ import android.os.SystemClock
 import com.rdp.sync.display.*
 import com.rdp.sync.sharedspace.SharedSpaceListingResult
 import com.rdp.sync.sharedspace.SharedSpaceReadResult
+import com.rdp.sync.storage.PhoneStorageAccess
 import kotlinx.coroutines.delay
 
 object RdpConnector {
@@ -23,6 +24,7 @@ object RdpConnector {
     external fun nativeConnect5(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String): Int
     external fun nativeConnect6(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String, fileTransferEnabled: Boolean): Int
     external fun nativeConnect7(host: String, port: Int, username: String, password: String, domain: String, serverName: String, width: Int, height: Int, enableTouchInput: Boolean, compatMode: Boolean, expectedFingerprint: String, fileTransferEnabled: Boolean, sharedSpaceMode: Int): Int
+    external fun nativeSetPhoneStorageRoot(path: String): Boolean
     external fun nativeSharedDriveState(): LongArray
     external fun nativeSharedDriveRevoke(expectedGeneration: Long): Int
     /** Fixed Shared-space staging ceiling; the clipboard accessor remains separately limited. */
@@ -92,11 +94,13 @@ object RdpConnector {
     private const val TAG = "RdpConnector"
     @Volatile private var lastKotlinError: String = ""
     @Volatile private var nativeInitialized = false
+    @Volatile private var appContext: Context? = null
 
     /** FreeRDP/WinPR requires a writable HOME even on Android before context creation. */
     @Synchronized fun initialize(context: Context): Boolean {
         if (nativeInitialized) return true
         val app = context.applicationContext
+        appContext = app
         nativeInitialized = try {
             val home = File(app.noBackupFilesDir, "freerdp")
             val cache = File(app.cacheDir, "freerdp")
@@ -215,9 +219,21 @@ object RdpConnector {
             rdpeiDisabled = !enableTouchInput
             touchFailedCode = 0
             nativeEnableNextTextBridge(!compatibilityMode)
+            var effectiveDriveMode = sharedDriveMode
+            val ctx = appContext
+            if (effectiveDriveMode != SharedDriveMode.OFF && ctx != null) {
+                if (PhoneStorageAccess.hasAllFilesAccess(ctx)) {
+                    nativeSetPhoneStorageRoot(PhoneStorageAccess.storageRootPath())
+                } else {
+                    nativeSetPhoneStorageRoot("")
+                    effectiveDriveMode = SharedDriveMode.OFF
+                }
+            } else if (effectiveDriveMode == SharedDriveMode.OFF && ctx != null) {
+                nativeSetPhoneStorageRoot("")
+            }
             val result = nativeConnect7(
                 host.trim(), port, username.trim(), password, domain.trim(), rdpServerName.trim(),
-                width, height, enableTouchInput, compatibilityMode, expectedFingerprint, fileTransferEnabled, sharedDriveMode.nativeValue
+                width, height, enableTouchInput, compatibilityMode, expectedFingerprint, fileTransferEnabled, effectiveDriveMode.nativeValue
             )
             Log.d(TAG, "Connect result: $result")
             result == 1
@@ -392,6 +408,20 @@ object RdpConnector {
     }
 
     fun sendClipboardText(text: String): Int = safeNative("sendClipboardText", -1) { nativeSendClipboardText(text) }
+
+    /**
+     * Used by the explicit "Send text" dialog: injects arbitrary Chinese, English, or mixed text
+     * via outbound CLIPRDR paste so remote Windows/Ubuntu Pinyin IMEs never intercept ASCII letters.
+     */
+    fun sendBulkText(text: String): Int {
+        if (text.isEmpty()) return 0
+        val pasteMode = when (linuxTextInputMode) {
+            LinuxTextInputMode.UBUNTU_TERM_PASTE -> 2
+            LinuxTextInputMode.UBUNTU_IBUS_HEX -> 3
+            else -> 5 // RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE (Windows & Ubuntu GUI Ctrl+V)
+        }
+        return safeNative("sendBulkText", -1) { nativeSendUbuntuText(text, pasteMode) }
+    }
 
     fun <T> withFrameLock(block: () -> T): T = synchronized(frameLock) { block() }
 

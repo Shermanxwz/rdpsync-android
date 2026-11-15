@@ -33,7 +33,7 @@ class UiCollectorTest(unittest.TestCase):
     def test_exact_six_methods_and_finite_plan(self):
         methods = methods_for('phone') + methods_for('expanded')
         self.assertEqual(set(methods), set(PLAN['methods']))
-        self.assertEqual(sum(len(x['suffixes']) for x in PLAN['methods'].values()), 78)
+        self.assertEqual(sum(len(x['suffixes']) for x in PLAN['methods'].values()), 53)
         for method in methods: self.check(ledger(method), method)
 
     def test_wrong_source_and_old_package_fail(self):

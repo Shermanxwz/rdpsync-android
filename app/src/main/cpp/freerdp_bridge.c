@@ -523,6 +523,21 @@ static BOOL receive_channel_data(freerdp* instance, UINT16 id, const BYTE* data,
         s_diag(s, "shared-space=ingress-rejected");
         return FALSE;
     }
+    if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 && s &&
+        s->text_bridge_enabled && !s->file_transfer_enabled) {
+        if (!rdpsync_transfer_ingress(&s->transfer_ingress, data, size, flags, total)) {
+            s->transfer_ingress = (RdpTransferIngress){0};
+            s_diag(s, "text-bridge=ignored-nonstandard-cliprdr-pdu");
+            return TRUE;
+        }
+        if ((flags & CHANNEL_FLAG_FIRST) && !(flags & (CHANNEL_FLAG_SUSPEND | CHANNEL_FLAG_RESUME)) &&
+            !rdpsync_transfer_admit_incoming(s->transfer, data, size, total)) {
+            s->transfer_ingress = (RdpTransferIngress){0};
+            s_diag(s, "text-bridge=ignored-oversized-cliprdr-pdu");
+            return TRUE;
+        }
+        return s->receive_channel_data && s->receive_channel_data(instance, id, data, size, flags, total);
+    }
     if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 &&
         (!s || !rdpsync_transfer_ingress(&s->transfer_ingress, data, size, flags, total))) {
         s_error(s, "文件传输通道消息超出安全限制");
@@ -565,8 +580,20 @@ static BOOL post_connect(freerdp* instance) {
     pthread_mutex_unlock(&session->mutex);
     if (!verified) return FALSE;
     s_diag(session, "connection=post-connect");
+#ifdef __ANDROID__
+    {
+        extern UINT32 rdpsync_freerdp_peer_os_major(const rdpSettings* settings);
+        session->peer_os_major = (int)rdpsync_freerdp_peer_os_major(instance->context->settings);
+    }
+#else
     session->peer_os_major = (int)freerdp_settings_get_uint32(
         instance->context->settings, FreeRDP_OsMajorType);
+#endif
+    {
+        char os_line[64];
+        snprintf(os_line, sizeof(os_line), "peer-os-major=%d", session->peer_os_major);
+        s_diag(session, os_line);
+    }
     /* Reject a server override before GDI allocates its primary surface. */
     const UINT32 width = freerdp_settings_get_uint32(instance->context->settings, FreeRDP_DesktopWidth);
     const UINT32 height = freerdp_settings_get_uint32(instance->context->settings, FreeRDP_DesktopHeight);
@@ -760,13 +787,19 @@ static BOOL configure_session_profile(rdpSettings* settings, int width, int heig
     return TRUE;
 }
 static void configure_performance_profile(RdpSession* session, rdpSettings* settings, BOOL compatibility) {
-    if (!settings || compatibility) return;
-    (void)freerdp_settings_set_bool(settings, FreeRDP_GfxSmallCache, FALSE);
-    if (rdpsync_probe_android_hw_avc()) {
-        if (freerdp_settings_set_bool(settings, FreeRDP_GfxH264, TRUE) && session) {
-            session->hw_h264_active = 1;
-        }
-    }
+    (void)session;
+    if (!settings) return;
+    /* Keep TCP alive across aggressive IPv4 home/CGNAT firewalls & mobile carriers. */
+    (void)freerdp_settings_set_bool(settings, FreeRDP_TcpKeepAlive, TRUE);
+    (void)freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveDelay, 15);
+    (void)freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveInterval, 5);
+    (void)freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveRetries, 3);
+    if (compatibility) return;
+    /* Keep GfxSmallCache=TRUE (<=4096 cache slots matching RDPSYNC_GFX_CACHE_SLOTS)
+     * and RemoteFX Progressive software GDI (GfxH264=FALSE) so Qualcomm/MediaTek
+     * byte-buffer tiled YUV formats never abort Frame 1 over IPv4 Windows sessions. */
+    (void)freerdp_settings_set_bool(settings, FreeRDP_GfxSmallCache, TRUE);
+    (void)freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
 }
 static BOOL configure_transfer_profile(rdpSettings* settings, BOOL enabled) {
     return freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, enabled) &&
