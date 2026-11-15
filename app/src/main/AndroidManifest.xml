@@ -26,13 +26,14 @@
 
         <activity
             android:name=".ui.MainActivity"
+            android:enabled="true"
+            android:exported="true"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden"
             android:windowSoftInputMode="adjustResize"
-            android:exported="true"
             android:theme="@style/Theme.RdpSync">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.action.LAUNCHER" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
     </application>

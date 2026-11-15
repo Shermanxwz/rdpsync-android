@@ -6,6 +6,7 @@ import unittest
 import xml.etree.ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
+ANDROID_NS = '{http://schemas.android.com/apk/res/android}'
 
 
 def resources(directory):
@@ -26,6 +27,44 @@ def contrast(a, b):
 
 
 class ProductUiContract(unittest.TestCase):
+    def test_launcher_manifest_and_adaptive_icon_contract(self):
+        manifest_path = ROOT / 'app/src/main/AndroidManifest.xml'
+        manifest_text = manifest_path.read_text()
+        self.assertNotIn('android.intent.action.LAUNCHER', manifest_text,
+                         'Typo action.LAUNCHER breaks home screen launcher icon')
+        root = ET.parse(manifest_path).getroot()
+        app_el = root.find('application')
+        self.assertIsNotNone(app_el)
+        self.assertEqual(app_el.attrib.get(ANDROID_NS + 'icon'), '@mipmap/ic_launcher')
+        self.assertEqual(app_el.attrib.get(ANDROID_NS + 'roundIcon'), '@mipmap/ic_launcher_round')
+        launcher_activities = []
+        for act in app_el.findall('activity'):
+            name = act.attrib.get(ANDROID_NS + 'name')
+            for flt in act.findall('intent-filter'):
+                actions = {a.attrib.get(ANDROID_NS + 'name') for a in flt.findall('action')}
+                categories = {c.attrib.get(ANDROID_NS + 'name') for c in flt.findall('category')}
+                if 'android.intent.action.MAIN' in actions and 'android.intent.category.LAUNCHER' in categories:
+                    self.assertEqual(act.attrib.get(ANDROID_NS + 'exported'), 'true')
+                    self.assertNotEqual(act.attrib.get(ANDROID_NS + 'enabled'), 'false')
+                    launcher_activities.append(name)
+        self.assertEqual(launcher_activities, ['.ui.MainActivity'])
+
+        for icon_name in ('ic_launcher.xml', 'ic_launcher_round.xml'):
+            adaptive_path = ROOT / 'app/src/main/res/mipmap-anydpi-v26' / icon_name
+            self.assertTrue(adaptive_path.is_file(), f'Missing {adaptive_path}')
+            adaptive_root = ET.parse(adaptive_path).getroot()
+            self.assertEqual(adaptive_root.tag, 'adaptive-icon')
+            for tag, expected in (('background', '@drawable/ic_launcher_background'),
+                                  ('foreground', '@drawable/ic_launcher_foreground'),
+                                  ('monochrome', '@drawable/ic_launcher_monochrome')):
+                child = adaptive_root.find(tag)
+                self.assertIsNotNone(child, f'Missing <{tag}> in {icon_name}')
+                ref = child.attrib.get(ANDROID_NS + 'drawable', '')
+                self.assertEqual(ref, expected)
+                drawable_file = ROOT / 'app/src/main/res/drawable' / (ref.split('/', 1)[1] + '.xml')
+                self.assertTrue(drawable_file.is_file(), f'Missing {drawable_file}')
+                self.assertEqual(ET.parse(drawable_file).getroot().tag, 'vector')
+
     def test_english_chinese_resource_coverage_and_placeholders(self):
         english, chinese = resources('values'), resources('values-zh')
         unlocalized = {entry.attrib['name'] for path in (ROOT / 'app/src/main/res/values').glob('*.xml')

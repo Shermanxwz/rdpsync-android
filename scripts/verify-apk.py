@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail packaging if the APK cannot load its JNI dependency closure or 16 KiB segments."""
+"""Fail packaging if the APK lacks JNI closure, 16 KiB segments, launcher activity, or release signature."""
 import hashlib
 import json
 import os
@@ -11,7 +11,10 @@ import sys
 import tempfile
 import zipfile
 
+EXPECTED_OFFICIAL_CERT_SHA256 = "687344cefb4a919c65de9c095ed4a9395cf39dd87822f25b73b02f7524ddf918"
+
 apk = Path(sys.argv[1])
+is_debug_apk = "debug" in apk.name.lower()
 required = {"librdpsync.so", "libfreerdp3.so", "libfreerdp-client3.so", "libwinpr3.so"}
 system = {"libc.so", "libm.so", "libdl.so", "libz.so", "liblog.so", "libandroid.so", "libjnigraphics.so", "libOpenSLES.so", "libEGL.so", "libGLESv2.so", "libvulkan.so", "libaaudio.so", "libmediandk.so"}
 expected_jni = set(re.findall(r"external fun (native\w+)\(", Path("app/src/main/java/com/rdp/sync/network/RdpConnector.kt").read_text()))
@@ -37,6 +40,14 @@ with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="rdpsyn
         entry = "assets/third_party/" + path.relative_to(notice_root).as_posix()
         assert archive.read(entry) == original, f"Third-party notice missing or altered in APK: {entry}"
     print(f"Third-party notice assets: {len(notices)} exact committed files preserved")
+
+    # Verify adaptive launcher icon resources are packaged inside the APK
+    names_in_zip = set(archive.namelist())
+    assert any(n.endswith("mipmap-anydpi-v26/ic_launcher.xml") for n in names_in_zip), \
+        "Missing adaptive launcher icon (mipmap-anydpi-v26/ic_launcher.xml) in APK"
+    assert any(n.endswith("mipmap-anydpi-v26/ic_launcher_round.xml") for n in names_in_zip), \
+        "Missing round adaptive launcher icon (mipmap-anydpi-v26/ic_launcher_round.xml) in APK"
+
     libraries = [n for n in archive.namelist() if re.fullmatch(r"lib/[^/]+/[^/]+\.so", n)]
     assert libraries, "APK has no native libraries (Gradle-only APK is not functional)"
     abis = sorted({n.split("/")[1] for n in libraries})
@@ -67,17 +78,40 @@ with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="rdpsyn
                 assert not missing, f"JNI exports missing: {missing}"
             print(f"{abi}/{name}: ELF,16KiB,DT_NEEDED OK")
     print("ABIs:", ", ".join(abis))
+
 sdk = Path(os.environ.get("ANDROID_HOME", os.environ.get("ANDROID_SDK_ROOT", "/opt/android-sdk")))
 build_tools = sdk / "build-tools/35.0.0"
 subprocess.run([str(build_tools / "zipalign"), "-c", "-P", "16", "4", str(apk)], check=True)
-subprocess.run([str(build_tools / "apksigner"), "verify", "--print-certs", str(apk)], check=True)
+certs_out = subprocess.check_output([str(build_tools / "apksigner"), "verify", "--print-certs", "-v", str(apk)], text=True)
+print(certs_out, end="")
+
 badging = subprocess.check_output([str(build_tools / "aapt"), "dump", "badging", str(apk)], text=True)
 package_line = next(line for line in badging.splitlines() if line.startswith("package:"))
 assert "name='com.rdp.sync'" in package_line, f"Unexpected official package identity: {package_line}"
-assert "versionCode='18'" in package_line and "versionName='1.3.1'" in package_line, \
-    f"Unexpected 1.3.1 version identity: {package_line}"
-labels = [line.split(":", 1)[1] for line in badging.splitlines() if line.startswith("application-label") ]
+assert "versionCode='19'" in package_line and "versionName='1.3.2'" in package_line, \
+    f"Unexpected 1.3.2 version identity: {package_line}"
+
+# Mandatory launcher icon & launchable HOME activity verification
+launchable_lines = [line for line in badging.splitlines() if line.startswith("launchable-activity:")]
+assert any("name='com.rdp.sync.ui.MainActivity'" in line for line in launchable_lines), \
+    f"APK lacks launchable HOME/LAUNCHER MainActivity (desktop icon will not appear!): {launchable_lines}"
+
+labels = [line.split(":", 1)[1] for line in badging.splitlines() if line.startswith("application-label")]
 assert labels and all(label == "'RDPsync'" for label in labels), "App display name must be RDPsync in every locale"
-print("\n".join(line for line in badging.splitlines() if line.startswith(("package:", "native-code:", "sdkVersion:", "targetSdkVersion:"))))
+
+if not is_debug_apk:
+    assert not any(line.startswith("application-debuggable") for line in badging.splitlines()), \
+        "Release APK must not carry application-debuggable flag"
+    if os.environ.get("RDPSYNC_REQUIRE_OFFICIAL_SIGNER") == "1":
+        assert "CN=Android Debug" not in certs_out, \
+            f"Release APK must not be signed with ephemeral Android Debug certificate:\n{certs_out}"
+        assert EXPECTED_OFFICIAL_CERT_SHA256 in certs_out.lower(), \
+            f"Release APK certificate SHA-256 mismatch (expected {EXPECTED_OFFICIAL_CERT_SHA256}):\n{certs_out}"
+
+print("\n".join(line for line in badging.splitlines()
+                 if line.startswith(("package:", "launchable-activity:", "native-code:", "sdkVersion:", "targetSdkVersion:"))))
 print("SHA256:", hashlib.sha256(apk.read_bytes()).hexdigest())
-print("APK verification passed; signature is development-only unless independently matched to the installed release.")
+if not is_debug_apk and EXPECTED_OFFICIAL_CERT_SHA256 in certs_out.lower():
+    print("APK verification passed; signed with persistent official RDPsync release certificate and verified launchable-activity.")
+else:
+    print("APK verification passed; verified launchable-activity and development signature.")

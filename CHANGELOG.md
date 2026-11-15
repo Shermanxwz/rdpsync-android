@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.2 - 2026-11-15
+
+- Fixed missing Android home screen launcher icon after installation by correcting `<category android:name="android.intent.category.LAUNCHER" />` and explicit `android:enabled="true"` on `.ui.MainActivity` in `AndroidManifest.xml`.
+- Configured a persistent official production release signing keystore (`CN=RDPsync Official`, `SHA-256: 68:73:44:CE:FB:4A:91:9C:65:DE:9C:09:5E:D4:A9:39:5C:F3:9D:D8:78:22:F2:5B:73:B0:2F:75:24:DD:F9:18`, V1+V2+V3 schemes) via GitHub Actions Secrets so `RDPsync-v1.3.2-arm64-v8a.apk` (`com.rdp.sync`, `versionCode = 19`) and all future releases support direct in-place upgrade without `Android Debug` signature conflicts or OEM risk quarantines.
+- Added Android 8–15 (`API 26+`) vector Adaptive Launcher Icons (`mipmap-anydpi-v26/ic_launcher.xml` and `ic_launcher_round.xml`) plus Android 13–15 Material You monochrome icon layers.
+- Hardened `scripts/verify-apk.py` and `scripts/test-product-ui.py` to enforce `aapt` `launchable-activity`, packaged adaptive icon resources, non-debuggable release packaging, and persistent official certificate fingerprint verification in CI.
+
 ## 1.3.1 - 2026-11-15
 
 - Fixed IPv4 post-connect session disconnects (`frame=0x0`) on Windows RDP hosts by disabling unnegotiated byte-buffer `GfxH264` defaults while retaining `GfxSmallCache`, enabling TCP KeepAlive (`15s / 5s / 3`), accepting Windows `rdpclip.exe` `CB_TEMP_DIRECTORY (0x0006)` PDUs, and making text-only `CLIPRDR` resilient to nonstandard remote clipboard frames without tearing down the session.

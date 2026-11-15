@@ -18,12 +18,39 @@ android {
         applicationId = "com.rdp.sync"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "1.3.1"
+        versionCode = 19
+        versionName = "1.3.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
             abiFilters += (providers.gradleProperty("nativeAbis").orNull ?: "arm64-v8a").split(",")
+        }
+    }
+
+    signingConfigs {
+        val releaseStoreFile = providers.environmentVariable("RDPSYNC_RELEASE_STORE_FILE").orNull
+            ?: providers.gradleProperty("RDPSYNC_RELEASE_STORE_FILE").orNull
+        val releaseStorePassword = providers.environmentVariable("RDPSYNC_RELEASE_STORE_PASSWORD").orNull
+            ?: providers.gradleProperty("RDPSYNC_RELEASE_STORE_PASSWORD").orNull
+        val releaseKeyAlias = providers.environmentVariable("RDPSYNC_RELEASE_KEY_ALIAS").orNull
+            ?: providers.gradleProperty("RDPSYNC_RELEASE_KEY_ALIAS").orNull
+        val releaseKeyPassword = providers.environmentVariable("RDPSYNC_RELEASE_KEY_PASSWORD").orNull
+            ?: providers.gradleProperty("RDPSYNC_RELEASE_KEY_PASSWORD").orNull
+        if (!releaseStoreFile.isNullOrBlank() &&
+            !releaseStorePassword.isNullOrBlank() &&
+            !releaseKeyAlias.isNullOrBlank() &&
+            !releaseKeyPassword.isNullOrBlank() &&
+            file(releaseStoreFile).isFile
+        ) {
+            create("release") {
+                storeFile = file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
         }
     }
 
@@ -33,7 +60,7 @@ android {
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
