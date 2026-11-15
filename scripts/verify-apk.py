@@ -13,7 +13,7 @@ import zipfile
 
 apk = Path(sys.argv[1])
 required = {"librdpsync.so", "libfreerdp3.so", "libfreerdp-client3.so", "libwinpr3.so"}
-system = {"libc.so", "libm.so", "libdl.so", "libz.so", "liblog.so", "libandroid.so", "libjnigraphics.so", "libOpenSLES.so", "libEGL.so", "libGLESv2.so", "libvulkan.so", "libaaudio.so"}
+system = {"libc.so", "libm.so", "libdl.so", "libz.so", "liblog.so", "libandroid.so", "libjnigraphics.so", "libOpenSLES.so", "libEGL.so", "libGLESv2.so", "libvulkan.so", "libaaudio.so", "libmediandk.so"}
 expected_jni = set(re.findall(r"external fun (native\w+)\(", Path("app/src/main/java/com/rdp/sync/network/RdpConnector.kt").read_text()))
 with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="rdpsync-apk-") as temp:
     # Native dependencies do not automatically carry their source license notices

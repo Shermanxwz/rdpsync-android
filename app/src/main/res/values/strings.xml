@@ -63,7 +63,8 @@
     <string name="sync_upload">Upload this device’s list</string>
     <string name="sync_download">Download the cloud list</string>
     <string name="sync_file_title">Choose what to sync</string>
-    <string name="sync_profile_info">Profiles only · rdpsync_profiles.json\nRDP passwords are not sent and the legacy cloud file is untouched. Import preserves existing local passwords and devices.</string>
+    <string name="sync_profile_info">Profiles only · rdpsync_profiles.json
+RDP passwords are not sent and the legacy cloud file is untouched. Import preserves existing local passwords and devices.</string>
     <string name="sync_legacy">Use legacy password file: rdpsync_devices.json</string>
     <string name="sync_legacy_download">Read an older client’s backup. Passwords will be imported into encrypted local storage. An explicitly empty password updates the local password.</string>
     <string name="sync_legacy_warning">Warning: RDP passwords will be uploaded as readable plain text. HTTPS protects transport only, not the backup itself. The server and anyone with file access can read them.</string>
@@ -206,4 +207,11 @@
     <string name="sync_in_progress">Sync in progress</string>
     <string name="testing_connection">Testing connection…</string>
     <string name="testing_connection_close">Closing this dialog does not cancel the connection test.</string>
+    <string name="hud_os_ubuntu_linux">Ubuntu / Linux RDP · Direct IME Ready</string>
+    <string name="hud_os_windows_rdp">Windows RDP · Low-Latency Session</string>
+    <string name="ime_mode_auto">IME: Auto</string>
+    <string name="ime_mode_ubuntu_gui">Ubuntu GUI</string>
+    <string name="ime_mode_ubuntu_term">Ubuntu Term</string>
+    <string name="ime_mode_ubuntu_hex">IBus Hex</string>
+    <string name="ime_mode_unicode">Unicode</string>
 </resources>

@@ -79,6 +79,9 @@ object RdpConnector {
     external fun nativeSendKeyEvent(keyCode: Int, down: Int): Int
     external fun nativeSendUnicodeChar(code: Int): Int
     external fun nativeSendClipboardText(text: String): Int
+    external fun nativeSendUbuntuText(text: String, mode: Int): Int
+    external fun nativeGetPeerOsMajor(): Int
+    external fun nativeEnableNextTextBridge(enabled: Boolean)
     external fun nativeGetWidth(): Int
     external fun nativeGetHeight(): Int
     external fun nativeRequestResize(width: Int, height: Int, desktopScale: Int): Int
@@ -211,6 +214,7 @@ object RdpConnector {
             rdpeiConnected = false
             rdpeiDisabled = !enableTouchInput
             touchFailedCode = 0
+            nativeEnableNextTextBridge(!compatibilityMode)
             val result = nativeConnect7(
                 host.trim(), port, username.trim(), password, domain.trim(), rdpServerName.trim(),
                 width, height, enableTouchInput, compatibilityMode, expectedFingerprint, fileTransferEnabled, sharedDriveMode.nativeValue
@@ -306,6 +310,8 @@ object RdpConnector {
         try {
             // One native lock supplies an atomic frame generation + dimensions.
             // Separate width/height calls can form an oversized hybrid during rotation.
+            val latestId = nativeGetFrameId()
+            if (latestId <= 0L || latestId == cachedFrameId) return@synchronized null
             val frameInfo = nativeGetTelemetry()
             if (frameInfo.size < 10) return@synchronized null
             val frameId = frameInfo[0]
@@ -334,7 +340,30 @@ object RdpConnector {
 
     fun sendKeyEvent(keyCode: Int, down: Int): Int = safeNative("sendKeyEvent", -1) { nativeSendKeyEvent(keyCode, down) }
 
+    @Volatile var linuxTextInputMode: LinuxTextInputMode = LinuxTextInputMode.SMART_AUTO
+
+    fun isPeerUnix(): Boolean = safeNative("getPeerOsMajor", 0) { nativeGetPeerOsMajor() } == 0x0004
+
     fun sendTextInput(text: String): Int {
+        if (text.isEmpty()) return 0
+        val mode = linuxTextInputMode
+        val hasNonAscii = text.any { it.code > 0x7F }
+        val useLinuxBridge = when (mode) {
+            LinuxTextInputMode.SMART_AUTO -> hasNonAscii && isPeerUnix()
+            LinuxTextInputMode.UBUNTU_GUI_PASTE,
+            LinuxTextInputMode.UBUNTU_TERM_PASTE -> hasNonAscii || text.length > 1
+            LinuxTextInputMode.UBUNTU_IBUS_HEX -> hasNonAscii
+            LinuxTextInputMode.UNICODE_ONLY -> false
+        }
+        if (useLinuxBridge) {
+            val nativeMode = when (mode) {
+                LinuxTextInputMode.SMART_AUTO, LinuxTextInputMode.UBUNTU_GUI_PASTE -> 1
+                LinuxTextInputMode.UBUNTU_TERM_PASTE -> 2
+                LinuxTextInputMode.UBUNTU_IBUS_HEX -> 3
+                LinuxTextInputMode.UNICODE_ONLY -> 4
+            }
+            return safeNative("sendUbuntuText", -1) { nativeSendUbuntuText(text, nativeMode) }
+        }
         var result = 0
         text.forEachIndexed { index, char ->
             result = when (char) {
@@ -345,15 +374,13 @@ object RdpConnector {
                     var code: Int
                     do {
                         code = safeNative("sendUnicodeChar", -1) { nativeSendUnicodeChar(char.code) }
-                        if (code == -5) Thread.sleep(4) // queue backpressure, never UI-thread JNI blocking
+                        if (code == -5) Thread.sleep(4)
                     } while (code == -5 && SystemClock.elapsedRealtime() < deadline)
                     code
                 }
             }
             if (result != 0) return result
-            // This API is called by the IO input actor; pace large commits so native
-            // input cannot starve network decode or fill the bounded event queue.
-            if (index > 0 && index % 32 == 0) Thread.sleep(4)
+            if (index > 0 && index % 64 == 0) Thread.sleep(2)
         }
         return result
     }

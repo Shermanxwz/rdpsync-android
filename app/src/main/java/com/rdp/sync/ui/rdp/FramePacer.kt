@@ -1,15 +1,34 @@
 package com.rdp.sync.ui.rdp
 
-/** Fractional-vsync cadence (e.g. 60fps on a 90Hz panel), without catch-up bursts. */
+/**
+ * High-refresh LTPO-aware fractional-vsync pacer (supports 60Hz, 90Hz, 120Hz, 144Hz panels)
+ * with instantaneous input-boost promotion for sub-frame touch/cursor responsiveness.
+ */
 class FramePacer {
     private var nextDue = -1L
     private var fps = 0
-    fun shouldPoll(frameTimeNanos: Long, targetFps: Int): Boolean {
-        val requested = targetFps.coerceIn(15, 120)
-        if (fps != requested) { fps = requested; nextDue = -1 }
+    private var boostUntilNanos = 0L
+
+    fun notifyUserInteraction(nowNanos: Long, panelMaxFps: Int) {
+        if (panelMaxFps > 60) {
+            boostUntilNanos = nowNanos + 650_000_000L // 650ms high-refresh boost window
+        }
+    }
+
+    fun shouldPoll(frameTimeNanos: Long, targetFps: Int, panelMaxFps: Int = 60): Boolean {
+        val boostedTarget = if (frameTimeNanos < boostUntilNanos) maxOf(targetFps, panelMaxFps) else targetFps
+        val requested = boostedTarget.coerceIn(15, 144)
+        if (fps != requested) {
+            fps = requested
+            nextDue = -1L
+        }
         val period = 1_000_000_000L / fps
-        if (nextDue >= 0 && frameTimeNanos + 500_000 < nextDue) return false
-        nextDue = if (nextDue < 0 || frameTimeNanos - nextDue >= period) frameTimeNanos + period else nextDue + period
+        if (nextDue >= 0 && frameTimeNanos + 500_000L < nextDue) return false
+        nextDue = if (nextDue < 0 || frameTimeNanos - nextDue >= period) {
+            frameTimeNanos + period
+        } else {
+            nextDue + period
+        }
         return true
     }
 }
