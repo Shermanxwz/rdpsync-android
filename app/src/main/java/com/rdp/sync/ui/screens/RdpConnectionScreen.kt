@@ -143,18 +143,6 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     // Ephemeral consent only: never persisted in the profile or restored from a route argument.
     var sharedDriveMode by remember(endpoint) { mutableStateOf(initialSharedDriveMode) }
     var showDriveStatus by remember(endpoint) { mutableStateOf(false) }
-    val legacyDrivePermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestMultiplePermissions()
-    ) { results ->
-        if (results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)) {
-            PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
-            showDriveStatus = false
-            sharedDriveMode = SharedDriveMode.READ_WRITE
-            reconnect()
-        } else {
-            driveActionError = context.getString(R.string.phone_storage_permission_needed)
-        }
-    }
     var sharedDriveState by remember(endpoint, attempt) { mutableStateOf(SharedDriveState(
         mode = sharedDriveMode, status = if (sharedDriveMode == SharedDriveMode.OFF) SharedDriveStatus.OFF else SharedDriveStatus.REQUESTED)) }
     var driveActionError by remember(endpoint, attempt) { mutableStateOf("") }
@@ -338,6 +326,18 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
         input.shutdown()
         isConnected = false
         attempt++
+    }
+    val legacyDrivePermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results.values.all { it } || PhoneStorageAccess.hasAllFilesAccess(context)) {
+            PhoneStorageAccess.setSharePhoneStorageEnabled(context, true)
+            showDriveStatus = false
+            sharedDriveMode = SharedDriveMode.READ_WRITE
+            reconnect()
+        } else {
+            driveActionError = context.getString(R.string.phone_storage_permission_needed)
+        }
     }
 
     fun exitSession() {
@@ -618,8 +618,9 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                         val payload = text
                         showPaste = false
                         if (payload.isNotEmpty()) {
-                            uiScope.launch(Dispatchers.IO) {
-                                if (RdpConnector.sendBulkText(payload) != 0) {
+                            uiScope.launch {
+                                val rc = withContext(Dispatchers.IO) { RdpConnector.sendBulkText(payload) }
+                                if (rc != 0) {
                                     inputWarning = context.getString(R.string.text_interrupted)
                                 }
                             }
