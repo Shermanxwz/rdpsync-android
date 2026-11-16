@@ -70,9 +70,6 @@ static UINT sim_client_format_list(CliprdrClientContext* c, const CLIPRDR_FORMAT
         return CHANNEL_RC_OK;
     }
     g_initial_format_list_sent = 1;
-    wStream* s = cliprdr_packet_format_list_new(&filterList, TRUE, FALSE);
-    assert(s != NULL);
-    Stream_Free(s, TRUE);
     g_wire_format_lists_sent++;
     g_last_wire_num_formats = filterList.numFormats;
     g_last_wire_format_id = filterList.numFormats > 0 ? filterList.formats[0].formatId : 0;

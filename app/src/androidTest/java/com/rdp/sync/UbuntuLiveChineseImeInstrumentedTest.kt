@@ -7,12 +7,19 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
@@ -22,6 +29,8 @@ import com.rdp.sync.ui.MainActivity
 import com.rdp.sync.ui.rdp.RdpDesktopView
 import com.rdp.sync.ui.screens.RdpConnectionScreen
 import com.rdp.sync.ui.theme.RdpSyncTheme
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +41,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.net.InetSocketAddress
 import java.net.Socket
 
@@ -46,11 +56,14 @@ import java.net.Socket
  * the pre-existing stale Ubuntu clipboard trap.
  */
 @RunWith(AndroidJUnit4::class)
+@OptIn(ExperimentalTestApi::class, ExperimentalCoroutinesApi::class)
 class UbuntuLiveChineseImeInstrumentedTest {
     @get:Rule
-    val compose = createAndroidComposeRule<MainActivity>()
+    val compose = createAndroidComposeRule<MainActivity>(effectContext = StandardTestDispatcher())
 
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
+    private val measurements = JSONObject()
+    private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
 
     private fun httpJson(port: Int, method: String, path: String): JSONObject {
         Socket().use { sock ->
@@ -68,34 +81,54 @@ class UbuntuLiveChineseImeInstrumentedTest {
         }
     }
 
-    private fun findDesktopView(root: View): RdpDesktopView? {
-        if (root is RdpDesktopView) return root
-        if (root is ViewGroup) {
-            for (i in 0 until root.childCount) {
-                findDesktopView(root.getChildAt(i))?.let { return it }
+    private fun desktopOrNull(): RdpDesktopView? {
+        fun find(v: View): RdpDesktopView? {
+            if (v is RdpDesktopView) return v
+            if (v is ViewGroup) {
+                for (i in 0 until v.childCount) {
+                    find(v.getChildAt(i))?.let { return it }
+                }
             }
+            return null
         }
-        return null
+        return find(compose.activity.window.decorView)
     }
 
-    private fun awaitRemoteEntryText(statePort: Int, expected: String, timeoutMs: Long = 15_000L): JSONObject {
+    private fun desktop(): RdpDesktopView = requireNotNull(desktopOrNull()) { "RdpDesktopView not found" }
+
+    private fun waitFor(reason: String, timeoutMs: Long = 20_000L, predicate: () -> Boolean) {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var last = JSONObject()
+        var lastError: Throwable? = null
         while (SystemClock.elapsedRealtime() < deadline) {
-            runCatching { httpJson(statePort, "GET", "/state") }.onSuccess { s ->
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
+            try {
+                if (predicate()) return
+            } catch (e: IOException) {
+                lastError = e
+            }
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("$reason; status=${RdpConnector.getStatus()}; diag=${RdpConnector.getDiag()}", lastError)
+    }
+
+    private fun awaitRemoteEntryText(statePort: Int, expected: String, timeoutMs: Long = 20_000L): JSONObject {
+        var last = JSONObject()
+        waitFor("remote Ubuntu GTK3 TextView == '$expected' (last=$last)", timeoutMs) {
+            val s = runCatching { httpJson(statePort, "GET", "/state") }.getOrNull()
+            if (s != null) {
                 last = s
                 val txt = s.optString("entry_text", "")
                 assertFalse(
                     "Stale Ubuntu clipboard trap was pasted into desktop! state=$s",
                     txt.contains("OLD_CLIPBOARD_TRAP")
                 )
-                if (txt == expected) return s
+                txt == expected
+            } else {
+                false
             }
-            SystemClock.sleep(150)
         }
-        throw AssertionError(
-            "Timed out waiting for remote Ubuntu GTK3 TextView == '$expected'; last state=$last; diag=${RdpConnector.getDiag()}"
-        )
+        return last
     }
 
     @Test
@@ -107,11 +140,12 @@ class UbuntuLiveChineseImeInstrumentedTest {
         val expectedFp = requireNotNull(args.getString("ubuntuLiveFingerprint")).lowercase()
         require(expectedFp.matches(Regex("[0-9a-f]{64}"))) { "Invalid fingerprint: $expectedFp" }
 
-        val ctx = instrumentation.targetContext
-        assertTrue("RdpConnector.initialize failed", RdpConnector.initialize(ctx))
+        val targetCtx = instrumentation.targetContext
+        val actCtx = compose.activity
+        assertTrue("RdpConnector.initialize failed", RdpConnector.initialize(targetCtx))
 
-        ctx.getSharedPreferences("certificate_trust_v1", Context.MODE_PRIVATE).edit().clear().commit()
-        ctx.getSharedPreferences("session_preferences", Context.MODE_PRIVATE).edit()
+        targetCtx.getSharedPreferences("certificate_trust_v1", Context.MODE_PRIVATE).edit().clear().commit()
+        targetCtx.getSharedPreferences("session_preferences", Context.MODE_PRIVATE).edit()
             .clear()
             .putString("resolution_mode", "PROFILE")
             .putString("display_quality", "BALANCED")
@@ -119,6 +153,7 @@ class UbuntuLiveChineseImeInstrumentedTest {
             .commit()
         RdpConnector.linuxTextInputMode = LinuxTextInputMode.SMART_AUTO
 
+        val showing = mutableStateOf(true)
         val device = Device(
             id = 920033,
             name = "Ubuntu Live $backend",
@@ -130,56 +165,56 @@ class UbuntuLiveChineseImeInstrumentedTest {
             height = 720
         )
 
-        compose.activityRule.scenario.onActivity { activity ->
-            activity.setContent {
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                boundedScroll.Bind()
                 RdpSyncTheme {
-                    RdpConnectionScreen(device = device, onBack = {})
+                    if (showing.value) {
+                        RdpConnectionScreen(device = device, onBack = { showing.value = false })
+                    }
                 }
             }
         }
 
         try {
-            // 1. Complete first-time TOFU certificate verification through the real UI
-            val verifyLabel = ctx.getString(R.string.fingerprint_verified)
-            val savePinLabel = ctx.getString(R.string.fingerprint_save)
-            compose.waitUntil(timeoutMillis = 25_000L) {
-                runCatching {
-                    compose.onNodeWithText(verifyLabel).fetchSemanticsNode()
-                    true
-                }.getOrDefault(false)
+            // 1. Complete first-time TOFU certificate verification through BoundedFixtureScroll + mainClock pump
+            val confirmTitle = actCtx.getString(R.string.certificate_confirm)
+            val verifyLabel = actCtx.getString(R.string.fingerprint_verified)
+            val savePinLabel = actCtx.getString(R.string.fingerprint_save)
+            waitFor("Ubuntu live RDP certificate challenge", 45_000L) {
+                RdpConnector.certificateChallenge()?.fingerprint == expectedFp &&
+                    compose.onAllNodesWithText(confirmTitle).fetchSemanticsNodes().isNotEmpty()
             }
-            runCatching { compose.onNodeWithText(verifyLabel).performScrollTo() }
-            compose.onNodeWithText(verifyLabel).performClick()
-            runCatching { compose.onNodeWithText(savePinLabel).performScrollTo() }
-            compose.onNodeWithText(savePinLabel).performClick()
+            compose.onNodeWithText(savePinLabel).assertIsNotEnabled()
+            boundedScroll.to(compose.onNodeWithText(verifyLabel)).performClick()
+            compose.onNodeWithText(savePinLabel).assertIsEnabled().performClick()
 
-            // 2. Wait for live RDP connection + decoded desktop frame + Unix peer auto-detection
-            val connDeadline = SystemClock.elapsedRealtime() + 30_000L
-            while (SystemClock.elapsedRealtime() < connDeadline) {
-                if (RdpConnector.isConnected() && RdpConnector.getFrameBitmap() != null) break
-                SystemClock.sleep(150)
+            // 2. Wait for live RDP connection + decoded desktop frame + dismiss Android 15 fullscreen coachmark
+            waitFor("Ubuntu live RDP connected frame", 45_000L) {
+                RdpConnector.isConnected() && RdpConnector.nativeGetFrameId() > 0 && RdpConnector.getFrameBitmap() != null
             }
-            assertTrue("RDP session did not connect: ${RdpConnector.getStatus()}\n${RdpConnector.getDiag()}", RdpConnector.isConnected())
+            acknowledgeSystemImmersiveCoachmark(
+                compose.activity,
+                { compose.mainClock.advanceTimeBy(32) },
+                {},
+                { measurements.put("system_immersive_coachmark", it) }
+            )
 
-            // 3. Wait for the live Ubuntu GTK3 graphical window (/state) to map & become ready
-            val gtkDeadline = SystemClock.elapsedRealtime() + 25_000L
+            // 3. Wait for the live Ubuntu GTK3 graphical window (/state) to map & CLIPRDR Unix peer handshake
             var initialState: JSONObject? = null
-            while (SystemClock.elapsedRealtime() < gtkDeadline) {
+            waitFor("Ubuntu GTK3 desktop window ready", 30_000L) {
                 val st = runCatching { httpJson(statePort, "GET", "/state") }.getOrNull()
                 if (st != null && st.optBoolean("ready", false)) {
                     initialState = st
-                    break
+                    true
+                } else {
+                    false
                 }
-                SystemClock.sleep(200)
             }
-            assertNotNull("Ubuntu GTK3 desktop window never became ready", initialState)
-
-            // Wait briefly for CLIPRDR MonitorReady / capabilities handshake to finish
-            SystemClock.sleep(600)
-            assertTrue(
-                "Expected isPeerUnix() == true on Ubuntu ($backend), diag=${RdpConnector.getDiag()}",
+            assertNotNull(initialState)
+            waitFor("Ubuntu Unix peer auto-detection", 10_000L) {
                 RdpConnector.isPeerUnix()
-            )
+            }
 
             // 4. Arm the stale clipboard trap ("OLD_CLIPBOARD_TRAP_旧剪贴板污染测试") ON UBUNTU WHILE CONNECTED!
             val armedState = httpJson(statePort, "POST", "/arm-trap")
@@ -187,69 +222,63 @@ class UbuntuLiveChineseImeInstrumentedTest {
             assertEquals("OLD_CLIPBOARD_TRAP_旧剪贴板污染测试", armedState.optString("trap_verified_text"))
 
             // Click dead-center of the GTK3 TextView (640, 360) and confirm active X11/Wayland input focus
-            for (attempt in 1..6) {
+            waitFor("GTK3 TextView focus at (640, 360)", 10_000L) {
                 assertEquals(0, RdpConnector.sendPointerEvent(640, 360, 1))
-                SystemClock.sleep(250)
+                SystemClock.sleep(150)
                 val focusCheck = runCatching { httpJson(statePort, "GET", "/state") }.getOrNull()
-                if (focusCheck != null && focusCheck.optBoolean("entry_focused", false)) break
+                focusCheck != null && focusCheck.optBoolean("entry_focused", false)
             }
-
-            var desktopView: RdpDesktopView? = null
-            compose.activityRule.scenario.onActivity { activity ->
-                desktopView = findDesktopView(activity.window.decorView)
-            }
-            val view = requireNotNull(desktopView) { "RdpDesktopView not found in view hierarchy" }
 
             // 5. Direct mobile Chinese IME commit #1 (with Pinyin composing pre-edit first!)
             var ic: android.view.inputmethod.InputConnection? = null
-            instrumentation.runOnMainSync {
-                view.requestFocus()
-                ic = view.onCreateInputConnection(EditorInfo())
+            compose.runOnUiThread {
+                val v = desktop()
+                v.requestFocus()
+                ic = v.onCreateInputConnection(EditorInfo())
                 assertNotNull("onCreateInputConnection returned null", ic)
                 ic!!.setComposingText("ni hao ubuntu", 1)
             }
+            compose.mainClock.advanceTimeBy(200)
+            instrumentation.waitForIdleSync()
             SystemClock.sleep(200)
             val duringCompose = httpJson(statePort, "GET", "/state")
             assertEquals("Composing pinyin must remain local until committed", "", duringCompose.optString("entry_text"))
 
             val commit1 = "你好Ubuntu桌面"
-            instrumentation.runOnMainSync {
+            compose.runOnUiThread {
                 ic!!.commitText(commit1, 1)
             }
             val afterCommit1 = awaitRemoteEntryText(statePort, commit1)
 
             // 6. Immediate consecutive Chinese IME commit #2 (verifies initialFormatListSent never drops 2nd+ commits!)
             val commit2 = "，连续输入不丢字"
-            instrumentation.runOnMainSync {
+            compose.runOnUiThread {
                 ic!!.commitText(commit2, 1)
             }
             val afterCommit2 = awaitRemoteEntryText(statePort, commit1 + commit2)
+            compose.runOnUiThread {
+                ic?.closeConnection()
+            }
 
             // 7. Exercise the real UI "发送文字" (Send text) dialog via MagneticEdgeHud!
-            val menuDesc = ctx.getString(R.string.session_menu)
-            val sendTextLabel = ctx.getString(R.string.send_text)
-            val textFieldLabel = ctx.getString(R.string.text_field)
-            val sendBtnLabel = ctx.getString(R.string.send)
-
-            compose.onNodeWithContentDescription(menuDesc).performClick()
-            compose.waitUntil(timeoutMillis = 10_000L) {
-                runCatching {
-                    compose.onNodeWithText(sendTextLabel).fetchSemanticsNode()
-                    true
-                }.getOrDefault(false)
-            }
-            runCatching { compose.onNodeWithText(sendTextLabel).performScrollTo() }
-            compose.onNodeWithText(sendTextLabel).performClick()
-
+            val menuDesc = actCtx.getString(R.string.session_menu)
+            val sendTextLabel = actCtx.getString(R.string.send_text)
+            val sendBtnLabel = actCtx.getString(R.string.send)
             val sendDialogPayload = " [发送文字100%正常]"
-            compose.waitUntil(timeoutMillis = 10_000L) {
-                runCatching {
-                    compose.onNodeWithText(textFieldLabel).fetchSemanticsNode()
-                    true
-                }.getOrDefault(false)
+
+            compose.onNodeWithContentDescription(menuDesc).performTouchInput { click() }
+            waitFor("session menu popup with send_text", 10_000L) {
+                compose.onAllNodesWithText(sendTextLabel).fetchSemanticsNodes().size == 1
             }
-            compose.onNodeWithText(textFieldLabel).performTextReplacement(sendDialogPayload)
-            compose.onNodeWithText(sendBtnLabel).performClick()
+            boundedScroll.to(compose.onNodeWithText(sendTextLabel)).assertIsEnabled().performClick()
+
+            waitFor("send text dialog input field", 10_000L) {
+                compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNode(hasSetTextAction()).performTextReplacement(sendDialogPayload)
+            compose.mainClock.advanceTimeBy(100)
+            instrumentation.waitForIdleSync()
+            compose.onNodeWithText(sendBtnLabel).assertIsEnabled().performClick()
 
             val expectedFull = commit1 + commit2 + sendDialogPayload
             val finalDesktopState = awaitRemoteEntryText(statePort, expectedFull)
@@ -259,8 +288,10 @@ class UbuntuLiveChineseImeInstrumentedTest {
             )
 
             // Wait 500ms for remote GTK frame update and capture rendered Android desktop bitmap + JSON receipt
+            compose.mainClock.advanceTimeBy(500)
+            instrumentation.waitForIdleSync()
             SystemClock.sleep(500)
-            val outDir = File(requireNotNull(ctx.getExternalFilesDir(null)) { "externalFilesDir null" }, "rdpsync-ubuntu-live-ime")
+            val outDir = File(requireNotNull(targetCtx.getExternalFilesDir(null)) { "externalFilesDir null" }, "rdpsync-ubuntu-live-ime")
             outDir.mkdirs()
             val frameBmp = RdpConnector.getFrameBitmap()
             if (frameBmp != null) {
@@ -282,6 +313,7 @@ class UbuntuLiveChineseImeInstrumentedTest {
                 .put("rdp_diagnostics", RdpConnector.getDiag())
             File(outDir, "$backend-receipt.json").writeText(receipt.toString(2), Charsets.UTF_8)
         } finally {
+            compose.runOnUiThread { showing.value = false }
             RdpConnector.disconnect()
         }
     }
