@@ -685,23 +685,37 @@ static int enqueue_input_with_retry(InputCommand cmd) {
     return rc;
 }
 
-static int send_ubuntu_hex_fallback(const uint8_t* utf8, size_t len) {
+static int send_ubuntu_hex_stream(const uint8_t* utf8, size_t len, int all_printable_hex) {
     size_t idx = 0;
+    uint32_t prev = 0;
     while (idx < len) {
         uint32_t cp = 0;
         if (rdpsync_utf8_next(utf8, len, &idx, &cp) <= 0) return -3;
+        if (cp == '\n' && prev == '\r') { prev = cp; continue; }
+        prev = cp;
         int rc = 0;
         if (cp == '\n' || cp == '\r') {
-            rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x1C, 1});
-            if (!rc) rc = enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x1C, 0});
-        } else if (cp < 0x80U) {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)cp, 0});
-        } else {
+            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1C, 1});
+            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1C, 0});
+        } else if (cp == '\t') {
+            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x0F, 1});
+            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x0F, 0});
+        } else if (cp >= 0x20U && (all_printable_hex || cp >= 0x80U)) {
             rc = enqueue_input_with_retry((InputCommand){INPUT_UBUNTU_HEX, 0, 0, (int)cp, 0});
+            if (!rc) {
+                struct timespec pace = {0, 2000000L}; /* 2ms Wayland/libei frame drain pacing */
+                nanosleep(&pace, NULL);
+            }
+        } else if (cp >= 0x20U) {
+            rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)cp, 0});
         }
         if (rc != 0) return rc;
     }
     return 0;
+}
+
+static int send_ubuntu_hex_fallback(const uint8_t* utf8, size_t len) {
+    return send_ubuntu_hex_stream(utf8, len, 1);
 }
 
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuText(
@@ -746,8 +760,19 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
         struct timespec rts = {0, 15000000L}; /* 15ms */
         nanosleep(&rts, NULL);
     }
+    if (!is_unix && rdpsync_transfer_is_unix_peer(transfer)) is_unix = 1;
+    const int is_xrdp = rdpsync_transfer_is_xrdp_peer(transfer);
 
-    uint64_t seq = transfer ? rdpsync_transfer_offer_text(transfer, (const uint8_t*)raw, len) : 0;
+    /* Ubuntu 24.04 GNOME Remote Desktop 46.x + WinPR 3.32.2 escapes CF_UNICODETEXT via
+     * winpr_utf8ToUtfEscapedString ("text/plain" -> "\u4f60\u597d"). On non-xrdp Unix
+     * peers (GNOME Remote Desktop) in SMART_AUTO / Send-Text modes, deliver directly via
+     * paced ISO-14755 (Ctrl+Shift+U <hex> Space) so UTF-8 Chinese + English arrive intact,
+     * remote IBus Pinyin never intercepts letters, and the remote clipboard stays untouched. */
+    const int prefer_gnome_iso14755 = is_unix && !is_xrdp &&
+        (mode == RDPSYNC_LINUX_TEXT_GUI_PASTE || mode == RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE);
+
+    uint64_t seq = (!prefer_gnome_iso14755 && transfer)
+        ? rdpsync_transfer_offer_text(transfer, (const uint8_t*)raw, len) : 0;
     if (seq > 0 && wake) {
         SetEvent(wake);
         /* CRITICAL: Only inject Ctrl+V / Ctrl+Shift+V AFTER the remote server confirms

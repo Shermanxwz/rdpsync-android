@@ -61,4 +61,5 @@ int rdpsync_transfer_wait_text_ack(RdpTransfer* transfer, uint64_t seq, int time
 int rdpsync_transfer_wait_text_served(RdpTransfer* transfer, uint64_t seq, int timeout_ms);
 int rdpsync_transfer_is_unix_peer(RdpTransfer* transfer);
 int rdpsync_transfer_is_ready(RdpTransfer* transfer);
+int rdpsync_transfer_is_xrdp_peer(RdpTransfer* t);
 #endif

@@ -45,7 +45,6 @@ import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.rdp.sync.R
-import com.rdp.sync.network.LinuxTextInputMode
 import com.rdp.sync.network.RdpInputDispatcher
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -136,8 +135,6 @@ internal fun MagneticEdgeHud(
     input: RdpInputDispatcher,
     deviceName: String,
     peerIsUnix: Boolean,
-    linuxInputMode: LinuxTextInputMode,
-    onCycleLinuxInputMode: () -> Unit,
     fullscreen: Boolean,
     imeVisible: Boolean,
     pointerMode: Boolean,
@@ -377,12 +374,12 @@ internal fun MagneticEdgeHud(
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             HudBentoTile(
-                                icon = Icons.Default.Translate,
-                                label = linuxInputModeLabel(context, linuxInputMode),
-                                active = linuxInputMode != LinuxTextInputMode.UNICODE_ONLY,
+                                icon = Icons.Default.ContentPaste,
+                                label = context.getString(R.string.send_text),
+                                active = false,
                                 enabled = connected,
                                 modifier = Modifier.weight(1f),
-                                onClick = { onCycleLinuxInputMode() }
+                                onClick = { expanded = false; onPaste() }
                             )
                             HudBentoTile(
                                 icon = if (fullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
@@ -429,12 +426,9 @@ internal fun MagneticEdgeHud(
 
                         HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
 
-                        // Tier 4: Streamlined Display, Direct Text Paste & Phone Storage Drive
+                        // Tier 4: Streamlined Display & Phone Storage Drive
                         HudActionRow(Icons.Default.Tune, context.getString(R.string.display_settings), true) {
                             expanded = false; onSettings()
-                        }
-                        HudActionRow(Icons.Default.ContentPaste, context.getString(R.string.send_text), connected) {
-                            expanded = false; onPaste()
                         }
                         HudActionRow(Icons.Default.FolderShared, context.getString(R.string.drive_status_title), true) {
                             expanded = false; onSharedDrive()
@@ -454,8 +448,6 @@ internal fun MagneticEdgeHud(
 internal fun SessionImeQuickBar(
     visible: Boolean,
     input: RdpInputDispatcher,
-    linuxInputMode: LinuxTextInputMode,
-    onCycleLinuxInputMode: () -> Unit,
     onHideKeyboard: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -515,9 +507,6 @@ internal fun SessionImeQuickBar(
                 HudKeyChip("↓", true) { input.enqueueKeyStroke(0xE050); releaseLatched() }
                 HudKeyChip("↑", true) { input.enqueueKeyStroke(0xE048); releaseLatched() }
                 HudKeyChip("→", true) { input.enqueueKeyStroke(0xE04D); releaseLatched() }
-                HudLatchChip(linuxInputModeLabel(context, linuxInputMode), linuxInputMode != LinuxTextInputMode.UNICODE_ONLY) {
-                    onCycleLinuxInputMode()
-                }
                 IconButton(onClick = { releaseLatched(); onHideKeyboard() }, modifier = Modifier.size(32.dp)) {
                     Icon(
                         Icons.Default.KeyboardHide,
@@ -529,14 +518,6 @@ internal fun SessionImeQuickBar(
             }
         }
     }
-}
-
-private fun linuxInputModeLabel(context: android.content.Context, mode: LinuxTextInputMode): String = when (mode) {
-    LinuxTextInputMode.SMART_AUTO -> context.getString(R.string.ime_mode_auto)
-    LinuxTextInputMode.UBUNTU_GUI_PASTE -> context.getString(R.string.ime_mode_ubuntu_gui)
-    LinuxTextInputMode.UBUNTU_TERM_PASTE -> context.getString(R.string.ime_mode_ubuntu_term)
-    LinuxTextInputMode.UBUNTU_IBUS_HEX -> context.getString(R.string.ime_mode_ubuntu_hex)
-    LinuxTextInputMode.UNICODE_ONLY -> context.getString(R.string.ime_mode_unicode)
 }
 
 @Composable

@@ -356,29 +356,16 @@ object RdpConnector {
 
     fun sendKeyEvent(keyCode: Int, down: Int): Int = safeNative("sendKeyEvent", -1) { nativeSendKeyEvent(keyCode, down) }
 
-    @Volatile var linuxTextInputMode: LinuxTextInputMode = LinuxTextInputMode.SMART_AUTO
-
     fun isPeerUnix(): Boolean = safeNative("getPeerOsMajor", 0) { nativeGetPeerOsMajor() } == 0x0004
 
     fun sendTextInput(text: String): Int {
         if (text.isEmpty()) return 0
-        val mode = linuxTextInputMode
         val hasNonAscii = text.any { it.code > 0x7F }
-        val useLinuxBridge = when (mode) {
-            LinuxTextInputMode.SMART_AUTO -> hasNonAscii && isPeerUnix()
-            LinuxTextInputMode.UBUNTU_GUI_PASTE,
-            LinuxTextInputMode.UBUNTU_TERM_PASTE -> hasNonAscii || text.length > 1
-            LinuxTextInputMode.UBUNTU_IBUS_HEX -> hasNonAscii
-            LinuxTextInputMode.UNICODE_ONLY -> false
-        }
-        if (useLinuxBridge) {
-            val nativeMode = when (mode) {
-                LinuxTextInputMode.SMART_AUTO, LinuxTextInputMode.UBUNTU_GUI_PASTE -> 1
-                LinuxTextInputMode.UBUNTU_TERM_PASTE -> 2
-                LinuxTextInputMode.UBUNTU_IBUS_HEX -> 3
-                LinuxTextInputMode.UNICODE_ONLY -> 4
-            }
-            return safeNative("sendUbuntuText", -1) { nativeSendUbuntuText(text, nativeMode) }
+        if (hasNonAscii && isPeerUnix()) {
+            // 100% automatic backend routing in native bridge:
+            // - Ubuntu GNOME Remote Desktop (Wayland): 2ms-paced ISO-14755 hex (zero clipboard touch)
+            // - Ubuntu xrdp (X11): CB_FORMAT_LIST_RESPONSE(OK)-gated CF_UNICODETEXT paste + fallback
+            return safeNative("sendUbuntuText", -1) { nativeSendUbuntuText(text, 1) }
         }
         var result = 0
         text.forEachIndexed { index, char ->
@@ -415,12 +402,8 @@ object RdpConnector {
      */
     fun sendBulkText(text: String): Int {
         if (text.isEmpty()) return 0
-        val pasteMode = when (linuxTextInputMode) {
-            LinuxTextInputMode.UBUNTU_TERM_PASTE -> 2
-            LinuxTextInputMode.UBUNTU_IBUS_HEX -> 3
-            else -> 5 // RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE (Windows & Ubuntu GUI Ctrl+V)
-        }
-        return safeNative("sendBulkText", -1) { nativeSendUbuntuText(text, pasteMode) }
+        // 100% automatic universal bulk delivery across Windows, Ubuntu xrdp (X11), and Ubuntu GNOME (Wayland)
+        return safeNative("sendBulkText", -1) { nativeSendUbuntuText(text, 5) }
     }
 
     fun <T> withFrameLock(block: () -> T): T = synchronized(frameLock) { block() }

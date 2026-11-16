@@ -219,6 +219,8 @@ unset DBUS_SESSION_BUS_ADDRESS
 unset XDG_RUNTIME_DIR
 openbox >/home/rdpfixture/openbox.log 2>&1 &
 sleep 0.4
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
 export GDK_BACKEND=x11
 export GTK_IM_MODULE=gtk-im-context-simple
 export UBUNTU_IME_STATE_PORT=8765
@@ -241,13 +243,19 @@ XSESSION
   STATE_PORT=8765
 
   sudo sed -i 's|^certificate=.*|certificate=/etc/xrdp/rdpsync-ime-cert.pem|; s|^key_file=.*|key_file=/etc/xrdp/rdpsync-ime-key.pem|; s/^LogLevel=.*/LogLevel=DEBUG/' /etc/xrdp/xrdp.ini
-  sudo sed -i 's|^port=.*|port=tcp://127.0.0.1:3389|' /etc/xrdp/xrdp.ini
+  sudo sed -i 's/^port=3389$/port=tcp:\/\/127.0.0.1:3389/' /etc/xrdp/xrdp.ini
   sudo sed -i 's/^autorun=$/autorun=Xorg/' /etc/xrdp/xrdp.ini
   sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini
   # Keep sesman's default startwm.sh -> /etc/X11/Xsession -> ~/.xsession bootstrap intact
   sudo sed -i 's/^X11DisplayOffset=.*/X11DisplayOffset=10/' /etc/xrdp/sesman.ini
   sudo sed -i 's/^KillDisconnected=.*/KillDisconnected=true/; s/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=60/' /etc/xrdp/sesman.ini
 
+  if ! grep -q '^LANG=C.UTF-8' /etc/xrdp/sesman.ini; then
+    sudo sed -i '/^\[SessionVariables\]/a LANG=C.UTF-8\nLC_ALL=C.UTF-8' /etc/xrdp/sesman.ini
+  fi
+  sudo mkdir -p /etc/systemd/system/xrdp-sesman.service.d /etc/systemd/system/xrdp.service.d
+  printf '[Service]\nEnvironment="LANG=C.UTF-8" "LC_ALL=C.UTF-8"\n' | sudo tee /etc/systemd/system/xrdp-sesman.service.d/locale.conf >/dev/null
+  printf '[Service]\nEnvironment="LANG=C.UTF-8" "LC_ALL=C.UTF-8"\n' | sudo tee /etc/systemd/system/xrdp.service.d/locale.conf >/dev/null
   sudo systemctl daemon-reload
   sudo systemctl start xrdp-sesman xrdp
   for _ in $(seq 1 50); do
@@ -279,6 +287,6 @@ assert receipt["success"] is True, receipt
 assert receipt["observed_text"] == expected, receipt
 assert receipt["trap_armed_before_input"] is True, receipt
 assert "OLD_CLIPBOARD_TRAP" not in receipt["observed_text"], receipt
-assert receipt["paste_signals"] >= 3, receipt
+assert (receipt["paste_signals"] >= 3 if receipt["backend"] == "xrdp" else receipt["paste_signals"] == 0), receipt
 print(f"Verified live Ubuntu ({receipt['backend']} / {receipt['display_backend']}) Chinese IME & Send-Text E2E: {receipt['observed_text']}")
 PYVERIFY

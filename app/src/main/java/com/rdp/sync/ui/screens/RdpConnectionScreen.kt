@@ -64,7 +64,6 @@ import com.rdp.sync.display.DisplayQuality
 import com.rdp.sync.display.ResolutionMode
 import com.rdp.sync.display.SessionDisplaySettings
 import com.rdp.sync.network.CertificateChallenge
-import com.rdp.sync.network.LinuxTextInputMode
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.security.AndroidCertificatePinStorage
 import com.rdp.sync.security.CertificateAttemptGuard
@@ -117,16 +116,10 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     val hudDockState = rememberHudDockState(preferences)
     var localDesktopSize by remember(device.id) { mutableStateOf(IntSize.Zero) }
     var peerIsUnix by remember(device.id) { mutableStateOf(false) }
-    var linuxInputMode by remember(preferences) {
-        mutableStateOf(LinuxTextInputMode.fromName(preferences.getString("linux_ime_mode", null)).also {
-            RdpConnector.linuxTextInputMode = it
-        })
-    }
-    fun cycleLinuxInputMode() {
-        val next = linuxInputMode.next()
-        linuxInputMode = next
-        RdpConnector.linuxTextInputMode = next
-        preferences.edit().putString("linux_ime_mode", next.name).apply()
+    LaunchedEffect(preferences) {
+        if (preferences.contains("linux_ime_mode")) {
+            preferences.edit().remove("linux_ime_mode").apply()
+        }
     }
     var settings by remember { mutableStateOf(SessionUiDefaults.displaySettings(
         preferences.getString("display_quality", null), preferences.getString("resolution_mode", null),
@@ -494,8 +487,6 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
             SessionImeQuickBar(
                 visible = imeVisible && isConnected,
                 input = input,
-                linuxInputMode = linuxInputMode,
-                onCycleLinuxInputMode = ::cycleLinuxInputMode,
                 onHideKeyboard = { desktopView?.hideKeyboard() }
             )
         },
@@ -507,8 +498,6 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                 input = input,
                 deviceName = device.name,
                 peerIsUnix = peerIsUnix,
-                linuxInputMode = linuxInputMode,
-                onCycleLinuxInputMode = ::cycleLinuxInputMode,
                 fullscreen = fullscreen,
                 imeVisible = imeVisible,
                 pointerMode = pointerMode,
@@ -651,7 +640,6 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
     onSharedSpace: () -> Unit = {}, onSharedDrive: () -> Unit = {}, onRotateScreen: () -> Unit = {}) {
     val context = LocalContext.current
     val dockState = remember { HudDockState() }
-    var linuxMode by remember { mutableStateOf(LinuxTextInputMode.SMART_AUTO) }
     MagneticEdgeHud(
         dockState = dockState,
         viewportWidthPx = 0,
@@ -659,8 +647,6 @@ internal fun SessionFloatingControls(input: RdpInputDispatcher, fullscreen: Bool
         input = input,
         deviceName = context.getString(R.string.app_name),
         peerIsUnix = false,
-        linuxInputMode = linuxMode,
-        onCycleLinuxInputMode = { linuxMode = linuxMode.next() },
         fullscreen = fullscreen,
         imeVisible = imeVisible,
         pointerMode = pointerMode,

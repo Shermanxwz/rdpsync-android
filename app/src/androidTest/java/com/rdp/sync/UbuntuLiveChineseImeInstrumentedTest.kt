@@ -23,7 +23,6 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.rdp.sync.data.Device
-import com.rdp.sync.network.LinuxTextInputMode
 import com.rdp.sync.network.RdpConnector
 import com.rdp.sync.ui.MainActivity
 import com.rdp.sync.ui.rdp.RdpDesktopView
@@ -149,9 +148,8 @@ class UbuntuLiveChineseImeInstrumentedTest {
             .clear()
             .putString("resolution_mode", "PROFILE")
             .putString("display_quality", "BALANCED")
-            .putString("linux_ime_mode", LinuxTextInputMode.SMART_AUTO.name)
+            .putString("linux_ime_mode", "UNICODE_ONLY") // Verify stale legacy manual mode is auto-purged & ignored!
             .commit()
-        RdpConnector.linuxTextInputMode = LinuxTextInputMode.SMART_AUTO
 
         val showing = mutableStateOf(true)
         val device = Device(
@@ -280,6 +278,11 @@ class UbuntuLiveChineseImeInstrumentedTest {
             waitFor({ "session menu popup with send_text" }, 10_000L) {
                 compose.onAllNodesWithText(sendTextLabel).fetchSemanticsNodes().size == 1
             }
+            assertEquals(
+                "Manual input mode selector (直输:...) must not appear in session menu",
+                0,
+                compose.onAllNodesWithText("直输", substring = true).fetchSemanticsNodes().size
+            )
             boundedScroll.to(compose.onNodeWithText(sendTextLabel)).assertIsEnabled().performClick()
 
             waitFor({ "send text dialog input field" }, 10_000L) {
@@ -292,10 +295,18 @@ class UbuntuLiveChineseImeInstrumentedTest {
 
             val expectedFull = commit1 + commit2 + sendDialogPayload
             val finalDesktopState = awaitRemoteEntryText(statePort, expectedFull)
-            assertTrue(
-                "Expected >= 3 real GTK paste-clipboard signals on Ubuntu, got $finalDesktopState",
-                finalDesktopState.optInt("paste_signals", 0) >= 3
-            )
+            if (backend == "xrdp") {
+                assertTrue(
+                    "Expected >= 3 real GTK paste-clipboard signals on xrdp, got $finalDesktopState",
+                    finalDesktopState.optInt("paste_signals", 0) >= 3
+                )
+            } else {
+                assertEquals(
+                    "GNOME Wayland ISO-14755 must leave remote clipboard untouched (0 paste signals): $finalDesktopState",
+                    0,
+                    finalDesktopState.optInt("paste_signals", -1)
+                )
+            }
 
             // Wait 500ms for remote GTK frame update and capture rendered Android desktop bitmap + JSON receipt
             compose.mainClock.advanceTimeBy(500)
@@ -311,6 +322,7 @@ class UbuntuLiveChineseImeInstrumentedTest {
             }
             val receipt = JSONObject()
                 .put("backend", backend)
+                .put("success", true)
                 .put("expected_text", expectedFull)
                 .put("observed_text", finalDesktopState.getString("entry_text"))
                 .put("paste_signals", finalDesktopState.getInt("paste_signals"))
@@ -321,7 +333,6 @@ class UbuntuLiveChineseImeInstrumentedTest {
                 .put("after_commit_1", afterCommit1.getString("entry_text"))
                 .put("after_commit_2", afterCommit2.getString("entry_text"))
                 .put("rdp_diagnostics", RdpConnector.getDiag())
-                .put("success", true)
             File(outDir, "$backend-receipt.json").writeText(receipt.toString(2), Charsets.UTF_8)
         } finally {
             compose.runOnUiThread { showing.value = false }

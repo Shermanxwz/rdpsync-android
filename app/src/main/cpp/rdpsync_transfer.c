@@ -606,3 +606,11 @@ int rdpsync_transfer_is_ready(RdpTransfer* t) {
     pthread_mutex_unlock(&t->mutex);
     return ready;
 }
+
+int rdpsync_transfer_is_xrdp_peer(RdpTransfer* t) {
+    if (!t) return 0;
+    pthread_mutex_lock(&t->mutex);
+    const int is_xrdp = t->peer_is_xrdp || (t->ready && !t->peer_lock && t->peer_files);
+    pthread_mutex_unlock(&t->mutex);
+    return is_xrdp;
+}

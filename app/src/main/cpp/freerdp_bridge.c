@@ -982,8 +982,8 @@ static BOOL execute_input(RdpSession* s, InputCommand command) {
                 ok = input->KeyboardEvent(input, 0, sc) &&
                      input->KeyboardEvent(input, KBD_FLAGS_RELEASE, sc);
             }
-            return ok && input->KeyboardEvent(input, 0, 0x1C) &&
-                   input->KeyboardEvent(input, KBD_FLAGS_RELEASE, 0x1C);
+            return ok && input->KeyboardEvent(input, 0, 0x39) &&
+                   input->KeyboardEvent(input, KBD_FLAGS_RELEASE, 0x39);
         }
     }
     return FALSE;
