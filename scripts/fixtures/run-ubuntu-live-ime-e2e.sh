@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#Disposable GitHub Actions runner live E2E harness for BOTH Ubuntu GNOME Remote Desktop 46 (Wayland)
-#and Ubuntu xrdp (X11), exercised from the real Android 15 emulator running com.rdp.sync.
+# Disposable GitHub Actions runner live E2E harness for BOTH Ubuntu GNOME Remote Desktop 46 (Wayland)
+# and Ubuntu xrdp (X11), exercised from the real Android 15 emulator running com.rdp.sync.
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || {
   echo "Live Ubuntu RDP fixture runs only on disposable GitHub-hosted runners." >&2
@@ -31,14 +31,22 @@ cleanup_server() {
   adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" >/dev/null 2>&1 || adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync.debug/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" >/dev/null 2>&1 || true
   adb -s "$ANDROID_SERIAL" logcat -d >"$EVIDENCE/android-logcat.txt" 2>/dev/null || true
   if [[ "$BACKEND" == "gnome" ]]; then
+    if [[ "$rc" -ne 0 ]]; then
+      echo "=== GNOME REMOTE DESKTOP & GTK LOGS ===" >&2
+      tail -n 80 "$EVIDENCE/gnome-remote-desktop.log" "$EVIDENCE/gtk-desktop.log" "$EVIDENCE/mutter.log" "$EVIDENCE/namespace.log" >&2 2>/dev/null || true
+    fi
     for pidf in "$PRIV/rdp-relay.pid" "$PRIV/state-relay.pid" "$PRIV/launcher.pid"; do
       [[ -f "$pidf" ]] && sudo kill -TERM "$(cat "$pidf")" 2>/dev/null || true
     done
   elif [[ "$BACKEND" == "xrdp" ]]; then
     sudo cp /var/log/xrdp.log /var/log/xrdp-sesman.log "$EVIDENCE/" 2>/dev/null || true
-    sudo cp /home/rdpfixture/gtk-desktop.log /home/rdpfixture/openbox.log "$EVIDENCE/" 2>/dev/null || true
+    sudo cp /home/rdpfixture/gtk-desktop.log /home/rdpfixture/openbox.log /home/rdpfixture/.xsession-errors "$EVIDENCE/" 2>/dev/null || true
     sudo cp -r /home/rdpfixture/ime-evidence/. "$EVIDENCE/" 2>/dev/null || true
     sudo chown -R "$(id -u):$(id -g)" "$EVIDENCE" 2>/dev/null || true
+    if [[ "$rc" -ne 0 ]]; then
+      echo "=== XRDP, SESMAN & GTK LOGS ===" >&2
+      tail -n 80 "$EVIDENCE/xrdp-sesman.log" "$EVIDENCE/xrdp.log" "$EVIDENCE/gtk-desktop.log" "$EVIDENCE/openbox.log" "$EVIDENCE/.xsession-errors" >&2 2>/dev/null || true
+    fi
     sudo systemctl stop xrdp xrdp-sesman 2>/dev/null || true
   fi
   exit "$rc"
@@ -47,11 +55,13 @@ trap cleanup_server EXIT
 
 if [[ "$BACKEND" == "gnome" ]]; then
   sudo apt-get update -qq
+  # fuse3 (/dev/fuse + fusermount3) is mandatory for GNOME Remote Desktop 46 grd_clipboard_rdp_new()
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    gnome-remote-desktop mutter pipewire wireplumber \
+    gnome-remote-desktop mutter pipewire wireplumber fuse3 \
     python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 \
     dbus-x11 libgl1-mesa-dri socat openssl iproute2 fonts-wqy-microhei
 
+  [[ -c /dev/fuse && -r /dev/fuse && -w /dev/fuse ]] || { echo "Accessible /dev/fuse required for GNOME Remote Desktop CLIPRDR" >&2; exit 1; }
   sudo systemctl stop gnome-remote-desktop.service 2>/dev/null || true
   /usr/libexec/gnome-remote-desktop-daemon --version >"$EVIDENCE/server-version.txt"
 
@@ -137,6 +147,7 @@ spawn(
     [sys.executable, str(root / "scripts/fixtures/ubuntu_gtk_ime_desktop.py")],
     "gtk-desktop",
     {
+        "GTK_IM_MODULE": "gtk-im-context-simple",
         "UBUNTU_IME_STATE_PORT": "8768",
         "UBUNTU_IME_EXPECTED_BACKEND": "Wayland",
         "UBUNTU_IME_EVIDENCE_DIR": str(out),
@@ -155,7 +166,11 @@ PYGNOME
   nohup sudo -E unshare --net --fork --kill-child=TERM bash -c '
     set -euo pipefail
     ip link set lo up
-    exec setpriv --reuid="$1" --regid="$2" --init-groups       env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="$4/home"       XDG_CONFIG_HOME="$4/home/.config" XDG_DATA_HOME="$4/home/.local/share"       XDG_RUNTIME_DIR="$4/runtime"       dbus-run-session -- python3 "$4/run-gnome-ime-session.py" "$3" "$4" "$5"
+    exec setpriv --reuid="$1" --regid="$2" --init-groups \
+      env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="$4/home" \
+      XDG_CONFIG_HOME="$4/home/.config" XDG_DATA_HOME="$4/home/.local/share" \
+      XDG_RUNTIME_DIR="$4/runtime" \
+      dbus-run-session -- python3 "$4/run-gnome-ime-session.py" "$3" "$4" "$5"
   ' rdpsync-gnome-ime "$(id -u)" "$(id -g)" "$ROOT" "$PRIV" "$EVIDENCE" >"$EVIDENCE/namespace.log" 2>&1 &
   echo $! >"$PRIV/launcher.pid"
 
@@ -187,15 +202,14 @@ PYWAIT
 elif [[ "$BACKEND" == "xrdp" ]]; then
   sudo apt-get update -qq
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    xrdp xorgxrdp xserver-xorg-core x11-xserver-utils xauth openbox \
+    xrdp xorgxrdp xserver-xorg-core x11-xserver-utils xauth openbox fuse3 dbus-x11 \
     python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 fonts-wqy-microhei openssl
 
   sudo systemctl stop xrdp xrdp-sesman 2>/dev/null || true
   if ! id rdpfixture >/dev/null 2>&1; then
     sudo useradd --create-home --shell /bin/bash rdpfixture
   fi
-  printf '%s
-' 'rdpfixture:rdpsync-fixture-only' | sudo chpasswd
+  printf '%s\n' 'rdpfixture:rdpsync-fixture-only' | sudo chpasswd
   sudo mkdir -p /opt/rdpsync-ime-fixture /home/rdpfixture/ime-evidence
   sudo install -m 755 "$ROOT/scripts/fixtures/ubuntu_gtk_ime_desktop.py" /opt/rdpsync-ime-fixture/ubuntu_gtk_ime_desktop.py
 
@@ -206,6 +220,7 @@ unset XDG_RUNTIME_DIR
 openbox >/home/rdpfixture/openbox.log 2>&1 &
 sleep 0.4
 export GDK_BACKEND=x11
+export GTK_IM_MODULE=gtk-im-context-simple
 export UBUNTU_IME_STATE_PORT=8765
 export UBUNTU_IME_EXPECTED_BACKEND=X11
 export UBUNTU_IME_EVIDENCE_DIR=/home/rdpfixture/ime-evidence
@@ -229,7 +244,9 @@ XSESSION
   sudo sed -i 's|^port=.*|port=tcp://127.0.0.1:3389|' /etc/xrdp/xrdp.ini
   sudo sed -i 's/^autorun=$/autorun=Xorg/' /etc/xrdp/xrdp.ini
   sudo sed -i 's/^max_bpp=.*/max_bpp=32/' /etc/xrdp/xrdp.ini
-  sudo sed -i 's|^UserWindowManager=.*|UserWindowManager=.xsession|; s|^DefaultWindowManager=.*|DefaultWindowManager=/home/rdpfixture/.xsession|; s/^X11DisplayOffset=.*/X11DisplayOffset=10/; s/^KillDisconnected=.*/KillDisconnected=true/' /etc/xrdp/sesman.ini
+  # Keep sesman's default startwm.sh -> /etc/X11/Xsession -> ~/.xsession bootstrap intact
+  sudo sed -i 's/^X11DisplayOffset=.*/X11DisplayOffset=10/' /etc/xrdp/sesman.ini
+  sudo sed -i 's/^KillDisconnected=.*/KillDisconnected=true/; s/^DisconnectedTimeLimit=.*/DisconnectedTimeLimit=60/' /etc/xrdp/sesman.ini
 
   sudo systemctl daemon-reload
   sudo systemctl start xrdp-sesman xrdp
@@ -243,8 +260,7 @@ else
   exit 2
 fi
 
-printf '%s
-' "$FINGERPRINT" >"$EVIDENCE/server-cert-sha256.txt"
+printf '%s\n' "$FINGERPRINT" >"$EVIDENCE/server-cert-sha256.txt"
 
 ./gradlew --no-daemon -PnativeAbis=x86_64 \
   -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.UbuntuLiveChineseImeInstrumentedTest#liveUbuntuDesktopDirectChineseAndSendText \

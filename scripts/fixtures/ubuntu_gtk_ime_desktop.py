@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gi
@@ -30,6 +29,9 @@ state = {
     "trap_armed": False,
     "trap_verified_text": "",
     "paste_signals": 0,
+    "owner_changes": 0,
+    "clicks": 0,
+    "keys": [],
     "entry_text": "",
     "history": [],
 }
@@ -73,6 +75,14 @@ frame.add(textview)
 vbox.pack_start(frame, True, True, 0)
 window.add(vbox)
 
+clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+
+
+def on_owner_change(_clip, _event):
+    with lock:
+        state["owner_changes"] += 1
+    persist()
+
 
 def on_buffer_changed(_buffer):
     start, end = buf.get_bounds()
@@ -87,6 +97,22 @@ def on_paste(_tv):
     with lock:
         state["paste_signals"] += 1
     persist()
+
+
+def on_button_press(_widget, _event):
+    with lock:
+        state["clicks"] += 1
+    textview.grab_focus()
+    persist()
+    return False
+
+
+def on_key_press(_widget, event):
+    name = Gdk.keyval_name(event.keyval) or str(event.keyval)
+    with lock:
+        state["keys"] = (state["keys"] + [name])[-64:]
+    persist()
+    return False
 
 
 def update_geometry(*_args):
@@ -108,8 +134,13 @@ def update_geometry(*_args):
     return True
 
 
+clipboard.connect("owner-change", on_owner_change)
 buf.connect("changed", on_buffer_changed)
 textview.connect("paste-clipboard", on_paste)
+textview.connect("button-press-event", on_button_press)
+textview.connect("focus-in-event", lambda *_: (update_geometry(), False)[1])
+textview.connect("focus-out-event", lambda *_: (update_geometry(), False)[1])
+window.connect("key-press-event", on_key_press)
 window.connect("map-event", lambda *_: update_geometry())
 window.connect("size-allocate", lambda *_: update_geometry())
 window.connect("destroy", Gtk.main_quit)
@@ -117,6 +148,7 @@ window.connect("destroy", Gtk.main_quit)
 
 def arm_trap_on_main_loop(done_event: threading.Event):
     try:
+        window.fullscreen()
         window.maximize()
         window.present()
         gdk_win = window.get_window()
@@ -127,7 +159,6 @@ def arm_trap_on_main_loop(done_event: threading.Event):
                 pass
         buf.set_text("")
         textview.grab_focus()
-        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(TRAP_TEXT, -1)
 
         def on_clip_read(_clip, observed_text):
@@ -186,6 +217,7 @@ threading.Thread(
     daemon=True,
 ).start()
 
+window.fullscreen()
 window.maximize()
 window.show_all()
 textview.grab_focus()
