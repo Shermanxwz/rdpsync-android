@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import sys as _sys; _sys.stdout.reconfigure(line_buffering=True)
 """Fail packaging if the APK lacks JNI closure, 16 KiB segments, launcher activity, or release signature."""
 import hashlib
 import json
@@ -81,15 +82,16 @@ with zipfile.ZipFile(apk) as archive, tempfile.TemporaryDirectory(prefix="rdpsyn
 
 sdk = Path(os.environ.get("ANDROID_HOME", os.environ.get("ANDROID_SDK_ROOT", "/opt/android-sdk")))
 build_tools = sdk / "build-tools/35.0.0"
-subprocess.run([str(build_tools / "zipalign"), "-c", "-P", "16", "4", str(apk)], check=True)
+za_out = subprocess.check_output([str(build_tools / "zipalign"), "-c", "-P", "16", "4", str(apk)], text=True)
+print(za_out, end="", flush=True)
 certs_out = subprocess.check_output([str(build_tools / "apksigner"), "verify", "--print-certs", "-v", str(apk)], text=True)
 print(certs_out, end="")
 
 badging = subprocess.check_output([str(build_tools / "aapt"), "dump", "badging", str(apk)], text=True)
 package_line = next(line for line in badging.splitlines() if line.startswith("package:"))
 assert "name='com.rdp.sync'" in package_line, f"Unexpected official package identity: {package_line}"
-assert "versionCode='19'" in package_line and "versionName='1.3.2'" in package_line, \
-    f"Unexpected 1.3.2 version identity: {package_line}"
+assert "versionCode='20'" in package_line and "versionName='1.3.3'" in package_line, \
+    f"Unexpected 1.3.3 version identity: {package_line}"
 
 # Mandatory launcher icon & launchable HOME activity verification
 launchable_lines = [line for line in badging.splitlines() if line.startswith("launchable-activity:")]
@@ -115,3 +117,5 @@ if not is_debug_apk and EXPECTED_OFFICIAL_CERT_SHA256 in certs_out.lower():
     print("APK verification passed; signed with persistent official RDPsync release certificate and verified launchable-activity.")
 else:
     print("APK verification passed; verified launchable-activity and development signature.")
+
+sys.stdout.flush()

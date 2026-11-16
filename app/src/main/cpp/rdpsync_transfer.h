@@ -41,6 +41,7 @@ void rdpsync_transfer_attach(RdpTransfer* transfer, CliprdrClientContext* contex
 void rdpsync_transfer_detach(RdpTransfer* transfer, CliprdrClientContext* context);
 /* Owner-loop pump sends commands queued by JNI; callbacks are mutex protected. */
 UINT rdpsync_transfer_pump(RdpTransfer* transfer);
+UINT rdpsync_transfer_pump_ex(RdpTransfer* transfer, int* did_send_out);
 void rdpsync_transfer_state(RdpTransfer* transfer, int64_t values[10]);
 int64_t rdpsync_transfer_offer(RdpTransfer* transfer, uint64_t generation,
     const RdpTransferFile* files, const int* fds, size_t count);

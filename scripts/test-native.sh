@@ -30,6 +30,20 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     "$DEPS/freerdp-src/winpr/libwinpr/utils/stream.c" -o "$OUT/transfer_parser_test"
 "$OUT/transfer_parser_test"
 
+# Link unmodified FreeRDP 3.32.2 cliprdr_format.c + cliprdr_common.c with production rdpsync_transfer.c
+# to prove outbound Chinese CF_UNICODETEXT (13) survives FreeRDP_ClipboardFeatureMask across consecutive commits.
+"$HOST_CC" "${FLAGS[@]}" -D_GNU_SOURCE= -pthread -Wno-deprecated-declarations \
+    -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
+    -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
+    -I"$DEPS/freerdp-src/channels/cliprdr" \
+    -I"$DEPS/freerdp-src/channels/cliprdr/client" \
+    "$ROOT/app/src/test/cpp/ubuntu_cliprdr_filter_test.c" \
+    "$ROOT/app/src/main/cpp/rdpsync_transfer.c" \
+    "$DEPS/freerdp-src/channels/cliprdr/client/cliprdr_format.c" \
+    "$DEPS/freerdp-src/channels/cliprdr/cliprdr_common.c" \
+    "$DEPS/freerdp-src/winpr/libwinpr/utils/stream.c" -o "$OUT/ubuntu_cliprdr_filter_test"
+"$OUT/ubuntu_cliprdr_filter_test"
+
 "$HOST_CC" "${FLAGS[@]}" -pthread -Wno-deprecated-declarations \
     -I"$DEPS/freerdp-src/include" -I"$DEPS/freerdp-src/winpr/include" \
     -I"$GENERATED/include" -I"$GENERATED/winpr/include" \
@@ -80,11 +94,6 @@ FLAGS=(-std=c11 -g -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -fs
     "$ROOT/app/src/test/cpp/runtime_test.c" "$ROOT/app/src/main/cpp/rdpsync_transfer.c" "$BRIDGE_DRIVE_STUB" -o "$OUT/runtime_test"
 "$OUT/runtime_test"
 
-# Clang -O2 once removed the session-tail store when the factory returned only
-# ctx->instance: upstream marks its initialized cyclic-context allocator malloc.
-# Keep allocator and caller separate (no LTO), and test the production factory.
-# Prefer the same Clang toolchain that produced the Android libraries. Its plain
-# clang driver targets the host, unlike the Android-target wrapper executable.
 NATIVE_AR="$(sed -n 's/^CMAKE_C_COMPILER_AR:FILEPATH=//p' "$GENERATED/CMakeCache.txt" | head -1)"
 DEFAULT_CLANG="$(dirname "$NATIVE_AR")/clang"
 [[ -x "$DEFAULT_CLANG" ]] || DEFAULT_CLANG=clang
@@ -98,7 +107,5 @@ BINDING_FLAGS=(-std=c11 -D_GNU_SOURCE -O2 -g -Wno-deprecated-declarations
 "$HOST_CLANG" "$OUT/context_binding_test.o" "$OUT/context_binding_allocator.o" -o "$OUT/context_binding_test"
 "$OUT/context_binding_test"
 
-# Additive Shared Space gates. The original eleven regression fixtures above
-# retain their existing mock boundaries and remain independently executable.
 bash "$ROOT/scripts/test-workspace.sh"
 bash "$ROOT/scripts/test-drive.sh"

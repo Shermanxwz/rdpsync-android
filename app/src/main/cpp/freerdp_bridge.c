@@ -41,7 +41,8 @@
 #include "rdpsync_gfx_policy.h"
 #include "rdpsync_transfer.h"
 #include "rdpsync_ubuntu_ime.h"
-static atomic_int g_next_text_bridge = 0;
+static atomic_int g_next_text_bridge = -1;
+static pthread_mutex_t g_ubuntu_text_lock = PTHREAD_MUTEX_INITIALIZER;
 #include "rdpsync_drive.h"
 
 #define TAG "FreeRDP"
@@ -525,6 +526,9 @@ static BOOL receive_channel_data(freerdp* instance, UINT16 id, const BYTE* data,
     }
     if (name && strcmp(name, CLIPRDR_SVC_CHANNEL_NAME) == 0 && s &&
         s->text_bridge_enabled && !s->file_transfer_enabled) {
+        if (!s->transfer_ingress.active && s->transfer_ingress.messages >= 4096U) {
+            s->transfer_ingress.messages = 0;
+        }
         if (!rdpsync_transfer_ingress(&s->transfer_ingress, data, size, flags, total)) {
             s->transfer_ingress = (RdpTransferIngress){0};
             s_diag(s, "text-bridge=ignored-nonstandard-cliprdr-pdu");
@@ -801,10 +805,25 @@ static void configure_performance_profile(RdpSession* session, rdpSettings* sett
     (void)freerdp_settings_set_bool(settings, FreeRDP_GfxSmallCache, TRUE);
     (void)freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
 }
-static BOOL configure_transfer_profile(rdpSettings* settings, BOOL enabled) {
-    return freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, enabled) &&
+static UINT32 expected_clipboard_feature_mask(BOOL file_enabled, BOOL text_bridge_enabled) {
+    UINT32 mask = 0;
+    if (file_enabled) {
+        mask |= CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES;
+    }
+    if (text_bridge_enabled) {
+        /* Strictly outbound local-to-remote CF_UNICODETEXT only; remote text is never pulled. */
+        mask |= CLIPRDR_FLAG_LOCAL_TO_REMOTE;
+    }
+    return mask;
+}
+static BOOL configure_clipboard_profile(rdpSettings* settings, BOOL file_enabled, BOOL text_bridge_enabled) {
+    const BOOL redirect = (file_enabled || text_bridge_enabled) ? TRUE : FALSE;
+    return freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, redirect) &&
         freerdp_settings_set_uint32(settings, FreeRDP_ClipboardFeatureMask,
-            enabled ? CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES : 0);
+            expected_clipboard_feature_mask(file_enabled, text_bridge_enabled));
+}
+static BOOL configure_transfer_profile(rdpSettings* settings, BOOL enabled) {
+    return configure_clipboard_profile(settings, enabled, FALSE);
 }
 static BOOL load_session_channels(freerdp* instance) {
     RdpSession* drive_owner = s_from_ctx(instance->context);
@@ -812,11 +831,13 @@ static BOOL load_session_channels(freerdp* instance) {
     if (!freerdp_client_load_channels(instance)) return FALSE;
     const rdpSettings* settings = instance->context->settings;
     RdpSession* owner = s_from_ctx(instance->context);
-    const BOOL transfer_enabled = owner && (owner->file_transfer_enabled || owner->text_bridge_enabled);
+    const BOOL file_enabled = owner && owner->file_transfer_enabled;
+    const BOOL text_enabled = owner && owner->text_bridge_enabled;
+    const BOOL transfer_enabled = (file_enabled || text_enabled) ? TRUE : FALSE;
     if (freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard) != transfer_enabled ||
         freerdp_settings_get_uint32(settings, FreeRDP_ClipboardFeatureMask) !=
-            (transfer_enabled ? CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES : 0)) {
-        LOGE("Channel loading unexpectedly changed file-only clipboard policy");
+            expected_clipboard_feature_mask(file_enabled, text_enabled)) {
+        LOGE("Channel loading unexpectedly changed clipboard policy");
         return FALSE;
     }
     /* Check AFTER upstream dependency expansion, not only our initial options.
@@ -1015,7 +1036,7 @@ static BOOL process_commands(RdpSession* s) {
     const int pending = s->resize_pending;
     const int width = s->resize_width, height = s->resize_height, scale = s->resize_scale;
     s->resize_pending = 0;
-    if (!s->command_count) ResetEvent(s->wake_event);
+    if (s->command_count && s->wake_event) SetEvent(s->wake_event);
     pthread_mutex_unlock(&s->mutex);
     if (pending && !atomic_load(&s->terminating)) {
         pthread_mutex_lock(&s->channel_mutex);

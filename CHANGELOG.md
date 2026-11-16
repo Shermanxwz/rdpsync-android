@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.3 - 2026-11-16
+
+- Fixed the root cause of Ubuntu graphical desktop direct Chinese IME input and `"发送文字"` (`Send text`) pasting old Ubuntu clipboard contents instead of newly entered Chinese: `FreeRDP_ClipboardFeatureMask` previously omitted `CLIPRDR_FLAG_LOCAL_TO_REMOTE` (`0x00000001`), causing FreeRDP 3.32.2's `cliprdr_filter_format_list` inside `libfreerdp-client3.so` to strip outbound `CF_UNICODETEXT (13)` formats down to `0` (`numFormats = 0` on the first commit and completely dropped after `initialFormatListSent` on subsequent commits) before `Ctrl+V` fired.
+- Hardened outbound `CLIPRDR` text synchronization in `freerdp_bridge.c`, `rdpsync_transfer.c`, and `rdpsync_bridge_jni.inc`: enabled `CLIPRDR_FLAG_LOCAL_TO_REMOTE` for all non-compatibility sessions while keeping `CLIPRDR_FLAG_REMOTE_TO_LOCAL = 0`, advertised canonical `CF_UNICODETEXT (13)`, tracked `text_sent_seq` / `text_ack_seq` / `text_nack_seq` accurately, flushed channel write queues immediately on text offers, serialized concurrent commits via `g_ubuntu_text_lock`, and gated `Ctrl+V` strictly on `CB_FORMAT_LIST_RESPONSE(CB_RESPONSE_OK)` (falling back to `Ctrl+Shift+U` hex input if clipboard acknowledgement fails so stale remote clipboard contents are never pasted).
+- Added both an unmodified FreeRDP 3.32.2 `cliprdr_filter_format_list` native C sanitizer test (`ubuntu_cliprdr_filter_test`) and live end-to-end Android 15 emulator -> real Ubuntu 24.04 **GNOME Remote Desktop 46 (Wayland)** + real Ubuntu 24.04 **`xrdp` (X11)** graphical desktop verification (`UbuntuLiveChineseImeInstrumentedTest`) with pre-armed stale clipboard traps.
+
 ## 1.3.2 - 2026-11-15
 
 - Fixed missing Android home screen launcher icon after installation by correcting `<category android:name="android.intent.category.LAUNCHER" />` and explicit `android:enabled="true"` on `.ui.MainActivity` in `AndroidManifest.xml`.

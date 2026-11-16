@@ -5,15 +5,14 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 LAYOUT=${1:?phone or expanded required}
 case "$LAYOUT" in
-  phone) SIZE=960x1920; DENSITY=480; METHODS=(englishLight englishDark chineseLight chineseDark narrowLargeText) ;;
-  expanded) SIZE=1280x1920; DENSITY=320; METHODS=(expandedWidth) ;;
+  phone) SIZE=960x1920; DENSITY=480; METHODS=(englishLight englishDark chineseLight chineseDark narrowLargeText); LIVE_UBUNTU_BACKEND=gnome ;;
+  expanded) SIZE=1280x1920; DENSITY=320; METHODS=(expandedWidth); LIVE_UBUNTU_BACKEND=xrdp ;;
   *) exit 2 ;;
 esac
 OUT="build/product-ui-evidence/$LAYOUT"
 mkdir -p "$OUT"
 git rev-parse HEAD >"$OUT/source-commit.txt"
 sha256sum app/src/androidTest/java/com/rdp/sync/ProductUiInstrumentedTest.kt scripts/fixtures/product-ui-capture-plan.json >"$OUT/ui-source.sha256"
-# Confirm the single owned emulator BEFORE any display/settings mutation.
 export ANDROID_SERIAL=emulator-5554
 adb_owned() { timeout 10 adb -s "$ANDROID_SERIAL" "$@"; }
 timeout 10 adb devices >"$OUT/adb-devices-before.txt"
@@ -65,7 +64,6 @@ cleanup() {
   exit "$result"
 }
 trap cleanup EXIT
-# Actual emulator window size, not a constrained composable pretending a Dialog is narrow.
 adb_owned shell wm size "$SIZE"
 adb_owned shell wm density "$DENSITY"
 adb_owned shell settings put system accelerometer_rotation 0
@@ -85,3 +83,8 @@ for method in "${METHODS[@]}"; do FILTER+="${FILTER:+,}com.rdp.sync.ProductUiIns
   :app:connectedDebugAndroidTest
 collected=true
 python3 scripts/fixtures/collect_product_ui.py "$LAYOUT" "$OUT"
+
+# Mandatory live Ubuntu graphical desktop E2E gate:
+# - phone runner verifies real Ubuntu 24.04 GNOME Remote Desktop 46 (Wayland + GTK3 TextView)
+# - expanded runner verifies real Ubuntu 24.04 xrdp (X11 + xrdp-chansrv + GTK3 TextView)
+bash scripts/fixtures/run-ubuntu-live-ime-e2e.sh "$LIVE_UBUNTU_BACKEND" "$LAYOUT"

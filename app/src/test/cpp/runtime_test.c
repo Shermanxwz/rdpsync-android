@@ -54,8 +54,6 @@ static void check_staged_open(JNIEnv* env,const char* root,const char* cache,con
     int fd=Java_com_rdp_sync_network_RdpConnector_nativeFileTransferOpenStaged(env,NULL,(jstring)directory_id,(jstring)file_id,4);
     assert(fd>=0&&(fcntl(fd,F_GETFD)&FD_CLOEXEC)&&(fcntl(fd,F_GETFL)&O_ACCMODE)==O_RDONLY&&!(fcntl(fd,F_GETFL)&O_NONBLOCK));
     char bytes[4];assert(read(fd,bytes,4)==4&&!memcmp(bytes,"ABCD",4));close(fd);
-    /* Android ancestors such as /data grant search but not listing to apps.
-     * Non-root CI also proves a readonly-directory walk would fail here. */
     assert(!chmod(root,0111));
     if(geteuid()!=0){int denied=open(root,O_RDONLY|O_DIRECTORY);assert(denied<0&&errno==EACCES);}
     fd=rdpsync_transfer_open_staged(cache,directory_id,file_id,4);assert(fd>=0);close(fd);assert(!chmod(root,0700));
@@ -67,8 +65,6 @@ static void check_staged_open(JNIEnv* env,const char* root,const char* cache,con
     assert(rdpsync_transfer_open_staged(cache,"../private-home",file_id,4)==TF_INVALID);
     assert(rdpsync_transfer_open_staged(cache,directory_id,"FEDCBA98-7654-3210-fedc-ba9876543210",4)==TF_INVALID);
     assert(rdpsync_transfer_open_staged(cache,directory_id,"fedcba98-7654-3210-fedc-ba9876543210.part",4)==TF_INVALID);
-    /* Never follow final files, hard links, session/base symlinks or a changed
-     * initialized path ancestor; never block on a nonregular FIFO replacement. */
     assert(!unlink(path)&&!symlink(outside,path));assert(rdpsync_transfer_open_staged(cache,directory_id,file_id,0)==TF_IO);
     assert(!unlink(path)&&!link(outside,path));assert(rdpsync_transfer_open_staged(cache,directory_id,file_id,0)==TF_IO);
     assert(!unlink(path)&&!mkfifo(path,0600));assert(rdpsync_transfer_open_staged(cache,directory_id,file_id,0)==TF_IO);
@@ -85,8 +81,6 @@ int main(void) {
     assert(configure_session_profile(NULL, 1280, 720, TRUE, FALSE));
     assert(bool_options[FreeRDP_NetworkAutoDetect] && bool_options[FreeRDP_DeviceRedirection]);
     assert(bool_options[FreeRDP_SupportDisplayControl] && bool_options[FreeRDP_MultiTouchInput]);
-    /* Initial core monitor-layout PDU is not required for the single monitor;
-     * genuine DISP dynamic resize remains enabled independently. */
     assert(!bool_options[FreeRDP_SupportMonitorLayoutPdu]);
     assert(bool_options[FreeRDP_DynamicResolutionUpdate]);
     assert(bool_options[FreeRDP_SupportDynamicChannels]);
@@ -117,9 +111,30 @@ int main(void) {
     RdpSession transfer_owner = {0}; transfer_owner.file_transfer_enabled = 1; profile_context.session = &transfer_owner;
     assert(load_session_channels(&profile_instance));
     uint_options[FreeRDP_ClipboardFeatureMask] |= CLIPRDR_FLAG_LOCAL_TO_REMOTE;
-    assert(!load_session_channels(&profile_instance)); /* text never enabled */
+    assert(!load_session_channels(&profile_instance)); /* text not enabled on this owner */
+
+    /* Outbound text bridge enabled (default non-compat session): permits CLIPRDR_FLAG_LOCAL_TO_REMOTE
+     * while strictly rejecting CLIPRDR_FLAG_REMOTE_TO_LOCAL (remote clipboard never pulled). */
+    transfer_owner.file_transfer_enabled = 0;
+    transfer_owner.text_bridge_enabled = 1;
+    assert(configure_clipboard_profile(NULL, FALSE, TRUE));
+    assert(bool_options[FreeRDP_RedirectClipboard]);
+    assert(uint_options[FreeRDP_ClipboardFeatureMask] == CLIPRDR_FLAG_LOCAL_TO_REMOTE);
+    assert(load_session_channels(&profile_instance));
+    uint_options[FreeRDP_ClipboardFeatureMask] |= CLIPRDR_FLAG_REMOTE_TO_LOCAL;
+    assert(!load_session_channels(&profile_instance)); /* remote-to-local text strictly forbidden */
+
+    /* Combined file transfer + outbound text bridge */
+    transfer_owner.file_transfer_enabled = 1;
+    transfer_owner.text_bridge_enabled = 1;
+    assert(configure_clipboard_profile(NULL, TRUE, TRUE));
+    assert(uint_options[FreeRDP_ClipboardFeatureMask] ==
+        (CLIPRDR_FLAG_LOCAL_TO_REMOTE | CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES | CLIPRDR_FLAG_REMOTE_TO_LOCAL_FILES));
+    assert(load_session_channels(&profile_instance));
+
     assert(configure_transfer_profile(NULL, FALSE));
     transfer_owner.file_transfer_enabled = 0;
+    transfer_owner.text_bridge_enabled = 0;
     assert(load_session_channels(&profile_instance));
 
     char root[] = "/tmp/rdpsync-runtime-test-XXXXXX";
@@ -144,7 +159,7 @@ int main(void) {
     assert(!g_runtime_home[0]);
     RdpSession session = {0};
     g_session = &session;
-    assert(!initialize_runtime(home, cache)); /* Never initialize under a session. */
+    assert(!initialize_runtime(home, cache));
     g_session = NULL;
     assert(unsetenv("HOME") == 0 && getenv("HOME") == NULL);
     assert(Java_com_rdp_sync_network_RdpConnector_nativeInitialize(&env, NULL, (jstring)home, (jstring)cache) == JNI_TRUE);
@@ -157,7 +172,7 @@ int main(void) {
     check_staged_open(&env,root,cache,file);
     g_session = &session;
     assert(Java_com_rdp_sync_network_RdpConnector_nativeInitialize(&env, NULL, (jstring)home, (jstring)cache) == JNI_TRUE);
-    assert(!initialize_runtime(other, cache)); /* Immutable after the first setup. */
+    assert(!initialize_runtime(other, cache));
     assert(!strcmp(getenv("HOME"), home));
     g_session = NULL;
     assert(unlink(file) == 0 && rmdir(home) == 0 && rmdir(cache) == 0 && rmdir(other) == 0 && rmdir(root) == 0);

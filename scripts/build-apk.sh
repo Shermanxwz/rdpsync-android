@@ -8,5 +8,5 @@ bash scripts/build-native.sh
 python3 scripts/verify-apk.py app/build/outputs/apk/debug/app-debug.apk
 python3 scripts/verify-apk.py app/build/outputs/apk/release/app-release.apk
 mkdir -p releases
-cp app/build/outputs/apk/release/app-release.apk releases/RDPsync-v1.3.2-arm64-v8a.apk
-sha256sum releases/RDPsync-v1.3.2-arm64-v8a.apk | tee releases/RDPsync-v1.3.2-arm64-v8a.apk.sha256
+cp app/build/outputs/apk/release/app-release.apk releases/RDPsync-v1.3.3-arm64-v8a.apk
+sha256sum releases/RDPsync-v1.3.3-arm64-v8a.apk | tee releases/RDPsync-v1.3.3-arm64-v8a.apk.sha256

@@ -46,7 +46,7 @@ struct RdpTransfer {
     int file_only_blocked, peer_is_xrdp;
     pthread_cond_t text_cond;
     int text_cond_ready, advertise_text;
-    uint64_t text_offer_seq, text_ack_seq, text_served_seq;
+    uint64_t text_offer_seq, text_sent_seq, text_ack_seq, text_nack_seq, text_served_seq;
     size_t text_utf8_len, text_utf16_len;
     uint8_t text_utf8[RDPSYNC_TEXT_OFFER_MAX_UTF8];
     uint8_t text_utf16[RDPSYNC_TEXT_OFFER_MAX_UTF16];
@@ -112,7 +112,7 @@ int rdpsync_sharedspace_open_staged(const char* cache,const char* directory,cons
     return open_staged_bounded(cache,directory,file,size,RDP_WS_MAX_FILE_BYTES);
 }
 static uint16_t get16(const uint8_t* p) { return (uint16_t)(p[0]|(uint16_t)p[1]<<8); }
-static uint32_t get32(const uint8_t* p) { return (uint32_t)get16(p)|(uint16_t)get16(p+2)<<16; }
+static uint32_t get32(const uint8_t* p) { return (uint32_t)get16(p)|(uint32_t)get16(p+2)<<16; }
 /* xrdp v0.10.6.1 clipboard.c / clipboard_file.c append one zero DWORD
  * outside dataLen on these message shapes. Accept ONLY that bounded trailer;
  * it is not payload and never increases admitted descriptor/chunk lengths. */
@@ -172,10 +172,12 @@ int rdpsync_transfer_admit_incoming(RdpTransfer* t,const uint8_t* p,size_t size,
         }
     } else if(type==CB_FORMAT_DATA_RESPONSE) {
         if(t->list_inflight&&!t->format_admitted&&payload<=TF_MANIFEST_MAX){t->format_admitted=1;okay=1;}
+    } else if(t->file_only_blocked || (t->text_sent_seq>0 && (type==CB_FORMAT_LIST_RESPONSE || type==CB_FORMAT_DATA_REQUEST))) {
+        okay=1;
     } else if(total<=t->incoming_control_remaining) {
         t->incoming_control_remaining-=total;okay=1;
     }
-    if(!okay)t->error=TF_INVALID;
+    if(!okay && !t->file_only_blocked)t->error=TF_INVALID;
     pthread_mutex_unlock(&t->mutex);return okay;
 }
 static void put16(uint8_t* p,uint16_t n) { p[0]=(uint8_t)n; p[1]=(uint8_t)(n>>8); }
@@ -286,20 +288,31 @@ static UINT ready_callback(CliprdrClientContext* c,const CLIPRDR_MONITOR_READY* 
         CB_USE_LONG_FORMAT_NAMES|CB_STREAM_FILECLIP_ENABLED|CB_FILECLIP_NO_FILE_PATHS|CB_CAN_LOCK_CLIPDATA};
     CLIPRDR_CAPABILITIES caps={.cCapabilitiesSets=1,.capabilitySets=(void*)&general};
     UINT rc=control_admit(t,24);if(rc)return rc;rc=c->ClientCapabilities(c,&caps);if(rc)return rc;
-    pthread_mutex_lock(&t->mutex);t->ready=1;t->capability=t->file_only_blocked?-2:(t->peer_files?1:-1);if(!t->file_only_blocked)t->advertise=1;pthread_mutex_unlock(&t->mutex);return CHANNEL_RC_OK;
+    pthread_mutex_lock(&t->mutex);t->ready=1;t->capability=t->file_only_blocked?-2:(t->peer_files?1:-1);if(!t->file_only_blocked)t->advertise=1;if(t->text_cond_ready)pthread_cond_broadcast(&t->text_cond);pthread_mutex_unlock(&t->mutex);return CHANNEL_RC_OK;
 }
 static UINT formats_callback(CliprdrClientContext* c,const CLIPRDR_FORMAT_LIST* f) {
     RdpTransfer* t=transfer_from(c);if(!t||!f)return ERROR_INVALID_PARAMETER;uint32_t format=0;
     if(f->numFormats<=256&&(!f->numFormats||f->formats))for(UINT32 i=0;i<f->numFormats;i++)
         if(f->formats[i].formatName&&!strcmp(f->formats[i].formatName,"FileGroupDescriptorW"))format=f->formats[i].formatId;
-    pthread_mutex_lock(&t->mutex);t->remote_format=t->file_only_blocked?0:format;if(t->receive_token)clear_receive(t,TF_STALE);pthread_mutex_unlock(&t->mutex);
-    UINT rc=control_admit(t,8);if(rc)return rc;CLIPRDR_FORMAT_LIST_RESPONSE response={.common={.msgFlags=CB_RESPONSE_OK}};return c->ClientFormatListResponse(c,&response);
+    pthread_mutex_lock(&t->mutex);
+    const int text_only=t->file_only_blocked;
+    t->remote_format=text_only?0:format;
+    if(t->receive_token)clear_receive(t,TF_STALE);
+    pthread_mutex_unlock(&t->mutex);
+    UINT rc=text_only?CHANNEL_RC_OK:control_admit(t,8);
+    if(rc)return rc;
+    CLIPRDR_FORMAT_LIST_RESPONSE response={.common={.msgFlags=CB_RESPONSE_OK}};
+    return c->ClientFormatListResponse(c,&response);
 }
 static UINT format_reply_callback(CliprdrClientContext* c,const CLIPRDR_FORMAT_LIST_RESPONSE* p) {
     RdpTransfer* t=transfer_from(c);if(!t||!p)return ERROR_INVALID_PARAMETER;
     pthread_mutex_lock(&t->mutex);
-    if(p->common.msgFlags!=CB_RESPONSE_OK){t->error=TF_UNAVAILABLE;}
-    else if(t->text_offer_seq>t->text_ack_seq){t->text_ack_seq=t->text_offer_seq;}
+    if(p->common.msgFlags!=CB_RESPONSE_OK){
+        if(!t->file_only_blocked)t->error=TF_UNAVAILABLE;
+        if(t->text_sent_seq>t->text_nack_seq)t->text_nack_seq=t->text_sent_seq;
+    } else if(t->text_sent_seq>t->text_ack_seq){
+        t->text_ack_seq=t->text_sent_seq;
+    }
     if(t->text_cond_ready)pthread_cond_broadcast(&t->text_cond);
     pthread_mutex_unlock(&t->mutex);
     return CHANNEL_RC_OK;
@@ -423,19 +436,21 @@ void rdpsync_transfer_attach(RdpTransfer* t,CliprdrClientContext* c) {
 void rdpsync_transfer_detach(RdpTransfer* t,CliprdrClientContext* c) {
     if(!t)return;pthread_mutex_lock(&t->mutex);if(!c||t->context==c){if(c)c->custom=NULL;t->context=NULL;t->ready=0;t->capability=t->file_only_blocked?-2:-1;t->text_utf8_len=0;t->text_utf16_len=0;t->advertise_text=0;close_offer(t);clear_receive(t,TF_DISCONNECTED);if(t->text_cond_ready)pthread_cond_broadcast(&t->text_cond);}pthread_mutex_unlock(&t->mutex);
 }
-UINT rdpsync_transfer_pump(RdpTransfer* t) {
+UINT rdpsync_transfer_pump_ex(RdpTransfer* t, int* did_send_out) {
+    if(did_send_out)*did_send_out=0;
     if(!t)return CHANNEL_RC_OK;pthread_mutex_lock(&t->mutex);CliprdrClientContext* c=t->context;UINT rc=CHANNEL_RC_OK;
     if(!c||!t->ready){pthread_mutex_unlock(&t->mutex);return rc;}
+    int sent=0;
     if((t->phase==1||t->phase==3)&&now_ms()>t->deadline_ms){if(t->phase==3&&!t->request_chunk){t->retired_request_id=t->request_id;t->retired_request_length=t->request_length;}t->phase=5;t->error=TF_TIMEOUT;t->list_valid=0;t->request_list=0;t->request_chunk=0;t->request_id=0;}
-    if(t->unlock_id){CLIPRDR_UNLOCK_CLIPBOARD_DATA p={.clipDataId=t->unlock_id};t->unlock_id=0;rc=control_admit_locked(t,12);if(!rc)rc=c->ClientUnlockClipboardData(c,&p);}
+    if(t->unlock_id){CLIPRDR_UNLOCK_CLIPBOARD_DATA p={.clipDataId=t->unlock_id};t->unlock_id=0;rc=control_admit_locked(t,12);if(!rc){rc=c->ClientUnlockClipboardData(c,&p);if(!rc)sent=1;}}
     if(!rc&&(t->advertise||t->advertise_text)){
-        CLIPRDR_FORMAT fmts[4]; UINT32 nfmt=0;
+        CLIPRDR_FORMAT fmts[2]; UINT32 nfmt=0;
         const int pure_text=t->advertise_text&&t->text_utf16_len>0;
+        const uint64_t pending_seq=t->text_offer_seq;
         if(pure_text){
+            /* Canonical MS-RDPECLIP CF_UNICODETEXT (13): natively mapped to UTF8_STRING
+             * and text/plain;charset=utf-8 by GNOME Remote Desktop, xrdp, KRdp & Windows. */
             fmts[nfmt++]=(CLIPRDR_FORMAT){13U,NULL};
-            fmts[nfmt++]=(CLIPRDR_FORMAT){1U,NULL};
-            fmts[nfmt++]=(CLIPRDR_FORMAT){RDPSYNC_FMT_UTF8_STRING,"UTF8_STRING"};
-            fmts[nfmt++]=(CLIPRDR_FORMAT){RDPSYNC_FMT_TEXT_PLAIN_UTF8,"text/plain;charset=utf-8"};
             t->advertise_text=0;
         } else if(!t->file_only_blocked&&t->offer_count){
             fmts[nfmt++]=(CLIPRDR_FORMAT){TF_FORMAT_ID,"FileGroupDescriptorW"};
@@ -445,14 +460,28 @@ UINT rdpsync_transfer_pump(RdpTransfer* t) {
         }
         CLIPRDR_FORMAT_LIST p={.numFormats=nfmt,.formats=nfmt?fmts:NULL};
         if(!pure_text)rc=control_admit_locked(t,nfmt?160:8);
-        if(!rc)rc=c->ClientFormatList(c,&p);
+        if(!rc){
+            if(pure_text)t->text_sent_seq=pending_seq;
+            rc=c->ClientFormatList(c,&p);
+            if(!rc){
+                sent=1;
+            } else if(pure_text){
+                t->text_nack_seq=pending_seq;
+                if(t->text_cond_ready)pthread_cond_broadcast(&t->text_cond);
+            }
+        }
     }
     if(!rc&&t->request_list){t->request_list=0;
-        if(t->peer_lock){t->remote_clip_id=wire_id_new();CLIPRDR_LOCK_CLIPBOARD_DATA p={.clipDataId=t->remote_clip_id};rc=control_admit_locked(t,12);if(!rc)rc=t->remote_clip_id?c->ClientLockClipboardData(c,&p):ERROR_INVALID_DATA;}
-        if(!rc){CLIPRDR_FORMAT_DATA_REQUEST p={.requestedFormatId=t->remote_format};rc=control_admit_locked(t,12);if(!rc){t->list_inflight=1;rc=c->ClientFormatDataRequest(c,&p);}}
+        if(t->peer_lock){t->remote_clip_id=wire_id_new();CLIPRDR_LOCK_CLIPBOARD_DATA p={.clipDataId=t->remote_clip_id};rc=control_admit_locked(t,12);if(!rc){rc=t->remote_clip_id?c->ClientLockClipboardData(c,&p):ERROR_INVALID_DATA;if(!rc)sent=1;}}
+        if(!rc){CLIPRDR_FORMAT_DATA_REQUEST p={.requestedFormatId=t->remote_format};rc=control_admit_locked(t,12);if(!rc){t->list_inflight=1;rc=c->ClientFormatDataRequest(c,&p);if(!rc)sent=1;}}
     }
-    if(!rc&&t->request_chunk){t->request_chunk=0;CLIPRDR_FILE_CONTENTS_REQUEST p={.streamId=t->request_id,.listIndex=(UINT32)t->request_index,.dwFlags=FILECONTENTS_RANGE,.nPositionLow=(UINT32)t->request_offset,.nPositionHigh=(UINT32)(t->request_offset>>32),.cbRequested=t->request_length,.haveClipDataId=t->remote_clip_id!=0,.clipDataId=t->remote_clip_id};rc=control_admit_locked(t,40);if(!rc)rc=c->ClientFileContentsRequest(c,&p);}
-    if(rc){t->phase=5;t->error=rc==ERROR_NOT_ENOUGH_QUOTA?TF_QUOTA:TF_IO;}pthread_mutex_unlock(&t->mutex);return rc;
+    if(!rc&&t->request_chunk){t->request_chunk=0;CLIPRDR_FILE_CONTENTS_REQUEST p={.streamId=t->request_id,.listIndex=(UINT32)t->request_index,.dwFlags=FILECONTENTS_RANGE,.nPositionLow=(UINT32)t->request_offset,.nPositionHigh=(UINT32)(t->request_offset>>32),.cbRequested=t->request_length,.haveClipDataId=t->remote_clip_id!=0,.clipDataId=t->remote_clip_id};rc=control_admit_locked(t,40);if(!rc){rc=c->ClientFileContentsRequest(c,&p);if(!rc)sent=1;}}
+    if(rc){t->phase=5;t->error=rc==ERROR_NOT_ENOUGH_QUOTA?TF_QUOTA:TF_IO;}
+    if(did_send_out)*did_send_out=sent;
+    pthread_mutex_unlock(&t->mutex);return rc;
+}
+UINT rdpsync_transfer_pump(RdpTransfer* t) {
+    return rdpsync_transfer_pump_ex(t, NULL);
 }
 void rdpsync_transfer_state(RdpTransfer* t,int64_t v[10]) {memset(v,0,10*sizeof(*v));if(!t){v[1]=-2;return;}pthread_mutex_lock(&t->mutex);int64_t a[10]={(int64_t)t->generation,t->capability,(int64_t)t->offer_token,(int64_t)t->served_bytes,(int64_t)t->receive_token,t->phase,(int64_t)t->receive_count,(int64_t)t->receive_total,t->error,(int64_t)t->send_remaining};memcpy(v,a,sizeof(a));pthread_mutex_unlock(&t->mutex);}
 int64_t rdpsync_transfer_offer(RdpTransfer* t,uint64_t gen,const RdpTransferFile* files,const int* fds,size_t count) {
@@ -539,7 +568,23 @@ static int wait_seq_monotonic(RdpTransfer* t, const uint64_t* field, uint64_t ta
 }
 
 int rdpsync_transfer_wait_text_ack(RdpTransfer* t, uint64_t seq, int timeout_ms) {
-    return wait_seq_monotonic(t, &t->text_ack_seq, seq, timeout_ms);
+    if (!t || seq == 0 || timeout_ms <= 0) return -1;
+    struct timespec deadline;
+    clock_gettime(CLOCK_MONOTONIC, &deadline);
+    deadline.tv_sec += timeout_ms / 1000;
+    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec += 1;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&t->mutex);
+    ensure_text_cond_locked(t);
+    while (t->ready && t->text_ack_seq < seq && t->text_nack_seq < seq && t->text_cond_ready) {
+        if (pthread_cond_timedwait(&t->text_cond, &t->mutex, &deadline) == ETIMEDOUT) break;
+    }
+    const int ok = (t->text_ack_seq >= seq && t->text_nack_seq < seq) ? 0 : -1;
+    pthread_mutex_unlock(&t->mutex);
+    return ok;
 }
 
 int rdpsync_transfer_wait_text_served(RdpTransfer* t, uint64_t seq, int timeout_ms) {

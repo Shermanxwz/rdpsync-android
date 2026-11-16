@@ -26,7 +26,10 @@ static void* thread_fn(void* arg) {
     atomic_store(&s->connected, 1);
     s_status(s, "已连接");
     while (!atomic_load(&s->terminating)) {
-        if (rdpsync_transfer_pump(s->transfer) != CHANNEL_RC_OK) { s_error(s, "文件传输通道发送失败"); break; }
+        if (s->wake_event) ResetEvent(s->wake_event);
+        int transfer_sent = 0;
+        if (rdpsync_transfer_pump_ex(s->transfer, &transfer_sent) != CHANNEL_RC_OK) { s_error(s, "文件传输通道发送失败"); break; }
+        if (transfer_sent) (void)freerdp_channels_check_fds(instance->context->channels, instance);
         if (!process_commands(s)) { s_error(s, "输入发送失败，连接已停止"); break; }
         if (!rdpsync_drive_pump(s->drive, instance)) { s_error(s, "共享空间通道发送失败"); break; }
         HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {0};
@@ -157,13 +160,15 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
         result = 1;
         /* Test normal (DISP/RDPEI/autodetect/RDPDR) and compatibility profiles.
          * No connect() call or credentials: addins are loaded but not connected. */
-        for (int profile = 0; profile < 4 && result; ++profile) {
-            const int compatibility = profile % 2;
-            const BOOL transfer_enabled = profile >= 2;
+        for (int profile = 0; profile < 5 && result; ++profile) {
+            const int compatibility = (profile == 1 || profile == 3);
+            const BOOL transfer_enabled = (profile >= 2);
+            const BOOL text_enabled = !compatibility && (profile != 4);
             failed = "诊断会话内存";
             RdpSession* probe = calloc(1, sizeof(RdpSession));
             if (!probe) { result = 0; break; }
             probe->file_transfer_enabled = transfer_enabled;
+            probe->text_bridge_enabled = text_enabled;
             pthread_mutex_init(&probe->mutex, NULL);
             pthread_mutex_init(&probe->channel_mutex, NULL);
             atomic_init(&probe->connected, 0); atomic_init(&probe->terminating, 0);
@@ -182,7 +187,7 @@ JNIEXPORT jboolean JNICALL Java_com_rdp_sync_network_RdpConnector_nativeCheckRun
             if (result) {
                 failed = "通道设置";
                 result = configure_session_profile(instance->context->settings, 1280, 720, TRUE, compatibility) &&
-                    configure_transfer_profile(instance->context->settings, transfer_enabled);
+                    configure_clipboard_profile(instance->context->settings, transfer_enabled, text_enabled);
                 invariant = certificate_context_failure(instance, probe, 1);
                 if (invariant) { failed = invariant; result = 0; }
             }
@@ -278,7 +283,8 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect7(
     }
     failure_stage = "文件传输会话";
     session->file_transfer_enabled = transfer_enabled;
-    session->text_bridge_enabled = !compatibility && (atomic_exchange(&g_next_text_bridge, 0) != 0);
+    const int tb_override = atomic_exchange(&g_next_text_bridge, -1);
+    session->text_bridge_enabled = !compatibility && (tb_override != 0);
     const BOOL cliprdr_active = session->file_transfer_enabled || session->text_bridge_enabled;
     session->transfer = rdpsync_transfer_new(session->generation, cliprdr_active);
     if (!session->transfer) { session_destroy(session); goto failure; }
@@ -308,7 +314,7 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect7(
     s_diag(session, "certificate=security-settings-ready");
     failure_stage = "显示与通道设置";
     if (!configure_session_profile(settings, width, height, touch, compatibility) ||
-        !configure_transfer_profile(settings, cliprdr_active) ||
+        !configure_clipboard_profile(settings, session->file_transfer_enabled, session->text_bridge_enabled) ||
         !rdpsync_drive_configure(session->drive, session->instance->context)) {
         session_destroy(session); goto failure;
     }
@@ -716,56 +722,68 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
         return rc;
     }
 
+    /* Serialize outbound CLIPRDR text offers + paste keystrokes end-to-end so rapid
+     * consecutive Chinese IME commits never overwrite UTF-16LE bytes mid-paste. */
+    pthread_mutex_lock(&g_ubuntu_text_lock);
+
     RdpTransfer* transfer = NULL;
     HANDLE wake = NULL;
+    int is_unix = 0;
     pthread_mutex_lock(&g_lock);
     RdpSession* s = g_session;
     if (s && atomic_load(&s->connected) && !atomic_load(&s->terminating)) {
         transfer = s->transfer;
         wake = s->wake_event;
-    }
-    pthread_mutex_unlock(&g_lock);
-
-    int is_unix = 0;
-    pthread_mutex_lock(&g_lock);
-    if (g_session) {
-        pthread_mutex_lock(&g_session->mutex);
-        is_unix = (g_session->peer_os_major == 0x0004);
-        pthread_mutex_unlock(&g_session->mutex);
+        pthread_mutex_lock(&s->mutex);
+        is_unix = (s->peer_os_major == 0x0004);
+        pthread_mutex_unlock(&s->mutex);
         if (!is_unix && rdpsync_transfer_is_unix_peer(transfer)) is_unix = 1;
     }
     pthread_mutex_unlock(&g_lock);
 
+    /* Wait briefly if CLIPRDR MonitorReady is still completing right after logon. */
+    for (int wait_ready = 0; transfer && !rdpsync_transfer_is_ready(transfer) && wait_ready < 20; ++wait_ready) {
+        struct timespec rts = {0, 15000000L}; /* 15ms */
+        nanosleep(&rts, NULL);
+    }
+
     uint64_t seq = transfer ? rdpsync_transfer_offer_text(transfer, (const uint8_t*)raw, len) : 0;
     if (seq > 0 && wake) {
         SetEvent(wake);
-        (void)rdpsync_transfer_wait_text_ack(transfer, seq, 320);
-        /* xrdp sends CB_FORMAT_LIST_RESPONSE before XSetSelectionOwner(CLIPBOARD)
-         * finishes its X11 PropertyNotify round-trip. Allow X11/Wayland selection
-         * ownership to settle before injecting Ctrl+V / Ctrl+Shift+V. */
-        struct timespec settle = {0, 24000000L}; /* 24ms */
-        nanosleep(&settle, NULL);
-        struct timespec key_gap = {0, 6000000L}; /* 6ms */
-        int rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}); /* LCtrl down */
-        if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}); /* LShift down */
+        /* CRITICAL: Only inject Ctrl+V / Ctrl+Shift+V AFTER the remote server confirms
+         * CB_FORMAT_LIST_RESPONSE(CB_RESPONSE_OK) for this exact text offer sequence.
+         * Never fire blind Ctrl+V if CLIPRDR rejected or timed out, preventing stale
+         * remote clipboard contents from ever being pasted! */
+        if (rdpsync_transfer_wait_text_ack(transfer, seq, 1500) == 0) {
+            struct timespec settle = {0, 28000000L}; /* 28ms X11/Wayland selection ownership settle */
+            nanosleep(&settle, NULL);
+            struct timespec key_gap = {0, 6000000L}; /* 6ms */
+            int rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}); /* LCtrl down */
+            if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
+                rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}); /* LShift down */
+            }
+            nanosleep(&key_gap, NULL);
+            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 1}); /* V down */
+            nanosleep(&key_gap, NULL);
+            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 0}); /* V up */
+            nanosleep(&key_gap, NULL);
+            if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
+                rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}); /* LShift up */
+            }
+            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}); /* LCtrl up */
+            if (!rc) {
+                (void)rdpsync_transfer_wait_text_served(transfer, seq, 1000);
+                struct timespec post_paste = {0, 12000000L}; /* 12ms widget commit settle */
+                nanosleep(&post_paste, NULL);
+            }
+            pthread_mutex_unlock(&g_ubuntu_text_lock);
+            (*e)->ReleaseStringUTFChars(e, text, raw);
+            return rc;
         }
-        nanosleep(&key_gap, NULL);
-        if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 1}); /* V down */
-        nanosleep(&key_gap, NULL);
-        if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 0}); /* V up */
-        nanosleep(&key_gap, NULL);
-        if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}); /* LShift up */
-        }
-        if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}); /* LCtrl up */
-        if (!rc) (void)rdpsync_transfer_wait_text_served(transfer, seq, 500);
-        (*e)->ReleaseStringUTFChars(e, text, raw);
-        return rc;
     }
 
     if (!is_unix && mode == RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE) {
-        /* Windows fallback when CLIPRDR has not finished MonitorReady yet */
+        /* Windows fallback when CLIPRDR is disabled on the remote host */
         size_t idx = 0;
         int rc = 0;
         while (idx < len && !rc) {
@@ -782,12 +800,14 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
                 if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)(0xDC00U + (v & 0x3FFU)), 0});
             }
         }
+        pthread_mutex_unlock(&g_ubuntu_text_lock);
         (*e)->ReleaseStringUTFChars(e, text, raw);
         return rc;
     }
 
-    /* Automatic zero-channel ISO-14755 Ctrl+Shift+U fallback on Ubuntu when CLIPRDR is inactive */
+    /* Automatic zero-channel ISO-14755 Ctrl+Shift+U fallback on Ubuntu when CLIPRDR is disabled */
     const int fallback_rc = send_ubuntu_hex_fallback((const uint8_t*)raw, len);
+    pthread_mutex_unlock(&g_ubuntu_text_lock);
     (*e)->ReleaseStringUTFChars(e, text, raw);
     return fallback_rc;
 }
