@@ -23,12 +23,12 @@ mkdir -p "$EVIDENCE" "$PRIV"
 chmod 700 "$PRIV"
 
 export ANDROID_SERIAL=emulator-5554
-adb -s "$ANDROID_SERIAL" shell rm -rf /sdcard/Android/data/com.rdp.sync.debug/files/rdpsync-ubuntu-live-ime /sdcard/Android/data/com.rdp.sync/files/rdpsync-ubuntu-live-ime
+adb -s "$ANDROID_SERIAL" shell rm -rf /sdcard/Download/rdpsync-ubuntu-live-ime /sdcard/Android/data/com.rdp.sync.debug/files/rdpsync-ubuntu-live-ime /sdcard/Android/data/com.rdp.sync/files/rdpsync-ubuntu-live-ime
 
 cleanup_server() {
   local rc=$?
   set +e
-  adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" >/dev/null 2>&1 || adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync.debug/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" >/dev/null 2>&1 || true
+  adb -s "$ANDROID_SERIAL" pull "/sdcard/Download/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" >/dev/null 2>&1 || adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" >/dev/null 2>&1 || true
   adb -s "$ANDROID_SERIAL" logcat -d >"$EVIDENCE/android-logcat.txt" 2>/dev/null || true
   if [[ "$BACKEND" == "gnome" ]]; then
     if [[ "$rc" -ne 0 ]]; then
@@ -278,7 +278,7 @@ printf '%s\n' "$FINGERPRINT" >"$EVIDENCE/server-cert-sha256.txt"
   -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveFingerprint="$FINGERPRINT" \
   :app:connectedDebugAndroidTest
 
-adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/" || adb -s "$ANDROID_SERIAL" pull "/sdcard/Android/data/com.rdp.sync.debug/files/rdpsync-ubuntu-live-ime/." "$EVIDENCE/"
+adb -s "$ANDROID_SERIAL" pull "/sdcard/Download/rdpsync-ubuntu-live-ime/." "$EVIDENCE/"
 python3 - "$EVIDENCE/$BACKEND-receipt.json" <<'PYVERIFY'
 import json, pathlib, sys
 receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))

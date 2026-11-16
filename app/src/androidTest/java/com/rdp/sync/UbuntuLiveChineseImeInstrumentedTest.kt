@@ -2,6 +2,7 @@ package com.rdp.sync
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -63,6 +64,10 @@ class UbuntuLiveChineseImeInstrumentedTest {
     private val instrumentation get() = InstrumentationRegistry.getInstrumentation()
     private val measurements = JSONObject()
     private val boundedScroll by lazy { BoundedFixtureScroll(compose, measurements) }
+
+    private fun shell(command: String): String = ParcelFileDescriptor.AutoCloseInputStream(
+        instrumentation.uiAutomation.executeShellCommand(command)
+    ).bufferedReader().use { it.readText() }
 
     private fun httpJson(port: Int, method: String, path: String): JSONObject {
         Socket().use { sock ->
@@ -334,6 +339,16 @@ class UbuntuLiveChineseImeInstrumentedTest {
                 .put("after_commit_2", afterCommit2.getString("entry_text"))
                 .put("rdp_diagnostics", RdpConnector.getDiag())
             File(outDir, "$backend-receipt.json").writeText(receipt.toString(2), Charsets.UTF_8)
+            require(outDir.absolutePath.matches(Regex("[A-Za-z0-9_./-]+")))
+            require(backend.matches(Regex("[a-z0-9_-]+")))
+            shell("mkdir -p /sdcard/Download/rdpsync-ubuntu-live-ime")
+            shell("cp -R ${outDir.absolutePath}/. /sdcard/Download/rdpsync-ubuntu-live-ime/")
+            val exported = shell("cat /sdcard/Download/rdpsync-ubuntu-live-ime/$backend-receipt.json")
+            assertEquals(
+                "Ubuntu live IME receipt must survive test APK uninstall",
+                receipt.toString(2).trim(),
+                exported.trim()
+            )
         } finally {
             compose.runOnUiThread { showing.value = false }
             RdpConnector.disconnect()
