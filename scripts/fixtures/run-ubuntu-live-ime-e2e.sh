@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Disposable GitHub Actions runner live E2E harness for BOTH Ubuntu GNOME Remote Desktop 46 (Wayland)
+# Disposable GitHub Actions runner live E2E harness for BOTH Ubuntu GNOME Remote Desktop 46 (Wayland + IBus async D-Bus)
 # and Ubuntu xrdp (X11), exercised from the real Android 15 emulator running com.rdp.sync.
 set -euo pipefail
 [[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || {
@@ -32,8 +32,8 @@ cleanup_server() {
   adb -s "$ANDROID_SERIAL" logcat -d >"$EVIDENCE/android-logcat.txt" 2>/dev/null || true
   if [[ "$BACKEND" == "gnome" ]]; then
     if [[ "$rc" -ne 0 ]]; then
-      echo "=== GNOME REMOTE DESKTOP & GTK LOGS ===" >&2
-      tail -n 80 "$EVIDENCE/gnome-remote-desktop.log" "$EVIDENCE/gtk-desktop.log" "$EVIDENCE/mutter.log" "$EVIDENCE/namespace.log" >&2 2>/dev/null || true
+      echo "=== GNOME REMOTE DESKTOP, IBUS & GTK LOGS ===" >&2
+      tail -n 80 "$EVIDENCE/gnome-remote-desktop.log" "$EVIDENCE/ibus-daemon.log" "$EVIDENCE/gtk-desktop.log" "$EVIDENCE/mutter.log" "$EVIDENCE/namespace.log" >&2 2>/dev/null || true
     fi
     for pidf in "$PRIV/rdp-relay.pid" "$PRIV/state-relay.pid" "$PRIV/launcher.pid"; do
       [[ -f "$pidf" ]] && sudo kill -TERM "$(cat "$pidf")" 2>/dev/null || true
@@ -55,11 +55,9 @@ trap cleanup_server EXIT
 
 if [[ "$BACKEND" == "gnome" ]]; then
   sudo apt-get update -qq
-  # fuse3 (/dev/fuse + fusermount3) is mandatory for GNOME Remote Desktop 46 grd_clipboard_rdp_new()
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    gnome-remote-desktop mutter pipewire wireplumber fuse3 \
-    python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 \
-    dbus-x11 libgl1-mesa-dri socat openssl iproute2 fonts-wqy-microhei
+  # fuse3 (/dev/fuse + fusermount3) is mandatory for GNOME Remote Desktop 46 grd_clipboard_rdp_new();
+  # ibus + ibus-gtk3 + gir1.2-ibus-1.0 exercise real async D-Bus IBusEngineSimple key processing!
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     gnome-remote-desktop mutter pipewire wireplumber fuse3     ibus ibus-gtk3 gir1.2-ibus-1.0     python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0     dbus-x11 libgl1-mesa-dri socat openssl iproute2 fonts-wqy-microhei
 
   [[ -c /dev/fuse && -r /dev/fuse && -w /dev/fuse ]] || { echo "Accessible /dev/fuse required for GNOME Remote Desktop CLIPRDR" >&2; exit 1; }
   sudo systemctl stop gnome-remote-desktop.service 2>/dev/null || true
@@ -67,15 +65,14 @@ if [[ "$BACKEND" == "gnome" ]]; then
 
   mkdir -p "$PRIV/home" "$PRIV/runtime"
   chmod 700 "$PRIV/home" "$PRIV/runtime"
-  openssl req -new -newkey rsa:3072 -nodes -x509 -days 1 -subj /CN=10.0.2.2 \
-    -keyout "$PRIV/key.pem" -out "$PRIV/cert.pem" >"$PRIV/cert.log" 2>&1
+  openssl req -new -newkey rsa:3072 -nodes -x509 -days 1 -subj /CN=10.0.2.2     -keyout "$PRIV/key.pem" -out "$PRIV/cert.pem" >"$PRIV/cert.log" 2>&1
   chmod 600 "$PRIV/key.pem"
   FINGERPRINT="$(openssl x509 -in "$PRIV/cert.pem" -outform DER | sha256sum | cut -d' ' -f1)"
   RDP_PORT=33891
   STATE_PORT=8768
 
   cat >"$PRIV/run-gnome-ime-session.py" <<'PYGNOME'
-import os, signal, subprocess, sys, time
+import json, os, signal, subprocess, sys, time, urllib.request
 from pathlib import Path
 
 root, priv, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
@@ -111,6 +108,8 @@ os.environ.update(
     GDK_DPI_SCALE="1",
     WAYLAND_DISPLAY="rdpsync-wayland",
     LIBGL_ALWAYS_SOFTWARE="1",
+    IBUS_ENABLE_CTRL_SHIFT_U="1",
+    IBUS_ENABLE_SYNC_MODE="0",
     GNOME_REMOTE_DESKTOP_TEST_RDP_USERNAME="rdpfixture",
     GNOME_REMOTE_DESKTOP_TEST_RDP_PASSWORD="rdpsync-fixture-only",
 )
@@ -124,6 +123,10 @@ for k, v in [
     ("screen-share-mode", "mirror-primary"),
 ]:
     subprocess.run(["gsettings", "set", schema, k, v], check=True)
+
+# Prevent ibus CLI from invoking X11-only setxkbmap in a pure Wayland session
+subprocess.run(["gsettings", "set", "org.freedesktop.ibus.general", "use-system-keyboard-layout", "true"], check=True)
+subprocess.run(["gsettings", "set", "org.freedesktop.ibus.general", "preload-engines", "['xkb:us::eng']"], check=True)
 
 spawn(["pipewire"], "pipewire")
 spawn(["wireplumber"], "wireplumber")
@@ -142,17 +145,63 @@ while time.monotonic() < deadline:
 else:
     raise SystemExit("Mutter Wayland session did not become ready")
 
+# Start real ibus-daemon in foreground (managed by procs[]) and capture its exact D-Bus socket address
+spawn(["ibus-daemon", "--panel=disable", "--verbose"], "ibus-daemon")
+ibus_addr = ""
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    r = subprocess.run(["ibus", "address"], capture_output=True, text=True)
+    cand = (r.stdout or "").strip()
+    if r.returncode == 0 and cand.startswith("unix:"):
+        ibus_addr = cand
+        break
+    time.sleep(0.2)
+if not ibus_addr:
+    raise SystemExit("ibus-daemon did not publish a valid D-Bus address")
+os.environ["IBUS_ADDRESS"] = ibus_addr
+
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    r = subprocess.run(["ibus", "list-engine", "--name-only"], capture_output=True, text=True)
+    if r.returncode == 0 and "xkb:us::eng" in (r.stdout or ""):
+        break
+    time.sleep(0.2)
+else:
+    raise SystemExit("ibus-daemon did not register xkb:us::eng (IBusEngineSimple)")
+
 spawn(["/usr/libexec/gnome-remote-desktop-daemon", "--rdp-port=3389"], "gnome-remote-desktop")
 spawn(
     [sys.executable, str(root / "scripts/fixtures/ubuntu_gtk_ime_desktop.py")],
     "gtk-desktop",
     {
-        "GTK_IM_MODULE": "gtk-im-context-simple",
+        "GTK_IM_MODULE": "ibus",
+        "IBUS_ADDRESS": ibus_addr,
+        "IBUS_ENABLE_CTRL_SHIFT_U": "1",
+        "IBUS_ENABLE_SYNC_MODE": "0",
+        "UBUNTU_SIMULATE_BROWSER_ASYNC_RESET": "1",
         "UBUNTU_IME_STATE_PORT": "8768",
         "UBUNTU_IME_EXPECTED_BACKEND": "Wayland",
         "UBUNTU_IME_EVIDENCE_DIR": str(out),
     },
 )
+
+# Wait for GTK3 Wayland window to map & focus its IBusInputContext, then activate IBusEngineSimple
+deadline = time.monotonic() + 20
+while time.monotonic() < deadline:
+    try:
+        st = json.load(urllib.request.urlopen("http://127.0.0.1:8768/state", timeout=1))
+        if st.get("ready"):
+            break
+    except Exception:
+        pass
+    time.sleep(0.2)
+
+for _ in range(25):
+    re = subprocess.run(["ibus", "engine", "xkb:us::eng"], capture_output=True, text=True)
+    if re.returncode == 0:
+        break
+    time.sleep(0.2)
+
 spawn(["socat", f"UNIX-LISTEN:{priv}/rdp.sock,fork,mode=600", "TCP:127.0.0.1:3389"], "rdp-sock")
 spawn(["socat", f"UNIX-LISTEN:{priv}/state.sock,fork,mode=600", "TCP:127.0.0.1:8768"], "state-sock")
 
@@ -166,11 +215,7 @@ PYGNOME
   nohup sudo -E unshare --net --fork --kill-child=TERM bash -c '
     set -euo pipefail
     ip link set lo up
-    exec setpriv --reuid="$1" --regid="$2" --init-groups \
-      env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="$4/home" \
-      XDG_CONFIG_HOME="$4/home/.config" XDG_DATA_HOME="$4/home/.local/share" \
-      XDG_RUNTIME_DIR="$4/runtime" \
-      dbus-run-session -- python3 "$4/run-gnome-ime-session.py" "$3" "$4" "$5"
+    exec setpriv --reuid="$1" --regid="$2" --init-groups       env -i PATH=/usr/bin:/bin LANG=C.UTF-8 HOME="$4/home"       XDG_CONFIG_HOME="$4/home/.config" XDG_DATA_HOME="$4/home/.local/share"       XDG_RUNTIME_DIR="$4/runtime"       dbus-run-session -- python3 "$4/run-gnome-ime-session.py" "$3" "$4" "$5"
   ' rdpsync-gnome-ime "$(id -u)" "$(id -g)" "$ROOT" "$PRIV" "$EVIDENCE" >"$EVIDENCE/namespace.log" 2>&1 &
   echo $! >"$PRIV/launcher.pid"
 
@@ -190,20 +235,18 @@ import json, time, urllib.request
 for _ in range(100):
     try:
         s = json.load(urllib.request.urlopen("http://127.0.0.1:8768/state", timeout=1))
-        if s.get("ready") and "Wayland" in s.get("backend", ""):
+        if s.get("ready") and "Wayland" in s.get("backend", "") and s.get("gtk_im_module") == "ibus":
             break
     except Exception:
         pass
     time.sleep(0.25)
 else:
-    raise SystemExit("GNOME Wayland GTK3 window did not reach ready state")
+    raise SystemExit("GNOME Wayland + IBus GTK3 window did not reach ready state")
 PYWAIT
 
 elif [[ "$BACKEND" == "xrdp" ]]; then
   sudo apt-get update -qq
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    xrdp xorgxrdp xserver-xorg-core x11-xserver-utils xauth openbox fuse3 dbus-x11 \
-    python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 fonts-wqy-microhei openssl
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends     xrdp xorgxrdp xserver-xorg-core x11-xserver-utils xauth openbox fuse3 dbus-x11     python3-gi python3-cairo python3-gi-cairo gir1.2-gtk-3.0 fonts-wqy-microhei openssl
 
   sudo systemctl stop xrdp xrdp-sesman 2>/dev/null || true
   if ! id rdpfixture >/dev/null 2>&1; then
@@ -233,8 +276,7 @@ XSESSION
   sudo chown -R rdpfixture:rdpfixture /home/rdpfixture
 
   sudo adduser xrdp ssl-cert >/dev/null 2>&1 || true
-  sudo openssl req -new -newkey rsa:3072 -nodes -x509 -days 1 -subj /CN=10.0.2.2 \
-    -keyout /etc/xrdp/rdpsync-ime-key.pem -out /etc/xrdp/rdpsync-ime-cert.pem >/dev/null 2>&1
+  sudo openssl req -new -newkey rsa:3072 -nodes -x509 -days 1 -subj /CN=10.0.2.2     -keyout /etc/xrdp/rdpsync-ime-key.pem -out /etc/xrdp/rdpsync-ime-cert.pem >/dev/null 2>&1
   sudo chown root:xrdp /etc/xrdp/rdpsync-ime-key.pem /etc/xrdp/rdpsync-ime-cert.pem
   sudo chmod 640 /etc/xrdp/rdpsync-ime-key.pem
   sudo chmod 644 /etc/xrdp/rdpsync-ime-cert.pem
@@ -254,8 +296,12 @@ XSESSION
     sudo sed -i '/^\[SessionVariables\]/a LANG=C.UTF-8\nLC_ALL=C.UTF-8' /etc/xrdp/sesman.ini
   fi
   sudo mkdir -p /etc/systemd/system/xrdp-sesman.service.d /etc/systemd/system/xrdp.service.d
-  printf '[Service]\nEnvironment="LANG=C.UTF-8" "LC_ALL=C.UTF-8"\n' | sudo tee /etc/systemd/system/xrdp-sesman.service.d/locale.conf >/dev/null
-  printf '[Service]\nEnvironment="LANG=C.UTF-8" "LC_ALL=C.UTF-8"\n' | sudo tee /etc/systemd/system/xrdp.service.d/locale.conf >/dev/null
+  printf '[Service]
+Environment="LANG=C.UTF-8" "LC_ALL=C.UTF-8"
+' | sudo tee /etc/systemd/system/xrdp-sesman.service.d/locale.conf >/dev/null
+  printf '[Service]
+Environment="LANG=C.UTF-8" "LC_ALL=C.UTF-8"
+' | sudo tee /etc/systemd/system/xrdp.service.d/locale.conf >/dev/null
   sudo systemctl daemon-reload
   sudo systemctl start xrdp-sesman xrdp
   for _ in $(seq 1 50); do
@@ -270,23 +316,24 @@ fi
 
 printf '%s\n' "$FINGERPRINT" >"$EVIDENCE/server-cert-sha256.txt"
 
-./gradlew --no-daemon -PnativeAbis=x86_64 \
-  -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.UbuntuLiveChineseImeInstrumentedTest#liveUbuntuDesktopDirectChineseAndSendText \
-  -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveBackend="$BACKEND" \
-  -Pandroid.testInstrumentationRunnerArguments.ubuntuLivePort="$RDP_PORT" \
-  -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveStatePort="$STATE_PORT" \
-  -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveFingerprint="$FINGERPRINT" \
-  :app:connectedDebugAndroidTest
+./gradlew --no-daemon -PnativeAbis=x86_64   -Pandroid.testInstrumentationRunnerArguments.class=com.rdp.sync.UbuntuLiveChineseImeInstrumentedTest#liveUbuntuDesktopDirectChineseAndSendText   -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveBackend="$BACKEND"   -Pandroid.testInstrumentationRunnerArguments.ubuntuLivePort="$RDP_PORT"   -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveStatePort="$STATE_PORT"   -Pandroid.testInstrumentationRunnerArguments.ubuntuLiveFingerprint="$FINGERPRINT"   :app:connectedDebugAndroidTest
 
 adb -s "$ANDROID_SERIAL" pull "/sdcard/Download/rdpsync-ubuntu-live-ime/." "$EVIDENCE/"
 python3 - "$EVIDENCE/$BACKEND-receipt.json" <<'PYVERIFY'
 import json, pathlib, sys
 receipt = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-expected = "你好Ubuntu桌面，连续输入不丢字 [发送文字100%正常]"
+expected = "百度你好Ubuntu桌面，连续输入不丢字 [发送文字100%正常]"
 assert receipt["success"] is True, receipt
+assert receipt["after_commit_baidu"] == "百度", receipt
+assert "5ea6" not in receipt["observed_text"].lower(), receipt
 assert receipt["observed_text"] == expected, receipt
 assert receipt["trap_armed_before_input"] is True, receipt
 assert "OLD_CLIPBOARD_TRAP" not in receipt["observed_text"], receipt
-assert (receipt["paste_signals"] >= 3 if receipt["backend"] == "xrdp" else receipt["paste_signals"] == 0), receipt
-print(f"Verified live Ubuntu ({receipt['backend']} / {receipt['display_backend']}) Chinese IME & Send-Text E2E: {receipt['observed_text']}")
+if receipt["backend"] == "xrdp":
+    assert receipt["paste_signals"] >= 4, receipt
+else:
+    assert receipt["paste_signals"] == 0, receipt
+    assert receipt["gtk_im_module"] == "ibus", receipt
+    assert receipt["async_im_resets"] >= 4, receipt
+print(f"Verified live Ubuntu ({receipt['backend']} / {receipt['display_backend']} / im={receipt['gtk_im_module']}) multi-char Chinese IME ('百度' + sentences) & Send-Text E2E: {receipt['observed_text']}")
 PYVERIFY

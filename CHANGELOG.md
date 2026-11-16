@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.4 - 2026-11-16
+
+- Fixed multi-character Chinese IME commits and `"发送文字"` corrupting/reordering text (such as typing `"百度"` producing `"5ea6 百"`) on Ubuntu 24.04 GNOME Remote Desktop 46 (Wayland) + IBus + Firefox:
+  - Added protocol-thread wire-transmission acknowledgments (`enqueue_input_sync` + `g_input_sync_cond` on `CLOCK_MONOTONIC`, signaled after `execute_input()` writes each FastPath PDU without holding `g_lock`) so multi-character ISO-14755 keystroke sequences can never coalesce inside `s->commands[]` into a `0ms` burst.
+  - Replaced single-shot `INPUT_UBUNTU_HEX` bursts with a 3-phase wire-synchronized ISO-14755 state machine (`send_ubuntu_hex_codepoint`): `LCtrl+LShift+U` press/release + `14ms` async D-Bus `modifiers_dropped` latch (dropping `Ctrl` before hex digits so `'c'`/`'d'` never risk `Ctrl+C`/`Ctrl+D`), individually paced unmodified hex nibbles, and `Space` commit followed by an RTT-adaptive `90ms–140ms` post-commit wire-idle settle window so Mutter's `CLUTTER_PRIORITY_EVENTS + 1` `done_idle_cb` flushes `zwp_text_input_v3.done` and Firefox e10s `IMContextWrapper::OnSelectionChange` -> `ResetIME()` completes cleanly before the next character begins.
+- Upgraded the live Ubuntu 24.04 GNOME Wayland CI E2E harness (`run-ubuntu-live-ime-e2e.sh`, `ubuntu_gtk_ime_desktop.py`, and `UbuntuLiveChineseImeInstrumentedTest`) to run real asynchronous `ibus-daemon` D-Bus IPC (`GTK_IM_MODULE=ibus`, `IBUS_ENABLE_SYNC_MODE=0`, `IBUS_ENABLE_CTRL_SHIFT_U=1`) plus Firefox-equivalent `12ms` post-commit asynchronous `reset_im_context()`, explicitly gating multi-character `"百度"` (`assertFalse(txt.contains("5ea6"))`), consecutive Chinese/English sentences, and `"发送文字"`.
+- Bumped official package version to `versionName = "1.3.4"` (`versionCode = 21`, `com.rdp.sync`), signed with the persistent official release certificate for seamless in-place upgrade over `v1.3.3` / `v1.3.2`.
+
 ## 1.3.3 - 2026-11-16
 
 - Fixed the root causes of Ubuntu graphical desktop direct Chinese IME input and `"发送文字"` (`Send text`) pasting stale clipboard contents or escaped hex literals:

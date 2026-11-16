@@ -69,6 +69,171 @@ static void* produce_frames(void* arg) {
     atomic_store(&producer->done, 1);
     return NULL;
 }
+
+typedef struct {
+    int64_t ts_us[64];
+    UINT16 flags[64];
+    UINT8 codes[64];
+    size_t count;
+    int ctrl_down, shift_down, in_hex, mods_dropped;
+    uint32_t hex_acc;
+    int hex_digits;
+    int64_t async_reset_due_us;
+    int64_t deferred_done_due_us;
+    uint32_t pending_commit_cp;
+    char out_utf8[128];
+    size_t out_len;
+} UbuntuWaylandIbusSim;
+static UbuntuWaylandIbusSim g_ibus_sim;
+
+static void append_utf8_cp(UbuntuWaylandIbusSim* sim, uint32_t cp) {
+    if (cp < 0x80U) {
+        sim->out_utf8[sim->out_len++] = (char)cp;
+    } else if (cp < 0x800U) {
+        sim->out_utf8[sim->out_len++] = (char)(0xC0U | (cp >> 6));
+        sim->out_utf8[sim->out_len++] = (char)(0x80U | (cp & 0x3FU));
+    } else {
+        sim->out_utf8[sim->out_len++] = (char)(0xE0U | (cp >> 12));
+        sim->out_utf8[sim->out_len++] = (char)(0x80U | ((cp >> 6) & 0x3FU));
+        sim->out_utf8[sim->out_len++] = (char)(0x80U | (cp & 0x3FU));
+    }
+    sim->out_utf8[sim->out_len] = '\0';
+}
+
+static int scancode_to_ascii(UINT8 sc) {
+    static const struct { UINT8 sc; char ch; } map[] = {
+        {0x0B,'0'},{0x02,'1'},{0x03,'2'},{0x04,'3'},{0x05,'4'},{0x06,'5'},{0x07,'6'},{0x08,'7'},
+        {0x09,'8'},{0x0A,'9'},{0x1E,'a'},{0x30,'b'},{0x2E,'c'},{0x20,'d'},{0x12,'e'},{0x21,'f'},
+        {0x39,' '}
+    };
+    for (size_t i = 0; i < sizeof(map)/sizeof(map[0]); ++i) if (map[i].sc == sc) return map[i].ch;
+    return 0;
+}
+
+static BOOL ubuntu_ibus_sim_key_event(rdpInput* input, UINT16 flags, UINT8 code) {
+    (void)input;
+    const int64_t now = monotonic_us();
+    UbuntuWaylandIbusSim* sim = &g_ibus_sim;
+    assert(sim->count < 64);
+    /* Flush Mutter done_idle_cb ONLY if wire was idle long enough before this event! */
+    if (sim->pending_commit_cp && now >= sim->deferred_done_due_us) {
+        append_utf8_cp(sim, sim->pending_commit_cp);
+        sim->pending_commit_cp = 0;
+        /* Firefox e10s OnSelectionChange -> ResetIME() arrives 15ms after commit! */
+        sim->async_reset_due_us = now + 15000;
+    }
+    /* Apply pending Firefox async ResetIME() if due */
+    if (sim->async_reset_due_us && now >= sim->async_reset_due_us) {
+        sim->in_hex = 0; sim->mods_dropped = 0; sim->hex_acc = 0; sim->hex_digits = 0;
+        sim->async_reset_due_us = 0;
+    }
+
+    sim->ts_us[sim->count] = now;
+    sim->flags[sim->count] = flags;
+    sim->codes[sim->count] = code;
+    ++sim->count;
+
+    const int rel = (flags & KBD_FLAGS_RELEASE) != 0;
+    if (code == 0x1D) {
+        sim->ctrl_down = !rel;
+        if (rel && sim->in_hex && sim->hex_digits == 0) sim->mods_dropped = 1;
+        return TRUE;
+    }
+    if (code == 0x2A) {
+        sim->shift_down = !rel;
+        if (rel && sim->in_hex && sim->hex_digits == 0) sim->mods_dropped = 1;
+        return TRUE;
+    }
+    if (rel) return TRUE;
+
+    /* Assert Ctrl is NEVER held during hex digits (no Ctrl+C / Ctrl+D terminal hazard) */
+    if (code != 0x16) assert(!sim->ctrl_down);
+
+    if (code == 0x16 && sim->ctrl_down && sim->shift_down) {
+        sim->in_hex = 1; sim->mods_dropped = 0; sim->hex_acc = 0; sim->hex_digits = 0;
+        return TRUE;
+    }
+    const int ch = scancode_to_ascii(code);
+    if (sim->in_hex && sim->mods_dropped) {
+        if (ch == ' ' && sim->hex_digits > 0) {
+            /* Mutter defers zwp_text_input_v3_send_done to idle (requires >= 4ms quiet wire!) */
+            sim->pending_commit_cp = sim->hex_acc;
+            sim->deferred_done_due_us = now + 4000;
+            sim->in_hex = 0; sim->mods_dropped = 0; sim->hex_acc = 0; sim->hex_digits = 0;
+            return TRUE;
+        }
+        if ((ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f')) {
+            const uint32_t nib = (ch >= '0' && ch <= '9') ? (uint32_t)(ch - '0') : (uint32_t)(ch - 'a' + 10);
+            sim->hex_acc = (sim->hex_acc << 4) | nib;
+            ++sim->hex_digits;
+            return TRUE;
+        }
+    }
+    /* Unhandled wl_keyboard.key leaks straight to widget ahead of deferred_done_due_us! */
+    if (ch) append_utf8_cp(sim, (uint32_t)ch);
+    return TRUE;
+}
+
+typedef struct { RdpSession* session; atomic_int stop; } MockOwnerCtx;
+static void* mock_protocol_owner(void* arg) {
+    MockOwnerCtx* m = arg;
+    while (!atomic_load(&m->stop)) {
+        assert(process_commands(m->session));
+        struct timespec ts = {0, 500000L}; /* 0.5ms protocol loop */
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
+}
+
+static void verify_ubuntu_hex_wire_pacing_baidu(void) {
+    memset(&g_ibus_sim, 0, sizeof(g_ibus_sim));
+    RdpSession s = {0};
+    pthread_mutex_init(&s.mutex, NULL);
+    pthread_mutex_init(&s.channel_mutex, NULL);
+    atomic_init(&s.connected, 1);
+    atomic_init(&s.terminating, 0);
+    s.generation = 77;
+    s.rtt_ms = 18;
+    RdpSyncContext ctx = {0};
+    freerdp inst = {0};
+    rdpInput inp = {0};
+    inp.KeyboardEvent = ubuntu_ibus_sim_key_event;
+    ctx.session = &s;
+    ctx.common.context.instance = &inst;
+    ctx.common.context.input = &inp;
+    inst.context = &ctx.common.context;
+    s.instance = &inst;
+    g_session = &s;
+
+    MockOwnerCtx owner_ctx = {&s, ATOMIC_VAR_INIT(0)};
+    pthread_t owner_tid;
+    assert(pthread_create(&owner_tid, NULL, mock_protocol_owner, &owner_ctx) == 0);
+
+    /* Send "百度" (6 UTF-8 bytes: U+767E + U+5EA6) through production send_ubuntu_hex_fallback */
+    const char* baidu = "百度";
+    assert(send_ubuntu_hex_fallback((const uint8_t*)baidu, strlen(baidu)) == 0);
+
+    /* Flush final pending done_idle_cb during post-commit settle */
+    if (g_ibus_sim.pending_commit_cp && monotonic_us() >= g_ibus_sim.deferred_done_due_us) {
+        append_utf8_cp(&g_ibus_sim, g_ibus_sim.pending_commit_cp);
+        g_ibus_sim.pending_commit_cp = 0;
+    }
+
+    atomic_store(&owner_ctx.stop, 1);
+    pthread_join(owner_tid, NULL);
+    g_session = NULL;
+    pthread_mutex_destroy(&s.channel_mutex);
+    pthread_mutex_destroy(&s.mutex);
+
+    assert(g_ibus_sim.count == 32);
+    /* >= 10ms latch gap after LCtrl release (event 5) before first hex digit '7' (event 6) */
+    assert(g_ibus_sim.ts_us[6] - g_ibus_sim.ts_us[5] >= 10000);
+    /* >= 80ms post-commit idle settle between '百' Space release (event 15) and '度' LCtrl down (event 16) */
+    assert(g_ibus_sim.ts_us[16] - g_ibus_sim.ts_us[15] >= 80000);
+    /* Zero "5ea6 百" corruption: exact UTF-8 "百度" committed! */
+    assert(strcmp(g_ibus_sim.out_utf8, "百度") == 0);
+}
+
 int main(void) {
     RdpSession session = {0};
     pthread_mutex_init(&session.mutex, NULL); pthread_mutex_init(&session.channel_mutex, NULL);
@@ -180,5 +345,6 @@ int main(void) {
     g_session = NULL;
     free(gdi.primary_buffer); free(session.fb_pixels); free(bitmap.bytes);
     pthread_mutex_destroy(&session.mutex); pthread_mutex_destroy(&session.channel_mutex);
+    verify_ubuntu_hex_wire_pacing_baidu();
     puts("native bridge: passed real dirty-frame copy/union/stride, resize race, input ordering, telemetry freshness");
 }

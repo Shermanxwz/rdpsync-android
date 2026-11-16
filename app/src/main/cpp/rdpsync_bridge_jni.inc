@@ -64,13 +64,16 @@ done:
     atomic_store(&s->connected, 0);
     pthread_mutex_lock(&s->mutex);
     s->command_count = 0; s->resize_pending = 0; s->touch_available = 0;
+    memset(s->command_sync_seq, 0, sizeof(s->command_sync_seq));
     if (!s->last_error[0]) snprintf(s->status, sizeof(s->status), "已断开");
     pthread_mutex_unlock(&s->mutex);
+    notify_input_sync_abort(s->generation);
     return NULL;
 }
 static void session_destroy(RdpSession* s) {
     if (!s) return;
     atomic_store(&s->terminating, 1);
+    notify_input_sync_abort(s->generation);
     /* Abort a connecting socket, but let an established transport send releases. */
     if (s->instance && !atomic_load(&s->connected)) freerdp_abort_connect_context(s->instance->context);
     if (s->wake_event) SetEvent(s->wake_event);
@@ -83,7 +86,7 @@ static void session_destroy(RdpSession* s) {
     rdpsync_drive_free(s->drive);
     free(s->fb_pixels); free(s);
 }
-static int enqueue_input(InputCommand command) {
+static int enqueue_input_seq(InputCommand command, uint64_t sync_seq, int64_t* out_gen) {
     pthread_mutex_lock(&g_lock);
     RdpSession* s = g_session;
     int result = 0;
@@ -91,34 +94,43 @@ static int enqueue_input(InputCommand command) {
         pthread_mutex_unlock(&g_lock); return -1;
     }
     pthread_mutex_lock(&s->mutex);
+    if (out_gen) *out_gen = s->generation;
     if (command.kind == INPUT_TOUCH && !s->touch_available) { result = -2; goto unlock; }
-    /* Only consecutive moves for the same contact may be merged: never cross an edge. */
-    if (s->command_count && (command.kind == INPUT_MOVE || (command.kind == INPUT_TOUCH && command.action == 1))) {
-        InputCommand* last = &s->commands[(s->command_head + s->command_count - 1) % INPUT_CAPACITY];
-        if (last->kind == command.kind && last->code == command.code && last->action == command.action) {
+    /* Only consecutive unsynchronized moves for the same contact may be merged. */
+    if (!sync_seq && s->command_count &&
+        (command.kind == INPUT_MOVE || (command.kind == INPUT_TOUCH && command.action == 1))) {
+        const size_t prev_slot = (s->command_head + s->command_count - 1) % INPUT_CAPACITY;
+        InputCommand* last = &s->commands[prev_slot];
+        if (!s->command_sync_seq[prev_slot] && last->kind == command.kind &&
+            last->code == command.code && last->action == command.action) {
             *last = command; goto unlock;
         }
     }
     if (s->command_count == INPUT_CAPACITY) {
         ++s->input_drops;
         result = -5;
-        /* Nonblocking backpressure: Kotlin retries atomic Unicode pairs on IO.
-         * Never wait with g_lock held, which would block the UI's frame polling.
-         * Other lost edges fail closed so a remote key cannot remain held. */
-        if (command.kind != INPUT_UNICODE && command.kind != INPUT_UBUNTU_HEX) {
+        /* Nonblocking backpressure: Kotlin / sync callers retry on IO without g_lock.
+         * Unretried fire-and-forget edges fail closed so a remote key cannot stay held. */
+        if (!sync_seq && command.kind != INPUT_UNICODE && command.kind != INPUT_UBUNTU_HEX) {
             atomic_store(&s->terminating, 1);
             snprintf(s->last_error, sizeof(s->last_error), "输入队列过载，会话已停止");
             SetEvent(s->wake_event);
+            notify_input_sync_abort(s->generation);
         }
         goto unlock;
     }
-    s->commands[(s->command_head + s->command_count) % INPUT_CAPACITY] = command;
+    const size_t tail = (s->command_head + s->command_count) % INPUT_CAPACITY;
+    s->commands[tail] = command;
+    s->command_sync_seq[tail] = sync_seq;
     ++s->command_count;
     SetEvent(s->wake_event);
 unlock:
     pthread_mutex_unlock(&s->mutex);
     pthread_mutex_unlock(&g_lock);
     return result;
+}
+static int enqueue_input(InputCommand command) {
+    return enqueue_input_seq(command, 0, NULL);
 }
 
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeConnect6(JNIEnv*,jobject,jstring,jint,jstring,jstring,jstring,jstring,jint,jint,jboolean,jboolean,jstring,jboolean);
@@ -672,6 +684,48 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetPeerOsMaj
     return (jint)os_major;
 }
 
+static int is_session_generation_alive(int64_t gen) {
+    if (gen <= 0) return 0;
+    pthread_mutex_lock(&g_lock);
+    const RdpSession* s = g_session;
+    const int alive = s && s->generation == gen &&
+        atomic_load(&s->connected) && !atomic_load(&s->terminating);
+    pthread_mutex_unlock(&g_lock);
+    return alive;
+}
+
+static int sleep_session_alive_ms(int64_t gen, int total_ms) {
+    int remaining = total_ms;
+    while (remaining > 0) {
+        if (!is_session_generation_alive(gen)) return -1;
+        const int step = remaining > 20 ? 20 : remaining;
+        struct timespec ts = {0, (long)step * 1000000L};
+        nanosleep(&ts, NULL);
+        remaining -= step;
+    }
+    return is_session_generation_alive(gen) ? 0 : -1;
+}
+
+static int current_ubuntu_post_commit_settle_ms(int64_t* out_gen) {
+    int settle_ms = 90;
+    int64_t gen = 0;
+    pthread_mutex_lock(&g_lock);
+    RdpSession* s = g_session;
+    if (s && atomic_load(&s->connected) && !atomic_load(&s->terminating)) {
+        pthread_mutex_lock(&s->mutex);
+        gen = s->generation;
+        if (s->rtt_ms > 0) {
+            int extra = (int)(s->rtt_ms / 3);
+            if (extra > 50) extra = 50;
+            settle_ms += extra;
+        }
+        pthread_mutex_unlock(&s->mutex);
+    }
+    pthread_mutex_unlock(&g_lock);
+    if (out_gen) *out_gen = gen;
+    return settle_ms;
+}
+
 static int enqueue_input_with_retry(InputCommand cmd) {
     const int64_t deadline = monotonic_us() + 2000000LL;
     int rc;
@@ -685,6 +739,119 @@ static int enqueue_input_with_retry(InputCommand cmd) {
     return rc;
 }
 
+/* Enqueues a single InputCommand and waits WITHOUT holding g_lock until the protocol
+ * owner thread pops and transmits it on the wire via execute_input(). Prevents multi-char
+ * ISO-14755 commands from coalescing into a 0ms FastPath burst inside s->commands[]. */
+static int enqueue_input_sync(InputCommand cmd, int timeout_ms) {
+    pthread_once(&g_input_sync_once, init_input_sync_once);
+    pthread_mutex_lock(&g_input_sync_lock);
+    const uint64_t seq = ++g_input_next_seq;
+    pthread_mutex_unlock(&g_input_sync_lock);
+
+    const int64_t deadline_us = monotonic_us() + (int64_t)timeout_ms * 1000LL;
+    int64_t gen = 0;
+    int rc;
+    do {
+        rc = enqueue_input_seq(cmd, seq, &gen);
+        if (rc == -5) {
+            struct timespec ts = {0, 4000000L};
+            nanosleep(&ts, NULL);
+        }
+    } while (rc == -5 && monotonic_us() < deadline_us);
+    if (rc != 0) return rc;
+
+    pthread_mutex_lock(&g_input_sync_lock);
+    while (g_input_done_seq < seq && g_input_aborted_gen < gen) {
+        if (monotonic_us() >= deadline_us) {
+            pthread_mutex_unlock(&g_input_sync_lock);
+            return -1;
+        }
+        struct timespec wait_ts;
+#ifdef CLOCK_MONOTONIC
+        clock_gettime(CLOCK_MONOTONIC, &wait_ts);
+#else
+        clock_gettime(CLOCK_REALTIME, &wait_ts);
+#endif
+        wait_ts.tv_nsec += 25000000L; /* 25ms liveness slice */
+        if (wait_ts.tv_nsec >= 1000000000L) {
+            wait_ts.tv_sec += 1;
+            wait_ts.tv_nsec -= 1000000000L;
+        }
+        (void)pthread_cond_timedwait(&g_input_sync_cond, &g_input_sync_lock, &wait_ts);
+        if (g_input_done_seq < seq && !is_session_generation_alive(gen)) {
+            pthread_mutex_unlock(&g_input_sync_lock);
+            return -1;
+        }
+    }
+    const int ok = (g_input_done_seq >= seq && g_input_failed_seq != seq) ? 0 : -1;
+    pthread_mutex_unlock(&g_input_sync_lock);
+    return ok;
+}
+
+/* Wire-synchronized 3-phase ISO-14755 state machine for Ubuntu GNOME Wayland + IBus + Firefox:
+ *   Phase 1: LCtrl↓, LShift↓ -> U↓, U↑ -> LShift↑, LCtrl↑ + 14ms async D-Bus hex-mode latch
+ *            (guarantees in_hex_sequence=TRUE, modifiers_dropped=TRUE while n_compose==0,
+ *             and drops Ctrl before hex digits so 'c'/'d' can never trigger Ctrl+C/Ctrl+D).
+ *   Phase 2: Unmodified hex digits 0-9/a-f paced individually after wire send (3ms down, 4ms up).
+ *   Phase 3: Space↓/Space↑ commit + RTT-adaptive 90..140ms post-commit wire-idle settle so
+ *            Mutter's CLUTTER_PRIORITY_EVENTS+1 done_idle_cb flushes zwp_text_input_v3.done
+ *            and Firefox e10s OnSelectionChange -> ResetIME() completes before the next char. */
+static int send_ubuntu_hex_codepoint(uint32_t cp) {
+    if (cp == 0 || cp > 0x10FFFFU || (cp >= 0xD800U && cp <= 0xDFFFU)) return -3;
+    char hex[8];
+    const int len = snprintf(hex, sizeof(hex), "%x", cp);
+    if (len <= 0 || len >= (int)sizeof(hex)) return -3;
+
+    int64_t gen = 0;
+    const int post_settle_ms = current_ubuntu_post_commit_settle_ms(&gen);
+    if (gen <= 0) return -1;
+
+    int ctrl_held = 0, shift_held = 0;
+    int rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}, 2000); /* LCtrl down */
+    if (!rc) { ctrl_held = 1; rc = sleep_session_alive_ms(gen, 2); }
+    if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}, 2000); /* LShift down */
+    if (!rc) { shift_held = 1; rc = sleep_session_alive_ms(gen, 3); }
+    if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x16, 1}, 2000); /* U down */
+    if (!rc) rc = sleep_session_alive_ms(gen, 4);
+    if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x16, 0}, 2000); /* U up */
+    if (!rc) rc = sleep_session_alive_ms(gen, 3);
+    if (!rc) {
+        rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}, 2000); /* LShift up */
+        if (!rc) shift_held = 0;
+    }
+    if (!rc) rc = sleep_session_alive_ms(gen, 2);
+    if (!rc) {
+        rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}, 2000); /* LCtrl up */
+        if (!rc) ctrl_held = 0;
+    }
+    if (rc != 0) {
+        if (shift_held) (void)enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0});
+        if (ctrl_held) (void)enqueue_input((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0});
+        return rc;
+    }
+    /* Wait 14ms for gnome-shell -> ibus-daemon async D-Bus to latch modifiers_dropped=TRUE */
+    rc = sleep_session_alive_ms(gen, 14);
+    if (rc != 0) return rc;
+
+    for (int i = 0; i < len; ++i) {
+        const unsigned nib = (hex[i] >= '0' && hex[i] <= '9')
+            ? (unsigned)(hex[i] - '0') : (unsigned)(hex[i] - 'a' + 10);
+        const UINT8 sc = rdpsync_hex_nibble_scancode(nib);
+        rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, sc, 1}, 2000);
+        if (!rc) rc = sleep_session_alive_ms(gen, 3);
+        if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, sc, 0}, 2000);
+        if (!rc) rc = sleep_session_alive_ms(gen, 4);
+        if (rc != 0) return rc;
+    }
+
+    rc = sleep_session_alive_ms(gen, 4);
+    if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x39, 1}, 2000); /* Space down */
+    if (!rc) rc = sleep_session_alive_ms(gen, 4);
+    if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x39, 0}, 2000); /* Space up */
+    if (!rc) rc = sleep_session_alive_ms(gen, post_settle_ms);
+    return rc;
+}
+
 static int send_ubuntu_hex_stream(const uint8_t* utf8, size_t len, int all_printable_hex) {
     size_t idx = 0;
     uint32_t prev = 0;
@@ -693,21 +860,25 @@ static int send_ubuntu_hex_stream(const uint8_t* utf8, size_t len, int all_print
         if (rdpsync_utf8_next(utf8, len, &idx, &cp) <= 0) return -3;
         if (cp == '\n' && prev == '\r') { prev = cp; continue; }
         prev = cp;
+        int64_t gen = 0;
+        (void)current_ubuntu_post_commit_settle_ms(&gen);
+        if (gen <= 0) return -1;
         int rc = 0;
         if (cp == '\n' || cp == '\r') {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1C, 1});
-            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1C, 0});
+            rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x1C, 1}, 2000);
+            if (!rc) rc = sleep_session_alive_ms(gen, 3);
+            if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x1C, 0}, 2000);
+            if (!rc) rc = sleep_session_alive_ms(gen, 45);
         } else if (cp == '\t') {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x0F, 1});
-            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x0F, 0});
+            rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x0F, 1}, 2000);
+            if (!rc) rc = sleep_session_alive_ms(gen, 3);
+            if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x0F, 0}, 2000);
+            if (!rc) rc = sleep_session_alive_ms(gen, 35);
         } else if (cp >= 0x20U && (all_printable_hex || cp >= 0x80U)) {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_UBUNTU_HEX, 0, 0, (int)cp, 0});
-            if (!rc) {
-                struct timespec pace = {0, 2000000L}; /* 2ms Wayland/libei frame drain pacing */
-                nanosleep(&pace, NULL);
-            }
+            rc = send_ubuntu_hex_codepoint(cp);
         } else if (cp >= 0x20U) {
-            rc = enqueue_input_with_retry((InputCommand){INPUT_UNICODE, 0, 0, (int)cp, 0});
+            rc = enqueue_input_sync((InputCommand){INPUT_UNICODE, 0, 0, (int)cp, 0}, 2000);
+            if (!rc) rc = sleep_session_alive_ms(gen, 12);
         }
         if (rc != 0) return rc;
     }
@@ -730,15 +901,17 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
         (*e)->ReleaseStringUTFChars(e, text, raw);
         return 0;
     }
+
+    /* Serialize ALL outbound Ubuntu/CLIPRDR/ISO-14755 text commits end-to-end so rapid
+     * consecutive Chinese IME commits never interleave keystrokes or overwrite UTF-16LE bytes. */
+    pthread_mutex_lock(&g_ubuntu_text_lock);
+
     if (mode == RDPSYNC_LINUX_TEXT_IBUS_HEX) {
         const int rc = send_ubuntu_hex_fallback((const uint8_t*)raw, len);
+        pthread_mutex_unlock(&g_ubuntu_text_lock);
         (*e)->ReleaseStringUTFChars(e, text, raw);
         return rc;
     }
-
-    /* Serialize outbound CLIPRDR text offers + paste keystrokes end-to-end so rapid
-     * consecutive Chinese IME commits never overwrite UTF-16LE bytes mid-paste. */
-    pthread_mutex_lock(&g_ubuntu_text_lock);
 
     RdpTransfer* transfer = NULL;
     HANDLE wake = NULL;
@@ -764,10 +937,11 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
     const int is_xrdp = rdpsync_transfer_is_xrdp_peer(transfer);
 
     /* Ubuntu 24.04 GNOME Remote Desktop 46.x + WinPR 3.32.2 escapes CF_UNICODETEXT via
-     * winpr_utf8ToUtfEscapedString ("text/plain" -> "\u4f60\u597d"). On non-xrdp Unix
+     * winpr_utf8ToUtfEscapedString ("text/plain" -> "\u767e\u5ea6"). On non-xrdp Unix
      * peers (GNOME Remote Desktop) in SMART_AUTO / Send-Text modes, deliver directly via
-     * paced ISO-14755 (Ctrl+Shift+U <hex> Space) so UTF-8 Chinese + English arrive intact,
-     * remote IBus Pinyin never intercepts letters, and the remote clipboard stays untouched. */
+     * wire-synchronized 3-phase ISO-14755 (Ctrl+Shift+U <hex> Space) so multi-character
+     * Chinese ("百度", sentences, mixed English/punctuation) arrives 100% in order without
+     * Wayland done_idle_cb / Firefox e10s ResetIME() races and without touching clipboard. */
     const int prefer_gnome_iso14755 = is_unix && !is_xrdp &&
         (mode == RDPSYNC_LINUX_TEXT_GUI_PASTE || mode == RDPSYNC_LINUX_TEXT_UNIVERSAL_PASTE);
 
@@ -783,19 +957,19 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUbuntuTe
             struct timespec settle = {0, 28000000L}; /* 28ms X11/Wayland selection ownership settle */
             nanosleep(&settle, NULL);
             struct timespec key_gap = {0, 6000000L}; /* 6ms */
-            int rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}); /* LCtrl down */
+            int rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x1D, 1}, 2000); /* LCtrl down */
             if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
-                rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}); /* LShift down */
+                rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x2A, 1}, 2000); /* LShift down */
             }
             nanosleep(&key_gap, NULL);
-            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 1}); /* V down */
+            if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x2F, 1}, 2000); /* V down */
             nanosleep(&key_gap, NULL);
-            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2F, 0}); /* V up */
+            if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x2F, 0}, 2000); /* V up */
             nanosleep(&key_gap, NULL);
             if (!rc && mode == RDPSYNC_LINUX_TEXT_TERM_PASTE) {
-                rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}); /* LShift up */
+                rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x2A, 0}, 2000); /* LShift up */
             }
-            if (!rc) rc = enqueue_input_with_retry((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}); /* LCtrl up */
+            if (!rc) rc = enqueue_input_sync((InputCommand){INPUT_KEY, 0, 0, 0x1D, 0}, 2000); /* LCtrl up */
             if (!rc) {
                 (void)rdpsync_transfer_wait_text_served(transfer, seq, 1000);
                 struct timespec post_paste = {0, 12000000L}; /* 12ms widget commit settle */

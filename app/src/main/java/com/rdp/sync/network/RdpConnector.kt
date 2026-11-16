@@ -363,7 +363,7 @@ object RdpConnector {
         val hasNonAscii = text.any { it.code > 0x7F }
         if (hasNonAscii && isPeerUnix()) {
             // 100% automatic backend routing in native bridge:
-            // - Ubuntu GNOME Remote Desktop (Wayland): 2ms-paced ISO-14755 hex (zero clipboard touch)
+            // - Ubuntu GNOME Remote Desktop (Wayland): wire-synchronized 3-phase ISO-14755 hex + Wayland/IBus/e10s settle
             // - Ubuntu xrdp (X11): CB_FORMAT_LIST_RESPONSE(OK)-gated CF_UNICODETEXT paste + fallback
             return safeNative("sendUbuntuText", -1) { nativeSendUbuntuText(text, 1) }
         }

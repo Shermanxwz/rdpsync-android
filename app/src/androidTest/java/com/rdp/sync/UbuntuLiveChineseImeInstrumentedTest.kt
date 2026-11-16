@@ -116,7 +116,7 @@ class UbuntuLiveChineseImeInstrumentedTest {
         throw AssertionError("${reason()}; status=${RdpConnector.getStatus()}; diag=${RdpConnector.getDiag()}", lastError)
     }
 
-    private fun awaitRemoteEntryText(statePort: Int, expected: String, timeoutMs: Long = 20_000L): JSONObject {
+    private fun awaitRemoteEntryText(statePort: Int, expected: String, timeoutMs: Long = 35_000L): JSONObject {
         var last = JSONObject()
         waitFor({ "remote Ubuntu GTK3 TextView == '$expected' (last=$last)" }, timeoutMs) {
             val s = runCatching { httpJson(statePort, "GET", "/state") }.getOrNull()
@@ -126,6 +126,10 @@ class UbuntuLiveChineseImeInstrumentedTest {
                 assertFalse(
                     "Stale Ubuntu clipboard trap was pasted into desktop! state=$s",
                     txt.contains("OLD_CLIPBOARD_TRAP")
+                )
+                assertFalse(
+                    "Raw ISO-14755 hex leak ('5ea6') detected during multi-char Chinese commit! state=$s",
+                    txt.lowercase().contains("5ea6")
                 )
                 txt == expected
             } else {
@@ -242,14 +246,15 @@ class UbuntuLiveChineseImeInstrumentedTest {
                 }
             }
 
-            // 5. Direct mobile Chinese IME commit #1 (with Pinyin composing pre-edit first!)
+            // 5. Multi-char Chinese Pinyin commit #0 ("百度" = U+767E + U+5EA6):
+            //    Regression gate for the exact real-world "5ea6 百" async Wayland/IBus/Firefox e10s race!
             var ic: android.view.inputmethod.InputConnection? = null
             compose.runOnUiThread {
                 val v = desktop()
                 v.requestFocus()
                 ic = v.onCreateInputConnection(EditorInfo())
                 assertNotNull("onCreateInputConnection returned null", ic)
-                ic!!.setComposingText("ni hao ubuntu", 1)
+                ic!!.setComposingText("bai du", 1)
             }
             compose.mainClock.advanceTimeBy(200)
             instrumentation.waitForIdleSync()
@@ -257,18 +262,29 @@ class UbuntuLiveChineseImeInstrumentedTest {
             val duringCompose = httpJson(statePort, "GET", "/state")
             assertEquals("Composing pinyin must remain local until committed", "", duringCompose.optString("entry_text"))
 
+            val commitBaidu = "百度"
+            compose.runOnUiThread {
+                ic!!.commitText(commitBaidu, 1)
+            }
+            val afterCommitBaidu = awaitRemoteEntryText(statePort, commitBaidu)
+            assertEquals("Multi-char Chinese word '百度' must arrive intact and in exact order", "百度", afterCommitBaidu.getString("entry_text"))
+
+            // 6. Consecutive mixed Chinese + ASCII IME commit #1 ("你好Ubuntu桌面")
+            compose.runOnUiThread {
+                ic!!.setComposingText("ni hao ubuntu", 1)
+            }
             val commit1 = "你好Ubuntu桌面"
             compose.runOnUiThread {
                 ic!!.commitText(commit1, 1)
             }
-            val afterCommit1 = awaitRemoteEntryText(statePort, commit1)
+            val afterCommit1 = awaitRemoteEntryText(statePort, commitBaidu + commit1)
 
-            // 6. Immediate consecutive Chinese IME commit #2 (verifies initialFormatListSent never drops 2nd+ commits!)
+            // 7. Immediate consecutive multi-char Chinese IME commit #2 ("，连续输入不丢字")
             val commit2 = "，连续输入不丢字"
             compose.runOnUiThread {
                 ic!!.commitText(commit2, 1)
             }
-            val afterCommit2 = awaitRemoteEntryText(statePort, commit1 + commit2)
+            val afterCommit2 = awaitRemoteEntryText(statePort, commitBaidu + commit1 + commit2)
             compose.runOnUiThread {
                 ic?.closeConnection()
             }
@@ -298,18 +314,23 @@ class UbuntuLiveChineseImeInstrumentedTest {
             instrumentation.waitForIdleSync()
             compose.onNodeWithText(sendBtnLabel).assertIsEnabled().performClick()
 
-            val expectedFull = commit1 + commit2 + sendDialogPayload
+            val expectedFull = commitBaidu + commit1 + commit2 + sendDialogPayload
             val finalDesktopState = awaitRemoteEntryText(statePort, expectedFull)
             if (backend == "xrdp") {
                 assertTrue(
-                    "Expected >= 3 real GTK paste-clipboard signals on xrdp, got $finalDesktopState",
-                    finalDesktopState.optInt("paste_signals", 0) >= 3
+                    "Expected >= 4 real GTK paste-clipboard signals on xrdp, got $finalDesktopState",
+                    finalDesktopState.optInt("paste_signals", 0) >= 4
                 )
             } else {
                 assertEquals(
                     "GNOME Wayland ISO-14755 must leave remote clipboard untouched (0 paste signals): $finalDesktopState",
                     0,
                     finalDesktopState.optInt("paste_signals", -1)
+                )
+                assertEquals("ibus", finalDesktopState.optString("gtk_im_module"))
+                assertTrue(
+                    "Expected >= 4 browser-equivalent async IM resets on GNOME Wayland + IBus, got $finalDesktopState",
+                    finalDesktopState.optInt("async_im_resets", 0) >= 4
                 )
             }
 
@@ -335,6 +356,9 @@ class UbuntuLiveChineseImeInstrumentedTest {
                 .put("display_backend", finalDesktopState.getString("backend"))
                 .put("trap_armed_before_input", armedState.getBoolean("trap_armed"))
                 .put("trap_text_before_input", armedState.getString("trap_verified_text"))
+                .put("gtk_im_module", finalDesktopState.optString("gtk_im_module", ""))
+                .put("async_im_resets", finalDesktopState.optInt("async_im_resets", 0))
+                .put("after_commit_baidu", afterCommitBaidu.getString("entry_text"))
                 .put("after_commit_1", afterCommit1.getString("entry_text"))
                 .put("after_commit_2", afterCommit2.getString("entry_text"))
                 .put("rdp_diagnostics", RdpConnector.getDiag())

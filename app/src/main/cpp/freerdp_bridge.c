@@ -43,6 +43,40 @@
 #include "rdpsync_ubuntu_ime.h"
 static atomic_int g_next_text_bridge = -1;
 static pthread_mutex_t g_ubuntu_text_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_input_sync_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_input_sync_cond;
+static pthread_once_t g_input_sync_once = PTHREAD_ONCE_INIT;
+static uint64_t g_input_next_seq = 0;
+static uint64_t g_input_done_seq = 0;
+static uint64_t g_input_failed_seq = 0;
+static int64_t g_input_aborted_gen = 0;
+
+static void init_input_sync_once(void) {
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+#ifdef CLOCK_MONOTONIC
+    (void)pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+#endif
+    pthread_cond_init(&g_input_sync_cond, &attr);
+    pthread_condattr_destroy(&attr);
+}
+static void notify_input_sync_done(uint64_t seq, BOOL ok) {
+    if (!seq) return;
+    pthread_once(&g_input_sync_once, init_input_sync_once);
+    pthread_mutex_lock(&g_input_sync_lock);
+    if (seq > g_input_done_seq) g_input_done_seq = seq;
+    if (!ok) g_input_failed_seq = seq;
+    pthread_cond_broadcast(&g_input_sync_cond);
+    pthread_mutex_unlock(&g_input_sync_lock);
+}
+static void notify_input_sync_abort(int64_t gen) {
+    if (gen <= 0) return;
+    pthread_once(&g_input_sync_once, init_input_sync_once);
+    pthread_mutex_lock(&g_input_sync_lock);
+    if (gen > g_input_aborted_gen) g_input_aborted_gen = gen;
+    pthread_cond_broadcast(&g_input_sync_cond);
+    pthread_mutex_unlock(&g_input_sync_lock);
+}
 #include "rdpsync_drive.h"
 
 #define TAG "FreeRDP"
@@ -71,6 +105,7 @@ struct RdpSession {
     int thread_started;
     HANDLE wake_event;
     InputCommand commands[INPUT_CAPACITY];
+    uint64_t command_sync_seq[INPUT_CAPACITY];
     size_t command_head, command_count;
     DispClientContext* disp;
     int disp_state; /* -1 disabled, 0 unnegotiated, 1 waiting caps, 2 ready, -2 failed */
@@ -1026,11 +1061,16 @@ static BOOL process_commands(RdpSession* s) {
         if (atomic_load(&s->terminating)) break;
         pthread_mutex_lock(&s->mutex);
         if (!s->command_count) { pthread_mutex_unlock(&s->mutex); break; }
-        InputCommand command = s->commands[s->command_head];
-        s->command_head = (s->command_head + 1) % INPUT_CAPACITY;
+        const size_t slot = s->command_head;
+        InputCommand command = s->commands[slot];
+        const uint64_t sync_seq = s->command_sync_seq[slot];
+        s->command_sync_seq[slot] = 0;
+        s->command_head = (slot + 1) % INPUT_CAPACITY;
         --s->command_count;
         pthread_mutex_unlock(&s->mutex);
-        if (!execute_input(s, command)) return FALSE;
+        const BOOL ok = execute_input(s, command);
+        if (sync_seq != 0) notify_input_sync_done(sync_seq, ok);
+        if (!ok) return FALSE;
     }
     pthread_mutex_lock(&s->mutex);
     const int pending = s->resize_pending;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real GTK3 graphical desktop text-editor window for live Ubuntu Wayland (GNOME) & X11 (xrdp) Chinese IME E2E verification."""
+"""Real GTK3 graphical desktop text-editor window for live Ubuntu Wayland (GNOME + IBus) & X11 (xrdp) Chinese IME E2E verification."""
 import json
 import os
 from pathlib import Path
@@ -14,6 +14,7 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 TRAP_TEXT = "OLD_CLIPBOARD_TRAP_旧剪贴板污染测试"
 STATE_PORT = int(os.environ.get("UBUNTU_IME_STATE_PORT", "8768"))
 EXPECTED_BACKEND = os.environ.get("UBUNTU_IME_EXPECTED_BACKEND", "")
+SIMULATE_BROWSER_ASYNC_RESET = os.environ.get("UBUNTU_SIMULATE_BROWSER_ASYNC_RESET", "0") == "1"
 OUT_DIR = Path(os.environ.get("UBUNTU_IME_EVIDENCE_DIR", "/tmp/ubuntu-ime-evidence"))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -22,6 +23,8 @@ state = {
     "pid": os.getpid(),
     "ready": False,
     "backend": "",
+    "gtk_im_module": os.environ.get("GTK_IM_MODULE", "default"),
+    "simulate_browser_async_reset": SIMULATE_BROWSER_ASYNC_RESET,
     "mapped": False,
     "width": 0,
     "height": 0,
@@ -29,12 +32,14 @@ state = {
     "trap_armed": False,
     "trap_verified_text": "",
     "paste_signals": 0,
+    "async_im_resets": 0,
     "owner_changes": 0,
     "clicks": 0,
     "keys": [],
     "entry_text": "",
     "history": [],
 }
+_last_committed_text = ""
 
 
 def snapshot():
@@ -59,7 +64,7 @@ vbox.set_margin_bottom(24)
 vbox.set_margin_start(32)
 vbox.set_margin_end(32)
 
-header = Gtk.Label(label="Ubuntu Graphical Desktop — Live Chinese IME & Send-Text E2E Target")
+header = Gtk.Label(label="Ubuntu Graphical Desktop — Live Multi-Char Chinese IME (百度) & Send-Text E2E Target")
 header.set_xalign(0.0)
 vbox.pack_start(header, False, False, 0)
 
@@ -84,13 +89,28 @@ def on_owner_change(_clip, _event):
     persist()
 
 
+def _browser_e10s_async_reset():
+    # Models Firefox widget/gtk/IMContextWrapper.cpp OnSelectionChange -> ResetIME() -> gtk_im_context_reset()
+    # firing ~12ms asynchronously after each content-process DOM text insertion.
+    textview.reset_im_context()
+    with lock:
+        state["async_im_resets"] += 1
+    persist()
+    return False
+
+
 def on_buffer_changed(_buffer):
+    global _last_committed_text
     start, end = buf.get_bounds()
     txt = buf.get_text(start, end, True)
+    changed_nonempty = bool(txt) and (txt != _last_committed_text)
+    _last_committed_text = txt
     with lock:
         state["entry_text"] = txt
-        state["history"] = (state["history"] + [txt])[-32:]
+        state["history"] = (state["history"] + [txt])[-48:]
     persist()
+    if SIMULATE_BROWSER_ASYNC_RESET and changed_nonempty:
+        GLib.timeout_add(12, _browser_e10s_async_reset)
 
 
 def on_paste(_tv):
@@ -110,7 +130,7 @@ def on_button_press(_widget, _event):
 def on_key_press(_widget, event):
     name = Gdk.keyval_name(event.keyval) or str(event.keyval)
     with lock:
-        state["keys"] = (state["keys"] + [name])[-64:]
+        state["keys"] = (state["keys"] + [name])[-96:]
     persist()
     return False
 
@@ -147,6 +167,7 @@ window.connect("destroy", Gtk.main_quit)
 
 
 def arm_trap_on_main_loop(done_event: threading.Event):
+    global _last_committed_text
     try:
         window.fullscreen()
         window.maximize()
@@ -157,13 +178,16 @@ def arm_trap_on_main_loop(done_event: threading.Event):
                 gdk_win.focus(Gdk.CURRENT_TIME)
             except Exception:
                 pass
+        _last_committed_text = ""
         buf.set_text("")
+        textview.reset_im_context()
         textview.grab_focus()
         clipboard.set_text(TRAP_TEXT, -1)
 
         def on_clip_read(_clip, observed_text):
             with lock:
                 state["paste_signals"] = 0
+                state["async_im_resets"] = 0
                 state["entry_text"] = ""
                 state["history"] = []
                 state["entry_focused"] = bool(textview.has_focus())
