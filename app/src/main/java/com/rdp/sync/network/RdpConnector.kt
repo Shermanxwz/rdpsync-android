@@ -84,6 +84,7 @@ object RdpConnector {
     external fun nativeSendUbuntuText(text: String, mode: Int): Int
     external fun nativeGetPeerOsMajor(): Int
     external fun nativeEnableNextTextBridge(enabled: Boolean)
+    external fun nativeEnableNextHardwareDecode(enabled: Boolean)
     external fun nativeGetWidth(): Int
     external fun nativeGetHeight(): Int
     external fun nativeRequestResize(width: Int, height: Int, desktopScale: Int): Int
@@ -199,7 +200,7 @@ object RdpConnector {
 
     data class FrameBitmap(val bitmap: Bitmap, val frameId: Long, val dirtyRect: Rect)
 
-    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = "", fileTransferEnabled: Boolean = false, sharedDriveMode: SharedDriveMode = SharedDriveMode.OFF): Boolean {
+    fun connectDevice(host: String, port: Int, username: String, password: String, domain: String, rdpServerName: String = "", width: Int = 1280, height: Int = 720, enableTouchInput: Boolean = true, compatibilityMode: Boolean = false, expectedFingerprint: String = "", fileTransferEnabled: Boolean = false, sharedDriveMode: SharedDriveMode = SharedDriveMode.OFF, hardwareDecode: Boolean = false): Boolean {
         if (!nativeInitialized) {
             lastKotlinError = "远程桌面运行目录未初始化，请重新打开应用并检查本机存储空间。"
             return false
@@ -219,6 +220,7 @@ object RdpConnector {
             rdpeiDisabled = !enableTouchInput
             touchFailedCode = 0
             nativeEnableNextTextBridge(!compatibilityMode)
+            nativeEnableNextHardwareDecode(!compatibilityMode && hardwareDecode)
             var effectiveDriveMode = sharedDriveMode
             val ctx = appContext
             if (effectiveDriveMode != SharedDriveMode.OFF && ctx != null) {

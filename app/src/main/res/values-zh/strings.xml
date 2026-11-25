@@ -15,6 +15,12 @@
     <string name="profiles_count">%1$d 个连接</string>
     <string name="add_device">添加设备</string>
     <string name="edit_device">编辑设备</string>
+    <string name="reorder_devices">排列设备顺序</string>
+    <string name="reorder_done">完成排序</string>
+    <string name="reorder_hint">点击置顶、上移或下移即可自主调整设备排列顺序。</string>
+    <string name="reorder_pin_top">将 %1$s 置顶</string>
+    <string name="reorder_move_up">上移 %1$s</string>
+    <string name="reorder_move_down">下移 %1$s</string>
     <string name="settings">设置</string>
     <string name="sync">同步</string>
     <string name="loading_profiles">正在加载连接…</string>
@@ -100,8 +106,8 @@
     <string name="reset_view">复位视图</string>
     <string name="expand_tools">展开会话工具</string>
     <string name="quality_short">画质</string>
-    <string name="trackpad_hint">触控板：滑动移指针，轻点单击；长按右键，长按后拖动。</string>
-    <string name="touch_hint">直接触摸；双指缩放/平移。兼容模式支持长按右键、长按后拖动。</string>
+    <string name="trackpad_hint">触控板：滑动移指针，轻点单击，双指轻点右键，双击按住或长按拖动。</string>
+    <string name="touch_hint">直接触摸：双指轻点右键、双指缩放平移；Linux 下支持双击按住或长按拖动。</string>
     <string name="display_reconnect_summary">%1$s · 点此重连</string>
     <string name="waiting_display">等待显示协商…</string>
     <string name="transfer_unavailable">文件传输不可用</string>
@@ -136,7 +142,9 @@
     <string name="quality_a11y">画质上限：%1$s</string>
     <string name="adaptive_quality">自适应网络与渲染负载</string>
     <string name="adaptive_help">自适应基于实测延迟、带宽和渲染耗时，持续变差才降级，恢复后缓慢提高。缺少测量时不会猜测网速。</string>
-    <string name="gesture_help">操作提示：轻点单击，长按右键，长按后拖动；双指缩放/平移只改变本地视图。分辨率设置通过服务器显示控制通道协商，不拉伸画面，旧服务器需手动重连。</string>
+    <string name="hardware_decode">H.264 / AVC444 硬件解码（MediaCodec）</string>
+    <string name="hardware_decode_help">启用 Android MediaCodec 硬件视频流解码，大幅提升 Ubuntu GNOME 与 Windows 的拖动及滚页帧率。切换后重连生效；若设备芯片不兼容将自动回退软件 RemoteFX。</string>
+    <string name="gesture_help">操作提示：轻点单击，双指轻点右键，双击按住或长按后拖动；双指缩放/平移只改变本地视图。分辨率通过服务器显示控制通道协商。</string>
     <string name="security_help">安全提示：首次连接或证书变化时，必须通过独立渠道核对指纹后授权。这是手动指纹固定（TOFU），不是 CA 身份验证。同步数据可能含凭据，请仅使用受信任的 HTTPS WebDAV。</string>
     <string name="view_diagnostics_full">查看诊断信息</string>
     <string name="certificate_changed">服务器证书已改变</string>

@@ -95,6 +95,31 @@ class RdpInputDispatcherTest {
         assertEquals(listOf("button:10:10:true", "move:30:40", "button:30:40:false"), events)
         input.shutdownAndJoin()
     }
+
+    @Test fun fallbackDoubleTapAndDragLatchesWithoutLongPressDelay() = runTest {
+        val events = mutableListOf<String>()
+        val input = RdpInputDispatcher({ _, _, _, _ -> false }, { _, _, _ -> fail("double-tap drag must not scroll"); 0 }, { _, _, _ -> 0 }, { x, y, b -> events.add(if (b == 0) "move:$x:$y" else "click:$b"); 0 }, { x, y, _, d -> events.add("button:$x:$y:$d"); 0 }, workerDispatcher = StandardTestDispatcher(testScheduler))
+        input.enqueueDirectTouch(1, 0, 10, 10, 10f, 10f, 0, 8f)
+        input.enqueueDirectTouch(1, 2, 10, 10, 10f, 10f, 40, 8f)
+        input.enqueueDirectTouch(1, 0, 12, 12, 12f, 12f, 150, 8f)
+        input.enqueueDirectTouch(1, 1, 50, 60, 50f, 60f, 190, 8f)
+        input.enqueueDirectTouch(1, 2, 50, 60, 50f, 60f, 230, 8f)
+        runCurrent()
+        assertEquals(listOf("click:1", "button:12:12:true", "move:50:60", "button:50:60:false"), events)
+        input.shutdownAndJoin()
+    }
+
+    @Test fun fallbackScrollScaleNormalizesWheelDelta() = runTest {
+        val wheels = mutableListOf<Int>()
+        val input = RdpInputDispatcher({ _, _, _, _ -> false }, { _, _, d -> wheels.add(d); 0 }, { _, _, _ -> 0 }, { _, _, _ -> 0 }, workerDispatcher = StandardTestDispatcher(testScheduler))
+        input.enqueueDirectTouch(1, 0, 10, 10, 10f, 10f, 0, 8f, scrollScale = 0.5f)
+        input.enqueueDirectTouch(1, 1, 10, 50, 10f, 50f, 30, 8f, scrollScale = 0.5f)
+        input.enqueueDirectTouch(1, 2, 10, 50, 10f, 50f, 200, 8f, scrollScale = 0.5f)
+        runCurrent()
+        assertEquals(20, wheels.sum())
+        input.shutdownAndJoin()
+    }
+
     @Test fun boundedQueueFailsClosedAndRecoversAfterReleaseBarrier() = runTest {
         val keys = mutableListOf<Pair<Int, Int>>()
         val input = RdpInputDispatcher({ _, _, _, _ -> true }, { _, _, _ -> 0 }, { _, _, _ -> 0 }, { _, _, _ -> 0 }, keySender = { c, d -> keys.add(c to d); 0 }, workerDispatcher = StandardTestDispatcher(testScheduler))

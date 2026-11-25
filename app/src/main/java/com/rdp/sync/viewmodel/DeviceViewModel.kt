@@ -89,6 +89,37 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun moveDevice(deviceId: Long, delta: Int) {
+        val current = _uiState.value.devices.toMutableList()
+        val index = current.indexOfFirst { it.id == deviceId }
+        if (index < 0) return
+        val target = (index + delta).coerceIn(0, current.lastIndex)
+        if (target == index) return
+        val item = current.removeAt(index)
+        current.add(target, item)
+        reorderDevices(current.map { it.id })
+    }
+
+    fun pinDeviceToTop(deviceId: Long) {
+        val current = _uiState.value.devices.toMutableList()
+        val index = current.indexOfFirst { it.id == deviceId }
+        if (index <= 0) return
+        val item = current.removeAt(index)
+        current.add(0, item)
+        reorderDevices(current.map { it.id })
+    }
+
+    fun reorderDevices(orderedIds: List<Long>) {
+        if (orderedIds.isEmpty()) return
+        viewModelScope.launch {
+            try {
+                repository.reorderDevices(orderedIds)
+            } catch (e: Exception) {
+                _uiState.update { it.copy(error = safeOperationMessage(e)) }
+            }
+        }
+    }
+
     fun saveWebDavSettings(baseUrl: String, username: String, password: String) {
         viewModelScope.launch {
             try {
@@ -143,5 +174,4 @@ class DeviceViewModel(application: Application) : AndroidViewModel(application) 
     private fun configureSyncManager(state: UiState) {
         SyncManager.configureWebDav(state.webDavUrl, state.webDavUsername, state.webDavPassword)
     }
-
 }

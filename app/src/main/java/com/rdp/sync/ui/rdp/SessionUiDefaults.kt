@@ -7,9 +7,15 @@ import com.rdp.sync.display.SessionDisplaySettings
 object SessionUiDefaults {
     const val FULLSCREEN = true // Toolbar/bordered mode is an explicit per-session choice.
     const val POINTER_MODE = false // Direct touch on every new session, not a sticky temporary toggle.
-    fun displaySettings(quality: String?, resolution: String?, adaptive: Boolean) = SessionDisplaySettings(
+    fun displaySettings(
+        quality: String?,
+        resolution: String?,
+        adaptive: Boolean,
+        hardwareDecode: Boolean = false
+    ) = SessionDisplaySettings(
         DisplayQuality.entries.firstOrNull { it.name == quality } ?: DisplayQuality.BALANCED,
         ResolutionMode.entries.firstOrNull { it.name == resolution } ?: ResolutionMode.FIT_WINDOW,
-        adaptive
+        adaptive,
+        hardwareDecode
     )
 }

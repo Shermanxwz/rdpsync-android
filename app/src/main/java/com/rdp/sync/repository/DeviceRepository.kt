@@ -49,7 +49,9 @@ class DeviceRepository(private val database: DeviceDatabase, private val cipher:
         require(!device.credentialUnavailable && device.passwordProvided)
         // New credentials are an explicit entry; never use this to overwrite an existing row.
         require(device.id == 0L)
-        dao.insertDevice(encode(device))
+        val nextOrder = dao.getMaxSortOrder() + 1
+        val ordered = if (device.sortOrder == 0 && nextOrder > 0) device.copy(sortOrder = nextOrder) else device
+        dao.insertDevice(encode(ordered))
     }
 
     suspend fun updateDevice(device: Device) = withContext(Dispatchers.IO) {
@@ -57,8 +59,19 @@ class DeviceRepository(private val database: DeviceDatabase, private val cipher:
             val previous = dao.getDeviceById(device.id) ?: error("设备不存在")
             val unavailable = decode(previous).credentialUnavailable
             if (!device.passwordProvided || (unavailable && device.password.isEmpty())) throw CredentialStorageException()
-            // A nonempty password entered in the editor is deliberate per-row recovery, not an automatic reset.
-            dao.updateDevice(encode(device))
+            // Preserve existing sortOrder unless explicitly changed; never touch ciphertext on reorder.
+            val preservedOrder = if (device.sortOrder == 0 && previous.sortOrder != 0) previous.sortOrder else device.sortOrder
+            dao.updateDevice(encode(device.copy(sortOrder = preservedOrder)))
+        }
+    }
+
+    /** Atomically persist user-defined device order without touching encrypted credentials. */
+    suspend fun reorderDevices(orderedIds: List<Long>) = withContext(Dispatchers.IO) {
+        if (orderedIds.isEmpty()) return@withContext
+        database.withTransaction {
+            orderedIds.forEachIndexed { index, deviceId ->
+                dao.updateSortOrder(deviceId, index)
+            }
         }
     }
 

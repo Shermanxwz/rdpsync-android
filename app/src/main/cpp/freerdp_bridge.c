@@ -42,6 +42,7 @@
 #include "rdpsync_transfer.h"
 #include "rdpsync_ubuntu_ime.h"
 static atomic_int g_next_text_bridge = -1;
+static atomic_int g_next_hw_h264 = 0;
 static pthread_mutex_t g_ubuntu_text_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_input_sync_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_input_sync_cond;
@@ -115,7 +116,7 @@ struct RdpSession {
     RdpgfxClientContext* gfx;
     RdpTransfer* transfer;
     RdpDrive* drive;
-    int file_transfer_enabled, text_bridge_enabled, peer_os_major, hw_h264_active;
+    int file_transfer_enabled, text_bridge_enabled, peer_os_major, hw_h264_active, hw_h264_failed;
     RdpTransferIngress transfer_ingress;
     pReceiveChannelData receive_channel_data;
     int gfx_ready, gfx_last_codec;
@@ -133,6 +134,7 @@ struct RdpSession {
     pcRdpgfxOnOpen gfx_open;
     char expected_fingerprint[65], endpoint_host[256], endpoint_name[256];
     int endpoint_port, expected_pin_state, certificate_verified, certificate_challenge, certificate_superseded;
+    int same_endpoint_redirect_allowed, redirect_count;
     RdpCertificateInfo certificate;
     char certificate_reason[32];
     uint8_t held_keys[3][256], held_buttons[3], held_touches[256];
@@ -270,9 +272,8 @@ static BOOL desktop_resize(rdpContext* ctx) {
     return !ctx->gdi || gdi_resize(ctx->gdi, width, height);
 }
 
-/* RDPGFX uses upstream software decoding and the SAME GDI primary/dirty paint
- * callbacks as classic updates. Never advertise H.264 without a decoder. All
- * callbacks run on the protocol owner (SynchronousDynamicChannels=TRUE). */
+/* RDPGFX uses upstream software decoding and optional MediaCodec H.264/AVC444
+ * with automatic software fallback when a device decoder rejects a frame. */
 static RdpSession* gfx_session(RdpgfxClientContext* gfx) {
     rdpGdi* gdi = gfx ? gfx->custom : NULL;
     RdpSession* s = gdi ? s_from_ctx(gdi->context) : NULL;
@@ -336,6 +337,8 @@ static UINT gfx_map_scaled(RdpgfxClientContext* gfx, const RDPGFX_MAP_SURFACE_TO
 static UINT gfx_command(RdpgfxClientContext* gfx, const RDPGFX_SURFACE_COMMAND* cmd) {
     RdpSession* s = gfx_session(gfx);
     if (!s || !s->gfx_ready || !cmd) return gfx_reject(s, "codec");
+    const int is_avc = (cmd->codecId == RDPGFX_CODECID_AVC420 ||
+        cmd->codecId == RDPGFX_CODECID_AVC444 || cmd->codecId == RDPGFX_CODECID_AVC444v2);
     /* GDI's unknown/ProgressiveV2 default can otherwise return success without
      * painting. Fail explicitly instead of silently displaying stale frames. */
     switch (cmd->codecId) {
@@ -353,6 +356,12 @@ static UINT gfx_command(RdpgfxClientContext* gfx, const RDPGFX_SURFACE_COMMAND* 
         pthread_mutex_lock(&s->mutex);
         s->gfx_last_codec = (int)cmd->codecId; ++s->gfx_commands;
         pthread_mutex_unlock(&s->mutex);
+    } else if (is_avc && s->hw_h264_active) {
+        pthread_mutex_lock(&s->mutex);
+        s->hw_h264_failed = 1;
+        pthread_mutex_unlock(&s->mutex);
+        s_error(s, "H.264 硬件解码不兼容，正在自动切换软件渲染");
+        s_diag(s, "gfx=hw-h264-decode-failed; fallback-software");
     }
     return result;
 }
@@ -687,12 +696,15 @@ static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t le
         pthread_mutex_unlock(&s->mutex);
         s_diag(s, "certificate=rejected-superseded"); return 0;
     }
+    const int allow_same_endpoint_redirect = s->same_endpoint_redirect_allowed;
     s->certificate_verified = 0; s->certificate_challenge = 0;
     pthread_mutex_unlock(&s->mutex);
-    /* Pins never authorize a gateway, redirect or a different endpoint. Those
-     * need their own explicit product flow; this app supports direct hosts. */
+    /* Pins never authorize a gateway, legacy, or cross-endpoint redirect.
+     * Same-endpoint GNOME Remote Login handover is allowed only after verified
+     * handover authorization and still requires an exact SHA-256 pin match. */
     if (!hostname || strcmp(hostname, s->endpoint_name) != 0 || port != s->endpoint_port ||
-        (flags & (VERIFY_CERT_FLAG_GATEWAY | VERIFY_CERT_FLAG_REDIRECT | VERIFY_CERT_FLAG_LEGACY))) {
+        (flags & (VERIFY_CERT_FLAG_GATEWAY | VERIFY_CERT_FLAG_LEGACY)) ||
+        ((flags & VERIFY_CERT_FLAG_REDIRECT) && !allow_same_endpoint_redirect)) {
         s_error(s, "证书验证失败：连接目标已改变");
         s_diag(s, "certificate=rejected-endpoint");
         return 0;
@@ -731,9 +743,31 @@ static int verify_x509_certificate(freerdp* instance, const BYTE* pem, size_t le
 }
 static BOOL reject_redirect(freerdp* instance) {
     RdpSession* s = instance && instance->context ? s_from_ctx(instance->context) : NULL;
+    rdpSettings* settings = instance && instance->context ? instance->context->settings : NULL;
+    if (s && settings) {
+        pthread_mutex_lock(&s->mutex);
+        const int verified = s->certificate_verified && !s->certificate_superseded &&
+            !atomic_load(&s->terminating) && s->redirect_count < 2;
+        pthread_mutex_unlock(&s->mutex);
+        if (verified) {
+            const char* target_host = freerdp_settings_get_string(settings, FreeRDP_ServerHostname);
+            const UINT32 target_port = freerdp_settings_get_uint32(settings, FreeRDP_ServerPort);
+            const int host_matches = target_host &&
+                (strcmp(target_host, s->endpoint_host) == 0 || strcmp(target_host, s->endpoint_name) == 0);
+            const int port_matches = (target_port == 0 || (int)target_port == s->endpoint_port);
+            if (host_matches && port_matches) {
+                pthread_mutex_lock(&s->mutex);
+                s->same_endpoint_redirect_allowed = 1;
+                ++s->redirect_count;
+                pthread_mutex_unlock(&s->mutex);
+                s_diag(s, "redirect=same-endpoint-handover-allowed");
+                return TRUE;
+            }
+        }
+    }
     if (s) {
         s_error(s, "已阻止服务器重定向；请为新目标创建独立连接并验证证书");
-        s_diag(s, "redirect=blocked; trusted handover is not implemented");
+        s_diag(s, "redirect=blocked; cross-endpoint or unverified handover denied");
     }
     return FALSE;
 }
@@ -777,7 +811,7 @@ static BOOL configure_session_profile(rdpSettings* settings, int width, int heig
     PROFILE_SETTING(bool, FreeRDP_AutoLogonEnabled, TRUE);
     PROFILE_SETTING(uint32, FreeRDP_DesktopWidth, width);
     PROFILE_SETTING(uint32, FreeRDP_DesktopHeight, height);
-    PROFILE_SETTING(uint16, FreeRDP_DesktopOrientation, ORIENTATION_LANDSCAPE);
+    PROFILE_SETTING(uint16, FreeRDP_DesktopOrientation, height > width ? ORIENTATION_PORTRAIT : ORIENTATION_LANDSCAPE);
     PROFILE_SETTING(uint32, FreeRDP_DesktopPhysicalWidth, width * 254 / 960);
     PROFILE_SETTING(uint32, FreeRDP_DesktopPhysicalHeight, height * 254 / 960);
     /* Single-monitor client: do NOT require the server's initial Monitor Layout
@@ -826,19 +860,29 @@ static BOOL configure_session_profile(rdpSettings* settings, int width, int heig
     return TRUE;
 }
 static void configure_performance_profile(RdpSession* session, rdpSettings* settings, BOOL compatibility) {
-    (void)session;
     if (!settings) return;
     /* Keep TCP alive across aggressive IPv4 home/CGNAT firewalls & mobile carriers. */
     (void)freerdp_settings_set_bool(settings, FreeRDP_TcpKeepAlive, TRUE);
     (void)freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveDelay, 15);
     (void)freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveInterval, 5);
     (void)freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveRetries, 3);
-    if (compatibility) return;
-    /* Keep GfxSmallCache=TRUE (<=4096 cache slots matching RDPSYNC_GFX_CACHE_SLOTS)
-     * and RemoteFX Progressive software GDI (GfxH264=FALSE) so Qualcomm/MediaTek
-     * byte-buffer tiled YUV formats never abort Frame 1 over IPv4 Windows sessions. */
+    const int want_hw = atomic_exchange(&g_next_hw_h264, 0);
+    if (compatibility) {
+        if (session) session->hw_h264_active = 0;
+        return;
+    }
     (void)freerdp_settings_set_bool(settings, FreeRDP_GfxSmallCache, TRUE);
-    (void)freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
+    if (want_hw && session) {
+        const BOOL h264_ok = freerdp_settings_set_bool(settings, FreeRDP_GfxH264, TRUE) &&
+            freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, TRUE) &&
+            freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, TRUE);
+        session->hw_h264_active = h264_ok ? 1 : 0;
+    } else {
+        (void)freerdp_settings_set_bool(settings, FreeRDP_GfxH264, FALSE);
+        (void)freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444, FALSE);
+        (void)freerdp_settings_set_bool(settings, FreeRDP_GfxAVC444v2, FALSE);
+        if (session) session->hw_h264_active = 0;
+    }
 }
 static UINT32 expected_clipboard_feature_mask(BOOL file_enabled, BOOL text_bridge_enabled) {
     UINT32 mask = 0;
@@ -1088,7 +1132,7 @@ static BOOL process_commands(RdpSession* s) {
             /* Physical dimensions in mm, not pixels; valid nominal 96 dpi. */
             layout.PhysicalWidth = (UINT32)(width * 254 / 960);
             layout.PhysicalHeight = (UINT32)(height * 254 / 960);
-            layout.Orientation = ORIENTATION_LANDSCAPE;
+            layout.Orientation = (height > width) ? ORIENTATION_PORTRAIT : ORIENTATION_LANDSCAPE;
             layout.DesktopScaleFactor = scale; layout.DeviceScaleFactor = 100;
             result = s->disp->SendMonitorLayout(s->disp, 1, &layout);
         }

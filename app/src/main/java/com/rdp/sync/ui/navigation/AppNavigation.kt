@@ -42,7 +42,9 @@ fun AppNavigation() {
                 onSync = { direction -> viewModel.syncWebdav(direction) },
                 onSaveWebDavSettings = { url, username, password -> viewModel.saveWebDavSettings(url, username, password) },
                 onTestWebDavSettings = { url, username, password -> viewModel.testWebDavSettings(url, username, password) },
-                onMessageShown = { viewModel.clearTransientMessages() }
+                onMessageShown = { viewModel.clearTransientMessages() },
+                onMoveDevice = { deviceId, delta -> viewModel.moveDevice(deviceId, delta) },
+                onPinDeviceTop = { deviceId -> viewModel.pinDeviceToTop(deviceId) }
             )
         }
 

@@ -3,11 +3,14 @@ package com.rdp.sync.display
 /**
  * Tracks a request separately from the server's actual framebuffer. No implicit reconnects.
  * A settled new target is requested once, with a bounded acknowledgement wait.
+ * When the server confirms a new framebuffer size (e.g. after GNOME virtual-display mode set),
+ * stale transient failedTarget locks are cleared so later legitimate resizes succeed.
  */
 class ResizeCoordinator {
     private var candidate: DesktopSize? = null
     private var candidateAt = 0L
     private var requestedAt = 0L
+    private var lastObservedActual: DesktopSize? = null
     var requested: DesktopSize? = null
         private set
     var failedTarget: DesktopSize? = null
@@ -20,11 +23,17 @@ class ResizeCoordinator {
         requested = null
         failedTarget = null
         failure = null
+        lastObservedActual = null
         candidateAt = 0L
         requestedAt = 0L
     }
 
     fun update(now: Long, desired: DesktopSize, actual: DesktopSize, capability: Int, send: (DesktopSize) -> Int) {
+        if (lastObservedActual != null && lastObservedActual != actual) {
+            failedTarget = null
+            if (requested == null) failure = null
+        }
+        lastObservedActual = actual
         if (requested == actual) {
             requested = null
             failure = null

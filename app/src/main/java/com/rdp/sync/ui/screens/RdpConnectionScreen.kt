@@ -123,7 +123,8 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     }
     var settings by remember { mutableStateOf(SessionUiDefaults.displaySettings(
         preferences.getString("display_quality", null), preferences.getString("resolution_mode", null),
-        preferences.getBoolean("adaptive_quality", false)
+        preferences.getBoolean("adaptive_quality", false),
+        preferences.getBoolean("hardware_decode", false)
     )) }
     // A temporary trackpad toggle never overrides touch-first on the next session.
     var pointerMode by remember(device.id) { mutableStateOf(SessionUiDefaults.POINTER_MODE) }
@@ -210,20 +211,28 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                 val connectionUsername = device.username
                 val connectionPassword = device.password
                 val connectionDomain = device.domain
-                suspend fun connect(touch: Boolean, compatibility: Boolean) = withContext(Dispatchers.IO) {
+                val initialHardwareDecode = latestSettings.hardwareDecode
+                suspend fun connect(touch: Boolean, compatibility: Boolean, hwDecode: Boolean = initialHardwareDecode) = withContext(Dispatchers.IO) {
                     attemptDriveGrant.connect { grantedMode ->
-                        val connected = RdpConnector.connectDevice(connectionEndpoint.host, connectionEndpoint.port, connectionUsername, connectionPassword,
-                            connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height, touch, compatibility, expectedFingerprint.orEmpty(), fileTransferEnabled = connectionFileTransferEnabled, sharedDriveMode = grantedMode)
+                        val connected = RdpConnector.connectDevice(
+                            connectionEndpoint.host, connectionEndpoint.port, connectionUsername, connectionPassword,
+                            connectionDomain, connectionEndpoint.effectiveServerName, size.width, size.height,
+                            touch, compatibility, expectedFingerprint.orEmpty(),
+                            fileTransferEnabled = connectionFileTransferEnabled,
+                            sharedDriveMode = grantedMode,
+                            hardwareDecode = hwDecode && !compatibility
+                        )
                         connected to RdpConnector.sessionGeneration()
                     }
                 }
-                if (!connect(true, false)) {
+                if (!connect(true, false, initialHardwareDecode)) {
                     status = withContext(Dispatchers.IO) { RdpConnector.getStatus() }
                     connecting = false
                     // A rejected TLS handshake may carry a certificate challenge.
                     // Keep its generation alive until an explicit decision/retry.
                 }
                 var compatibilityRetried = false
+                var hwFallbackRetried = false
                 var previouslyConnected = false
                 var transferSetupTried = false
                 while (isActive) {
@@ -274,6 +283,19 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                         transferController = null
                         if (previouslyConnected || status.contains("失败")) connecting = false
                     }
+                    if (challenge == null && !isConnected && !hwFallbackRetried && initialHardwareDecode &&
+                        status.contains("H.264 硬件解码不兼容")) {
+                        hwFallbackRetried = true
+                        settings = settings.copy(hardwareDecode = false)
+                        preferences.edit().putBoolean("hardware_decode", false).apply()
+                        if (permitsAutomaticActivationRetry(connectionSharedDriveMode)) {
+                            connecting = true
+                            withContext(Dispatchers.IO) { RdpConnector.disconnect() }
+                            connect(true, false, false)
+                        } else {
+                            connecting = false
+                        }
+                    }
                     // Retain the existing, narrowly scoped RDPEI activation compatibility retry.
                     if (challenge == null && !isConnected && !previouslyConnected && !compatibilityRetried &&
                         (status.contains("0x0002001c", ignoreCase = true) || status.contains("Timeout waiting for activation", ignoreCase = true))) {
@@ -281,7 +303,7 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
                             compatibilityRetried = true
                             status = context.getString(R.string.touch_compat_retry)
                             withContext(Dispatchers.IO) { RdpConnector.disconnect() }
-                            connect(false, true)
+                            connect(false, true, false)
                         } else {
                             // Reusing a captured grant here could resurrect drive access after a
                             // concurrent Stop sharing. No automatic new drive-enabled generation.
@@ -307,9 +329,13 @@ fun RdpConnectionScreen(device: Device, initialSharedDriveMode: SharedDriveMode 
     DisposableEffect(input, trustGuard, attemptDriveGrant) { onDispose { attemptDriveGrant.requestRevocation(); trustGuard.invalidate(); input.shutdown() } }
 
     fun saveSettings(value: SessionDisplaySettings) {
+        val hwChanged = value.hardwareDecode != settings.hardwareDecode
         settings = value
         preferences.edit().putString("display_quality", value.quality.name)
-            .putString("resolution_mode", value.resolution.name).putBoolean("adaptive_quality", value.adaptive).apply()
+            .putString("resolution_mode", value.resolution.name)
+            .putBoolean("adaptive_quality", value.adaptive)
+            .putBoolean("hardware_decode", value.hardwareDecode).apply()
+        if (hwChanged && isConnected) reconnectRequired = true
     }
     fun reconnect() {
         transferController?.close()
@@ -717,6 +743,14 @@ internal fun DisplaySettingsDialog(settings: SessionDisplaySettings, device: Dev
                 Text(context.getString(R.string.adaptive_quality), modifier = Modifier.padding(start = 8.dp))
             }
             Text(context.getString(R.string.adaptive_help), style = MaterialTheme.typography.bodySmall)
+            Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                value = settings.hardwareDecode, role = Role.Switch,
+                onValueChange = { onChange(settings.copy(hardwareDecode = it)) }
+            ).semantics { contentDescription = context.getString(R.string.hardware_decode) }, verticalAlignment = Alignment.CenterVertically) {
+                Switch(settings.hardwareDecode, onCheckedChange = null)
+                Text(context.getString(R.string.hardware_decode), modifier = Modifier.padding(start = 8.dp))
+            }
+            Text(context.getString(R.string.hardware_decode_help), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             Text(context.getString(R.string.gesture_help), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
