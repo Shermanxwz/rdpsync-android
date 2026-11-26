@@ -315,6 +315,7 @@ class RdpInputDispatcher(
             if (state.dragging) {
                 mouseButtonSender(packet.x, packet.y, 1, false)
                 buttons.remove(1)
+                lastFallbackTapUpTime = Long.MIN_VALUE
             } else if (packet.type == 2 && !state.moved && !state.failedAfterDown) {
                 val isLongPress = packet.time - state.startedAt >= 500
                 pointerSender(packet.x, packet.y, if (isLongPress) 2 else 1)
@@ -325,6 +326,8 @@ class RdpInputDispatcher(
                 } else {
                     lastFallbackTapUpTime = Long.MIN_VALUE
                 }
+            } else {
+                lastFallbackTapUpTime = Long.MIN_VALUE
             }
             if (packet.type == 2 && state.moved && !state.dragging && packet.time - state.lastTime <= 120) {
                 startFling(state.remoteStartX, state.remoteStartY, state.velocityX, state.velocityY)
