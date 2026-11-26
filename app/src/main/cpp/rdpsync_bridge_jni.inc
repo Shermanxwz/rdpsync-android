@@ -462,7 +462,8 @@ JNIEXPORT jstring JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetDiag(J
                  "gfx=%s\ngfx-last-codec=%d\ngfx-decoded-commands=%lld\n",
                  s->diag, s->touch_available ? "connected" : "not-negotiated", s->disp_state,
                  s->fb_width, s->fb_height, (long long)s->rtt_ms, (long long)s->bandwidth_kbps,
-                 (long long)s->input_drops, s->gfx_ready ? "software-ready" : "not-negotiated",
+                 (long long)s->input_drops,
+                 s->gfx_ready ? (s->hw_h264_active ? "hw-h264-ready" : "software-ready") : "not-negotiated",
                  s->gfx_last_codec, (long long)s->gfx_commands);
         pthread_mutex_unlock(&s->mutex);
         const size_t used = strlen(text);
@@ -664,6 +665,10 @@ JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeSendUnicodeC
 JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeEnableNextTextBridge(JNIEnv* e, jobject o, jboolean enabled) {
     (void)e; (void)o;
     atomic_store(&g_next_text_bridge, enabled ? 1 : 0);
+}
+JNIEXPORT void JNICALL Java_com_rdp_sync_network_RdpConnector_nativeEnableNextHardwareDecode(JNIEnv* e, jobject o, jboolean enabled) {
+    (void)e; (void)o;
+    atomic_store(&g_next_hw_h264, enabled ? 1 : 0);
 }
 
 JNIEXPORT jint JNICALL Java_com_rdp_sync_network_RdpConnector_nativeGetPeerOsMajor(JNIEnv* e, jobject o) {

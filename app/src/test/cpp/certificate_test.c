@@ -22,11 +22,19 @@ static const struct JNINativeInterface_ challenge_jni = {
 };
 static int boolean_settings[8192];
 static UINT32 authentication_level;
+static const char* fake_redirect_host = NULL;
+static UINT32 fake_redirect_port = 0;
 BOOL freerdp_settings_get_bool(const rdpSettings* settings, FreeRDP_Settings_Keys_Bool key) {
     (void)settings; assert(key < 8192); return boolean_settings[key];
 }
 BOOL freerdp_settings_set_bool(rdpSettings* settings, FreeRDP_Settings_Keys_Bool key, BOOL value) {
     (void)settings; assert(key < 8192); boolean_settings[key] = value; return TRUE;
+}
+const char* freerdp_settings_get_string(const rdpSettings* settings, FreeRDP_Settings_Keys_String key) {
+    (void)settings; return key == FreeRDP_ServerHostname ? fake_redirect_host : NULL;
+}
+UINT32 freerdp_settings_get_uint32(const rdpSettings* settings, FreeRDP_Settings_Keys_UInt32 key) {
+    (void)settings; return key == FreeRDP_ServerPort ? fake_redirect_port : 0;
 }
 BOOL freerdp_settings_set_uint32(rdpSettings* settings, FreeRDP_Settings_Keys_UInt32 key, UINT32 value) {
     (void)settings;
@@ -129,6 +137,22 @@ int main(void) {
     assert(verify_x509_certificate(&instance, (const BYTE*)"bogus", 5, "disposable.example", 3389, 0) == 0);
     assert(!session.certificate_challenge && !session.certificate_verified);
     assert(reject_redirect(&instance) == FALSE);
+    /* Verified same-endpoint GNOME Remote Login handover succeeds while cross-endpoint & changed certs stay blocked */
+    rdpSettings dummy_settings = {0};
+    context.common.context.settings = &dummy_settings;
+    assert(verify_x509_certificate(&instance, (const BYTE*)pem1, size1, "disposable.example", 3389, 0) == 2);
+    fake_redirect_host = "evil.example"; fake_redirect_port = 3389;
+    assert(reject_redirect(&instance) == FALSE);
+    fake_redirect_host = "127.0.0.1"; fake_redirect_port = 3390;
+    assert(reject_redirect(&instance) == FALSE);
+    fake_redirect_host = "127.0.0.1"; fake_redirect_port = 3389;
+    assert(reject_redirect(&instance) == TRUE && session.same_endpoint_redirect_allowed == 1);
+    assert(verify_x509_certificate(&instance, (const BYTE*)pem1, size1, "disposable.example", 3389, VERIFY_CERT_FLAG_REDIRECT) == 2);
+    assert(verify_x509_certificate(&instance, (const BYTE*)pem2, size2, "disposable.example", 3389, VERIFY_CERT_FLAG_REDIRECT) == 0);
+    assert(session.certificate_challenge && !strcmp(session.certificate_reason, "changed"));
+    session.certificate_challenge = 0;
+    session.same_endpoint_redirect_allowed = 0;
+    context.common.context.settings = NULL;
     assert(authenticate_ex(&instance, NULL, NULL, NULL, AUTH_RDP) == FALSE);
     assert(configure_security(NULL));
     assert(boolean_settings[FreeRDP_ExternalCertificateManagement]);
@@ -145,5 +169,5 @@ int main(void) {
     assert(verify_x509_certificate(&instance, (const BYTE*)pem1, size1, "disposable.example", 3389, 0) == 0);
     pthread_mutex_destroy(&session.mutex);
     free(leading_newline); free(pem1); free(pem2); EVP_PKEY_free(key);
-    puts("native certificate: passed parsed DER SHA256, missing/matched/changed/malformed pins, endpoint/redirect rejection, TLS-only policy");
+    puts("native certificate: passed parsed DER SHA256, missing/matched/changed/malformed pins, endpoint/redirect policy, TLS-only policy");
 }

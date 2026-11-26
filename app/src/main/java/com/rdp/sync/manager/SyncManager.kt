@@ -28,11 +28,17 @@ object SyncManager {
     fun devicesToJsonArray(devices: List<Device>, includePasswords: Boolean = false): JSONArray {
         if (includePasswords && devices.any { it.credentialUnavailable || !it.passwordProvided }) throw CredentialStorageException()
         return JSONArray().apply {
-            devices.sortedWith(compareBy<Device> { it.name.lowercase() }.thenBy { it.host }.thenBy { it.port }).forEach { device ->
+            devices.sortedWith(
+                compareBy<Device> { it.sortOrder }
+                    .thenBy { it.name.lowercase() }
+                    .thenBy { it.host }
+                    .thenBy { it.port }
+            ).forEachIndexed { index, device ->
                 put(JSONObject().apply {
                     put("id", device.id); put("name", device.name); put("host", device.host); put("port", device.port)
                     put("username", device.username); put("domain", device.domain); put("rdpServerName", device.rdpServerName)
                     put("width", device.width); put("height", device.height)
+                    put("sortOrder", if (device.sortOrder >= 0) device.sortOrder else index)
                     if (includePasswords) put("password", device.password)
                 })
             }
@@ -60,16 +66,23 @@ object SyncManager {
         DeviceSyncResult("已合并 ${merged.size} 台设备（相同设备以本机为准）；文件：${file(includePasswords).fileName}", merged, mergeOnlyNew = true)
     }
 
-    internal fun parseDevices(objects: List<JSONObject>, includePasswords: Boolean): List<Device> = try { objects.map { obj ->
+    internal fun parseDevices(objects: List<JSONObject>, includePasswords: Boolean): List<Device> = try { objects.mapIndexed { index, obj ->
         val host = obj.stringField("host", required = true).trim()
         val username = obj.stringField("username", required = true).trim()
         require(host.isNotEmpty() && username.isNotEmpty()) { "云端设备格式不正确，本机数据未改动" }
         val hasPassword = includePasswords && obj.has("password") && !obj.isNull("password")
-        Device(name = obj.stringField("name").ifBlank { host }, host = host,
-            port = obj.optInt("port", 3389).coerceIn(1, 65535), username = username,
+        val sortOrder = if (obj.has("sortOrder") && !obj.isNull("sortOrder")) obj.optInt("sortOrder", index).coerceAtLeast(0) else index
+        Device(
+            name = obj.stringField("name").ifBlank { host },
+            host = host,
+            port = obj.optInt("port", 3389).coerceIn(1, 65535),
+            username = username,
             password = if (hasPassword) obj.stringField("password", required = true) else "",
-            domain = obj.stringField("domain"), rdpServerName = obj.stringField("rdpServerName"),
-            width = obj.optInt("width", 1280).coerceAtLeast(320), height = obj.optInt("height", 720).coerceAtLeast(240)
+            domain = obj.stringField("domain"),
+            rdpServerName = obj.stringField("rdpServerName"),
+            width = obj.optInt("width", 1280).coerceAtLeast(320),
+            height = obj.optInt("height", 720).coerceAtLeast(240),
+            sortOrder = sortOrder
         ).apply { passwordProvided = hasPassword }
     } } catch (_: Exception) {
         // Field/type failures can quote password values just like top-level parser failures.

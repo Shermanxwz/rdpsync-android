@@ -35,7 +35,17 @@ class RdpInputDispatcher(
     private sealed interface Packet {
         data class Motion(val id: Int?, val x: Int, val y: Int) : Packet
         data class Touch(val id: Int, val type: Int, val x: Int, val y: Int) : Packet
-        data class Direct(val id: Int, val type: Int, val x: Int, val y: Int, val screenX: Float, val screenY: Float, val time: Long, val slop: Float) : Packet
+        data class Direct(
+            val id: Int,
+            val type: Int,
+            val x: Int,
+            val y: Int,
+            val screenX: Float,
+            val screenY: Float,
+            val time: Long,
+            val slop: Float,
+            val scrollScale: Float = 1f
+        ) : Packet
         data class Fling(val generation: Long, val x: Int, val y: Int, val dx: Int, val dy: Int) : Packet
         data class Text(val value: String) : Packet
         data class Wheel(val horizontal: Boolean, val x: Int, val y: Int, val delta: Int) : Packet
@@ -55,7 +65,28 @@ class RdpInputDispatcher(
         private set
     @Volatile var failedTextSends: Long = 0
         private set
-    private data class DirectContact(val remoteStartX: Int, val remoteStartY: Int, val startX: Float, val startY: Float, val startedAt: Long, var screenX: Float, var screenY: Float, var native: Boolean, var moved: Boolean = false, var dragging: Boolean = false, var failedAfterDown: Boolean = false, var remainderX: Float = 0f, var remainderY: Float = 0f, var lastTime: Long = startedAt, var velocityX: Float = 0f, var velocityY: Float = 0f)
+    private data class DirectContact(
+        val remoteStartX: Int,
+        val remoteStartY: Int,
+        val startX: Float,
+        val startY: Float,
+        val startedAt: Long,
+        var screenX: Float,
+        var screenY: Float,
+        var native: Boolean,
+        val doubleTapDragCandidate: Boolean = false,
+        var moved: Boolean = false,
+        var dragging: Boolean = false,
+        var failedAfterDown: Boolean = false,
+        var remainderX: Float = 0f,
+        var remainderY: Float = 0f,
+        var lastTime: Long = startedAt,
+        var velocityX: Float = 0f,
+        var velocityY: Float = 0f
+    )
+    private var lastFallbackTapUpTime = Long.MIN_VALUE
+    private var lastFallbackTapScreenX = 0f
+    private var lastFallbackTapScreenY = 0f
     private var flingJob: Job? = null
     private var flingGeneration = 0L
     private val directContacts = mutableMapOf<Int, DirectContact>()
@@ -198,15 +229,40 @@ class RdpInputDispatcher(
         if (eventType == 1) offer(Packet.Motion(pointerId, x, y))
         else offer(Packet.Touch(pointerId, eventType, x, y))
     }
-    fun enqueueDirectTouch(id: Int, type: Int, x: Int, y: Int, screenX: Float, screenY: Float, eventTime: Long, slop: Float) =
-        offer(Packet.Direct(id, type, x, y, screenX, screenY, eventTime, slop))
+    fun enqueueDirectTouch(
+        id: Int,
+        type: Int,
+        x: Int,
+        y: Int,
+        screenX: Float,
+        screenY: Float,
+        eventTime: Long,
+        slop: Float,
+        scrollScale: Float = 1f
+    ) = offer(Packet.Direct(id, type, x, y, screenX, screenY, eventTime, slop, scrollScale))
 
     private fun dispatchDirect(packet: Packet.Direct) {
         if (packet.type == 0) {
             cancelFling()
             val native = touchSender(packet.id, 0, packet.x, packet.y)
             if (native) contacts[packet.id] = Contact(packet.x, packet.y)
-            directContacts[packet.id] = DirectContact(packet.x, packet.y, packet.screenX, packet.screenY, packet.time, packet.screenX, packet.screenY, native)
+            val doubleTapRadius = (packet.slop * 3f).coerceAtLeast(24f)
+            val isDoubleTapCandidate = !native &&
+                lastFallbackTapUpTime != Long.MIN_VALUE &&
+                packet.time - lastFallbackTapUpTime in 1L..280L &&
+                abs(packet.screenX - lastFallbackTapScreenX) <= doubleTapRadius &&
+                abs(packet.screenY - lastFallbackTapScreenY) <= doubleTapRadius
+            directContacts[packet.id] = DirectContact(
+                remoteStartX = packet.x,
+                remoteStartY = packet.y,
+                startX = packet.screenX,
+                startY = packet.screenY,
+                startedAt = packet.time,
+                screenX = packet.screenX,
+                screenY = packet.screenY,
+                native = native,
+                doubleTapDragCandidate = isDoubleTapCandidate
+            )
             return
         }
         val state = directContacts[packet.id] ?: return
@@ -226,9 +282,10 @@ class RdpInputDispatcher(
             state.failedAfterDown = true
             state.screenX = packet.screenX; state.screenY = packet.screenY; state.lastTime = packet.time
         }
+        val scale = packet.scrollScale.takeIf { it.isFinite() && it > 0f } ?: 1f
         if (packet.type == 1) {
-            val dx = packet.screenX - state.screenX
-            val dy = packet.screenY - state.screenY
+            val dx = (packet.screenX - state.screenX) * scale
+            val dy = (packet.screenY - state.screenY) * scale
             state.screenX = packet.screenX
             state.screenY = packet.screenY
             val dt = (packet.time - state.lastTime).coerceIn(8, 80) / 1000f
@@ -236,8 +293,9 @@ class RdpInputDispatcher(
             state.velocityX = (state.velocityX * 0.65f - dx / dt * 0.35f).coerceIn(-2400f, 2400f)
             state.velocityY = (state.velocityY * 0.65f + dy / dt * 0.35f).coerceIn(-2400f, 2400f)
             val moved = abs(packet.screenX - state.startX) > packet.slop || abs(packet.screenY - state.startY) > packet.slop
-            if (!state.moved && moved && packet.time - state.startedAt >= 500) {
+            if (!state.moved && moved && (state.doubleTapDragCandidate || packet.time - state.startedAt >= 500)) {
                 state.dragging = true
+                lastFallbackTapUpTime = Long.MIN_VALUE
                 buttons.add(1)
                 mouseButtonSender(state.remoteStartX, state.remoteStartY, 1, true)
             }
@@ -254,9 +312,22 @@ class RdpInputDispatcher(
                 if (wy != 0) sendWheel(false, state.remoteStartX, state.remoteStartY, wy)
             }
         } else if (packet.type == 2 || packet.type == 3) {
-            if (state.dragging) { mouseButtonSender(packet.x, packet.y, 1, false); buttons.remove(1) }
-            else if (packet.type == 2 && !state.moved && !state.failedAfterDown) {
-                pointerSender(packet.x, packet.y, if (packet.time - state.startedAt >= 500) 2 else 1)
+            if (state.dragging) {
+                mouseButtonSender(packet.x, packet.y, 1, false)
+                buttons.remove(1)
+                lastFallbackTapUpTime = Long.MIN_VALUE
+            } else if (packet.type == 2 && !state.moved && !state.failedAfterDown) {
+                val isLongPress = packet.time - state.startedAt >= 500
+                pointerSender(packet.x, packet.y, if (isLongPress) 2 else 1)
+                if (!isLongPress) {
+                    lastFallbackTapUpTime = packet.time
+                    lastFallbackTapScreenX = packet.screenX
+                    lastFallbackTapScreenY = packet.screenY
+                } else {
+                    lastFallbackTapUpTime = Long.MIN_VALUE
+                }
+            } else {
+                lastFallbackTapUpTime = Long.MIN_VALUE
             }
             if (packet.type == 2 && state.moved && !state.dragging && packet.time - state.lastTime <= 120) {
                 startFling(state.remoteStartX, state.remoteStartY, state.velocityX, state.velocityY)
@@ -285,6 +356,7 @@ class RdpInputDispatcher(
 
     private fun releaseAll() {
         cancelFling()
+        lastFallbackTapUpTime = Long.MIN_VALUE
         contacts.toMap().forEach { (id, point) -> runCatching { touchSender(id, 3, point.x, point.y) } }
         contacts.clear()
         directContacts.clear()

@@ -10,6 +10,7 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.text.InputType
 import android.view.Choreographer
+import android.view.HapticFeedbackConstants
 import android.view.InputDevice
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
@@ -31,7 +32,8 @@ import kotlin.math.roundToInt
 
 /**
  * 120Hz LTPO-ready desktop surface with zero-latency vector cursor, ballistic sub-pixel
- * trackpad acceleration, two-finger right-click/wheel gestures, and full Chinese IME composition.
+ * trackpad acceleration, double-tap-and-drag, density-normalized two-finger scroll/right-click,
+ * and full Chinese IME composition.
  */
 @SuppressLint("ViewConstructor")
 class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : View(context), Choreographer.FrameCallback {
@@ -64,7 +66,9 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
         runCatching { observer(ImeDiagnostic(connection, operation, argumentLength, before, after)) }
     }
 
-    private val density = resources.displayMetrics.density
+    private val density = resources.displayMetrics.density.coerceAtLeast(1f)
+    private val directScrollScale = (1.6f / density).coerceIn(0.45f, 1.5f)
+    private val pointerTwoFingerWheelScale = (3.75f / density).coerceIn(0.8f, 3.75f)
     private val viewport = ViewportTransform()
     private val destination = RectF()
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
@@ -119,6 +123,10 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
     private var downX = 0f
     private var downY = 0f
     private var downTime = 0L
+    private var lastPointerTapUpTime = Long.MIN_VALUE
+    private var lastPointerTapX = 0f
+    private var lastPointerTapY = 0f
+    private var pointerDoubleTapDragCandidate = false
     private var moved = false
     private var mouseDragging = false
     private var mouseButtons = 0
@@ -327,6 +335,11 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                 downTime = event.eventTime; lastMoveEventMs = event.eventTime
                 moved = false; multiGesture = false; mouseDragging = false
                 twoFingerTapCandidate = false; twoFingerPinching = false
+                val doubleTapRadius = (touchSlop * 3f).coerceAtLeast(24f)
+                pointerDoubleTapDragCandidate = pointerMode &&
+                    lastPointerTapUpTime != Long.MIN_VALUE &&
+                    event.eventTime - lastPointerTapUpTime in 1L..280L &&
+                    hypot(event.x - lastPointerTapX, event.y - lastPointerTapY) <= doubleTapRadius
                 val remote = viewport.toRemote(event.x, event.y)
                 activeTouch = remote != null
                 if (!pointerMode && remote != null) direct(event, 0, remote, 0)
@@ -358,9 +371,9 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                             twoFingerTapCandidate = false
                         }
                         if (pointerMode && !twoFingerPinching && spanDelta < touchSlop * 1.35f) {
-                            // MacBook-grade 2-finger smooth trackpad scrolling in Pointer mode
-                            scrollRemainderX -= dCenterX * 1.4f
-                            scrollRemainderY += dCenterY * 1.4f
+                            // Density-normalized 2-finger smooth trackpad scrolling in Pointer mode
+                            scrollRemainderX -= dCenterX * pointerTwoFingerWheelScale
+                            scrollRemainderY += dCenterY * pointerTwoFingerWheelScale
                             val wx = scrollRemainderX.roundToInt()
                             val wy = scrollRemainderY.roundToInt()
                             scrollRemainderX -= wx
@@ -381,8 +394,13 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                         val x = event.getX(index); val y = event.getY(index)
                         val movement = abs(x - downX) > touchSlop || abs(y - downY) > touchSlop
                         if (pointerMode) {
-                            if (!moved && movement && event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout()) {
+                            if (!moved && movement &&
+                                (pointerDoubleTapDragCandidate || event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout())
+                            ) {
                                 mouseDragging = true
+                                pointerDoubleTapDragCandidate = false
+                                lastPointerTapUpTime = Long.MIN_VALUE
+                                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
                                 input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, true)
                             }
                             // Process historical batched samples for silk-smooth 120Hz cursor trajectory
@@ -416,13 +434,22 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                 }
             }
             MotionEvent.ACTION_POINTER_UP -> {
-                if (pointerMode && twoFingerTapCandidate && event.eventTime - twoFingerDownTime < 260L) {
+                if (twoFingerTapCandidate && event.eventTime - twoFingerDownTime < 260L) {
                     twoFingerTapCandidate = false
-                    triggerTapRipple(
-                        viewport.left + cursorX * viewport.scale,
-                        viewport.top + cursorY * viewport.scale
-                    )
-                    input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), 2)
+                    if (pointerMode) {
+                        triggerTapRipple(
+                            viewport.left + cursorX * viewport.scale,
+                            viewport.top + cursorY * viewport.scale
+                        )
+                        input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), 2)
+                    } else {
+                        val remote = viewport.toRemote(previousCenterX, previousCenterY, clamp = true)
+                        if (remote != null) {
+                            lastInputTarget = remote
+                            triggerTapRipple(previousCenterX, previousCenterY)
+                            input.enqueuePointerClick(remote.x.toInt(), remote.y.toInt(), 2)
+                        }
+                    }
                 }
                 multiGesture = true
                 if (event.getPointerId(event.actionIndex) == primaryId) cancelRemoteTouch(event)
@@ -435,12 +462,20 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                         if (mouseDragging) {
                             input.enqueueMouseButton(cursorX.toInt(), cursorY.toInt(), 1, false)
                         } else if (!moved) {
-                            val btn = if (event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout()) 2 else 1
+                            val isLongPress = event.eventTime - downTime >= ViewConfiguration.getLongPressTimeout()
+                            val btn = if (isLongPress) 2 else 1
                             triggerTapRipple(
                                 viewport.left + cursorX * viewport.scale,
                                 viewport.top + cursorY * viewport.scale
                             )
                             input.enqueuePointerClick(cursorX.toInt(), cursorY.toInt(), btn)
+                            if (!isLongPress) {
+                                lastPointerTapUpTime = event.eventTime
+                                lastPointerTapX = event.x
+                                lastPointerTapY = event.y
+                            } else {
+                                lastPointerTapUpTime = Long.MIN_VALUE
+                            }
                         }
                     } else {
                         if (!moved) triggerTapRipple(event.x, event.y)
@@ -449,6 +484,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
                     if (!moved) performClick()
                 }
                 activeTouch = false; primaryId = -1; multiGesture = false; mouseDragging = false
+                pointerDoubleTapDragCandidate = false
                 twoFingerTapCandidate = false; twoFingerPinching = false
                 parent?.requestDisallowInterceptTouchEvent(false)
             }
@@ -472,7 +508,8 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
             event.getX(index),
             event.getY(index),
             event.eventTime,
-            touchSlop
+            touchSlop,
+            directScrollScale
         )
     }
 
@@ -496,6 +533,7 @@ class RdpDesktopView(context: Context, private val input: RdpInputDispatcher) : 
     private fun cancelGesture() {
         input.releasePressedInputs()
         activeTouch = false; mouseDragging = false; primaryId = -1; mouseButtons = 0; multiGesture = false
+        pointerDoubleTapDragCandidate = false; lastPointerTapUpTime = Long.MIN_VALUE
         twoFingerTapCandidate = false; twoFingerPinching = false
         unicodeKeys.clear(); deadAccent = 0
         parent?.requestDisallowInterceptTouchEvent(false)

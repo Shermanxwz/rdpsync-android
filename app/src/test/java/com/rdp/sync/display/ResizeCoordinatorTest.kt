@@ -36,4 +36,15 @@ class ResizeCoordinatorTest {
         c.update(32000, rotated, old, 2, send)
         assertEquals(2, sent)
     }
+    @Test fun serverConfirmedActualChangeClearsStaleFailedTarget() {
+        val c = ResizeCoordinator(); var sent = 0
+        val send: (DesktopSize) -> Int = { sent++; 0 }
+        repeat(12) { c.update(it * 1000L, rotated, old, 2, send) }
+        assertEquals(1, sent)
+        assertEquals(rotated, c.failedTarget)
+        val intermediate = DesktopSize(1024, 768)
+        c.update(13000, rotated, intermediate, 2, send)
+        assertNull(c.failedTarget)
+        assertEquals(2, sent)
+    }
 }

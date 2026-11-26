@@ -62,6 +62,11 @@ int main(void) {
     map.outputOriginX = 0; assert(gfx.MapSurfaceToOutput(&gfx, &map) == CHANNEL_RC_OK && map_calls == 1);
     RDPGFX_SURFACE_COMMAND cmd = {.surfaceId = 1, .codecId = RDPGFX_CODECID_AVC420};
     assert(gfx.SurfaceCommand(&gfx, &cmd) != CHANNEL_RC_OK && !command_calls && !s.gfx_commands);
+    s.hw_h264_active = 1; delegate_result = ERROR_INVALID_DATA;
+    assert(gfx.SurfaceCommand(&gfx, &cmd) != CHANNEL_RC_OK && s.hw_h264_failed == 1);
+    s.hw_h264_failed = 0; delegate_result = CHANNEL_RC_OK;
+    assert(gfx.SurfaceCommand(&gfx, &cmd) == CHANNEL_RC_OK && s.gfx_commands == 1 && s.gfx_last_codec == RDPGFX_CODECID_AVC420);
+    s.hw_h264_active = 0; s.gfx_commands = 0; s.gfx_last_codec = 0;
     cmd.codecId = RDPGFX_CODECID_CAPROGRESSIVE; delegate_result = ERROR_INVALID_DATA;
     assert(gfx.SurfaceCommand(&gfx, &cmd) != CHANNEL_RC_OK && !s.gfx_commands);
     delegate_result = CHANNEL_RC_OK;
@@ -87,5 +92,5 @@ int main(void) {
     gfx_detach(&s, &gfx); gfx_detach(&s, &gfx);
     assert(uninit_calls == 1 && codec_frees == 2 && !s.gfx && !s.gfx_ready);
     pthread_mutex_destroy(&s.mutex);
-    puts("Production GFX guard, codec accounting, cache replacement and partial-init lifecycle: PASS");
+    puts("Production GFX guard, codec accounting, H.264 fallback, cache replacement and partial-init lifecycle: PASS");
 }

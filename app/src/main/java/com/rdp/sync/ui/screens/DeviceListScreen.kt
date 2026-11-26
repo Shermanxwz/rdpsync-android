@@ -3,7 +3,7 @@ package com.rdp.sync.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
@@ -35,9 +35,18 @@ import com.rdp.sync.viewmodel.UiState
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (Long) -> Unit,
-    onSync: (SyncDirection) -> Unit, onSaveWebDavSettings: (String, String, String) -> Unit,
-    onTestWebDavSettings: (String, String, String) -> Unit, onMessageShown: () -> Unit, onSharedSpace: () -> Unit = {}) {
+fun DeviceListScreen(
+    uiState: UiState,
+    onAddDevice: () -> Unit,
+    onDeviceClick: (Long) -> Unit,
+    onSync: (SyncDirection) -> Unit,
+    onSaveWebDavSettings: (String, String, String) -> Unit,
+    onTestWebDavSettings: (String, String, String) -> Unit,
+    onMessageShown: () -> Unit,
+    onSharedSpace: () -> Unit = {},
+    onMoveDevice: (Long, Int) -> Unit = { _, _ -> },
+    onPinDeviceTop: (Long) -> Unit = {}
+) {
     val context = LocalContext.current
     val compact = LocalConfiguration.current.screenWidthDp <= 400
     val syncDescription = stringResource(R.string.sync)
@@ -45,13 +54,25 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
     var showSettings by remember { mutableStateOf(false) }
     var showSyncMenu by remember { mutableStateOf(false) }
     var pendingSync by remember { mutableStateOf<SyncDirection?>(null) }
+    var reorderMode by remember { mutableStateOf(false) }
     val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(uiState.devices.size) {
+        if (uiState.devices.size < 2) reorderMode = false
+    }
     LaunchedEffect(uiState.error, uiState.message, showSettings) {
         val text = uiState.error ?: uiState.message
         if (!text.isNullOrBlank() && !showSettings) { snackbar.showSnackbar(UiMessages.text(context, text)); onMessageShown() }
     }
     Scaffold(snackbarHost = { SnackbarHost(snackbar) }, topBar = {
         TopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
+            if (uiState.devices.size >= 2) {
+                IconButton(onClick = { reorderMode = !reorderMode }) {
+                    Icon(
+                        if (reorderMode) Icons.Default.Check else Icons.Default.SwapVert,
+                        stringResource(if (reorderMode) R.string.reorder_done else R.string.reorder_devices)
+                    )
+                }
+            }
             Box {
                 IconButton(enabled = uiState.webDavSettingsLoaded && !uiState.isSyncing, onClick = { showSyncMenu = true },
                     modifier = Modifier.semantics { contentDescription = syncDescription; if (uiState.isSyncing) stateDescription = syncingDescription }) {
@@ -74,7 +95,7 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
     }, bottomBar = {
         // Reserve the action's measured height rather than overlaying a profile's
         // credential warning. Text scaling and navigation insets remain intact.
-        if (uiState.devices.isNotEmpty()) Surface(color = MaterialTheme.colorScheme.surface) {
+        if (uiState.devices.isNotEmpty() && !reorderMode) Surface(color = MaterialTheme.colorScheme.surface) {
             Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(16.dp), contentAlignment = Alignment.Center) {
                 Row(Modifier.widthIn(max = 840.dp).fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                     ExtendedFloatingActionButton(onClick = onAddDevice,
@@ -90,7 +111,8 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
                 item {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(stringResource(R.string.profiles_title), style = MaterialTheme.typography.headlineMedium)
-                        if (!compact) Text(stringResource(R.string.profiles_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (reorderMode) Text(stringResource(R.string.reorder_hint), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary)
+                        else if (!compact) Text(stringResource(R.string.profiles_subtitle), style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         else if (uiState.devices.isNotEmpty()) Text(stringResource(R.string.profiles_count, uiState.devices.size),
                             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -113,7 +135,19 @@ fun DeviceListScreen(uiState: UiState, onAddDevice: () -> Unit, onDeviceClick: (
                     }
                 } else {
                     if (!compact) item { SectionHeading(stringResource(R.string.profiles_section), stringResource(R.string.profiles_count, uiState.devices.size)) }
-                    items(uiState.devices, key = { it.id }) { device -> DeviceCard(device, compact = compact) { onDeviceClick(device.id) } }
+                    itemsIndexed(uiState.devices, key = { _, item -> item.id }) { index, device ->
+                        DeviceCard(
+                            device = device,
+                            compact = compact,
+                            reorderMode = reorderMode,
+                            canMoveUp = index > 0,
+                            canMoveDown = index < uiState.devices.lastIndex,
+                            onMoveUp = { onMoveDevice(device.id, -1) },
+                            onMoveDown = { onMoveDevice(device.id, 1) },
+                            onPinTop = { onPinDeviceTop(device.id) },
+                            onClick = { if (!reorderMode) onDeviceClick(device.id) }
+                        )
+                    }
                 }
                 item { ProductNotice(stringResource(R.string.sync_hint)) }
             }
@@ -174,13 +208,32 @@ internal fun WebDavSettingsDialog(initialUrl: String, initialUsername: String, i
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun DeviceCard(device: Device, compact: Boolean = false, onClick: () -> Unit) {
+fun DeviceCard(
+    device: Device,
+    compact: Boolean = false,
+    reorderMode: Boolean = false,
+    canMoveUp: Boolean = false,
+    canMoveDown: Boolean = false,
+    onMoveUp: () -> Unit = {},
+    onMoveDown: () -> Unit = {},
+    onPinTop: () -> Unit = {},
+    onClick: () -> Unit
+) {
     Card(
         onClick = onClick,
+        enabled = !reorderMode,
         modifier = Modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.large,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+        border = BorderStroke(
+            1.dp,
+            if (reorderMode) MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)
+            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+        ),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            disabledContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            disabledContentColor = MaterialTheme.colorScheme.onSurface
+        )
     ) {
         Column(Modifier.padding(if (compact) 16.dp else 20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -189,7 +242,21 @@ fun DeviceCard(device: Device, compact: Boolean = false, onClick: () -> Unit) {
                     Box(contentAlignment = Alignment.Center) { Icon(Icons.Default.Computer, null, modifier = Modifier.size(if (compact) 20.dp else 24.dp)) }
                 }
                 Text(device.name, style = MaterialTheme.typography.titleMedium, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                if (reorderMode) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onPinTop, enabled = canMoveUp) {
+                            Icon(Icons.Default.VerticalAlignTop, stringResource(R.string.reorder_pin_top, device.name))
+                        }
+                        IconButton(onClick = onMoveUp, enabled = canMoveUp) {
+                            Icon(Icons.Default.KeyboardArrowUp, stringResource(R.string.reorder_move_up, device.name))
+                        }
+                        IconButton(onClick = onMoveDown, enabled = canMoveDown) {
+                            Icon(Icons.Default.KeyboardArrowDown, stringResource(R.string.reorder_move_down, device.name))
+                        }
+                    }
+                } else {
+                    Icon(Icons.AutoMirrored.Filled.ArrowForward, null, modifier = Modifier.size(20.dp), tint = MaterialTheme.colorScheme.primary)
+                }
             }
             // A port is an indivisible unit. Full identifiers remain in semantics
             // and on the detail/edit route; visual ellipsis never rewrites them.

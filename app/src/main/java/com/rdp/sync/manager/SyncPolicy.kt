@@ -9,6 +9,8 @@ object SyncPolicy {
         val result = linkedMapOf<String, Device>()
         remote.forEach { result[it.stableIdentity()] = it }
         local.forEach { result[it.stableIdentity()] = it }
-        return result.values.sortedWith(compareBy<Device> { it.name.lowercase() }.thenBy { it.host })
+        return result.values.sortedWith(
+            compareBy<Device> { it.sortOrder }.thenBy { it.name.lowercase() }.thenBy { it.host }
+        )
     }
 }

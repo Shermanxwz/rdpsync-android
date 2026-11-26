@@ -17,7 +17,8 @@ enum class ResolutionMode(val title: String) {
 data class SessionDisplaySettings(
     val quality: DisplayQuality = DisplayQuality.BALANCED,
     val resolution: ResolutionMode = ResolutionMode.FIT_WINDOW,
-    val adaptive: Boolean = false
+    val adaptive: Boolean = false,
+    val hardwareDecode: Boolean = false
 )
 
 data class DesktopSize(val width: Int, val height: Int)
