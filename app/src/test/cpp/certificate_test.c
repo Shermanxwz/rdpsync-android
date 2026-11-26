@@ -149,6 +149,9 @@ int main(void) {
     assert(reject_redirect(&instance) == TRUE && session.same_endpoint_redirect_allowed == 1);
     assert(verify_x509_certificate(&instance, (const BYTE*)pem1, size1, "disposable.example", 3389, VERIFY_CERT_FLAG_REDIRECT) == 2);
     assert(verify_x509_certificate(&instance, (const BYTE*)pem2, size2, "disposable.example", 3389, VERIFY_CERT_FLAG_REDIRECT) == 0);
+    assert(session.certificate_challenge && !strcmp(session.certificate_reason, "changed"));
+    session.certificate_challenge = 0;
+    session.same_endpoint_redirect_allowed = 0;
     context.common.context.settings = NULL;
     assert(authenticate_ex(&instance, NULL, NULL, NULL, AUTH_RDP) == FALSE);
     assert(configure_security(NULL));
