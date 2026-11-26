@@ -90,8 +90,8 @@ print(certs_out, end="")
 badging = subprocess.check_output([str(build_tools / "aapt"), "dump", "badging", str(apk)], text=True)
 package_line = next(line for line in badging.splitlines() if line.startswith("package:"))
 assert "name='com.rdp.sync'" in package_line, f"Unexpected official package identity: {package_line}"
-assert "versionCode='21'" in package_line and "versionName='1.3.4'" in package_line, \
-    f"Unexpected 1.3.4 version identity: {package_line}"
+assert "versionCode='22'" in package_line and "versionName='1.4.0'" in package_line, \
+    f"Unexpected 1.4.0 version identity: {package_line}"
 
 # Mandatory launcher icon & launchable HOME activity verification
 launchable_lines = [line for line in badging.splitlines() if line.startswith("launchable-activity:")]
